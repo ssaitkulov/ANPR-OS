@@ -7,6 +7,9 @@ images/
 __pycache__/
 *.log
 service.pid
+anpr.sqlite3
+anpr.sqlite3-shm
+anpr.sqlite3-wal
 subscribers.tmp
 .venv/
 # Local device notes may contain credentials or personal identifiers.

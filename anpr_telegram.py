@@ -36,6 +36,7 @@ from zoneinfo import ZoneInfo
 import requests
 from requests.auth import HTTPDigestAuth
 from event_images import prepare_event_images
+from storage import Store
 
 # ---------------------------------------------------------------------------
 # Конфиг (переменные окружения / .env)
@@ -83,6 +84,7 @@ TIMEZONE = cfg("TIMEZONE", "Europe/Moscow")
 TELEGRAM_BOT_TOKEN = cfg("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = cfg("TELEGRAM_CHAT_ID", "")
 STATE_FILE = Path(cfg("STATE_FILE", str(BASE_DIR / "anpr_state.json")))
+DB_FILE = Path(cfg("DB_FILE", str(BASE_DIR / "anpr.sqlite3")))
 IMAGE_DIR = Path(cfg("IMAGE_DIR", str(BASE_DIR / "images")))
 SEND_EACH_ENTRY = cfg("TELEGRAM_SEND_EACH_ENTRY", "true").lower() in ("1", "true", "yes")
 SAVE_PHOTOS = cfg("SAVE_PHOTOS", "false").lower() in ("1", "true", "yes")
@@ -98,6 +100,7 @@ RECONNECT_DELAY = int(cfg("RECONNECT_DELAY", "10"))
 HEARTBEAT = cfg("HEARTBEAT", "5")
 DEDUP_WINDOW_SECONDS = max(0.0, float(cfg('DEDUP_WINDOW_SECONDS', '15')))
 RUNTIME = {'camera_message': 'подключаюсь…', 'telegram_message': 'ожидаю первую отправку.', 'last_camera_data': ''}
+STORE = Store(DB_FILE)
 
 try:
     TZ = ZoneInfo(TIMEZONE)
@@ -198,6 +201,28 @@ def telegram_send(text: str, photo_path: Path | None = None, caption: str = "") 
     for cid in recs:
         ok = telegram_send_to(cid, text) or ok
     return ok
+
+
+def queue_missed_text(text: str, kind='text') -> None:
+    for cid in get_recipients():
+        STORE.enqueue_text(None, cid, text, kind)
+
+
+def flush_missed_messages() -> bool:
+    grouped = STORE.pending_grouped()
+    if not grouped or not TELEGRAM_BOT_TOKEN:
+        return False
+    delivered = False
+    for chat_id, rows in grouped.items():
+        body = '📥 <b>Пропущенные проезды</b>\n\n' + '\n'.join(f'• {row[3]}' for row in rows)
+        if telegram_send_to(chat_id, body):
+            for row in rows:
+                STORE.mark_sent(row[0])
+            delivered = True
+        else:
+            for row in rows:
+                STORE.mark_failed(row[0], 'Telegram недоступен')
+    return delivered
 
 
 def telegram_send_media_group(items: list) -> bool:
@@ -320,6 +345,8 @@ def send_entry_notification(rec: dict, images, dry_run: bool = False) -> None:
     RUNTIME['telegram_message'] += f' Отправка заняла {elapsed:.1f} с.'
     print(f'[delivery] started={rec.get("iso", "")} duration_seconds={elapsed:.3f} success={ok}', file=sys.stderr)
     print(f"[telegram] въезд отправлен: {ok}", file=sys.stderr)
+    if not ok:
+        queue_missed_text(caption, kind='entry_without_photo')
 
 
 # ---------------------------------------------------------------------------
@@ -579,16 +606,11 @@ def record_event(state: dict, ev: dict, image: bytes | None) -> dict | None:
     }
     day = today_str(now)
     state["days"].setdefault(day, []).append(rec)
+    STORE.add_event(key, rec)
     state["last_event_time"] = rec["iso"]
     state["seen"].append(key)
     state["seen"] = state["seen"][-5000:]  # не разрастаться
-    if SAVE_PHOTOS and image:
-        try:
-            IMAGE_DIR.mkdir(parents=True, exist_ok=True)
-            safe = re.sub(r"[^A-Za-z0-9]+", "_", plate or "unknown")
-            (IMAGE_DIR / f"{day}_{safe}_{rec['time'].replace(':','')}.jpg").write_bytes(image)
-        except Exception:
-            pass
+    # Photos are intentionally never written to disk.
     save_state(state)
     return rec
 
@@ -707,13 +729,7 @@ def record_backfill_event(state: dict, plate: str, when: datetime, speed: str = 
     day = when.strftime("%Y-%m-%d")
     state["days"].setdefault(day, []).append(rec)
     state["last_event_time"] = when.isoformat()
-    if SAVE_PHOTOS and image:
-        try:
-            IMAGE_DIR.mkdir(parents=True, exist_ok=True)
-            safe = re.sub(r"[^A-Za-z0-9]+", "_", plate or "unknown")
-            (IMAGE_DIR / f"{day}_{safe}_{rec['time'].replace(':', '')}.jpg").write_bytes(image)
-        except Exception:
-            pass
+    # Backfill has no image payload and stores metadata only.
     return rec
 
 
@@ -949,6 +965,8 @@ def consume_camera_stream(response, state, dry_run=False, image_wait=1.0, no_ima
             wait = image_wait if pending_images else no_image_wait
             if pending_events and time.monotonic() - last_activity >= wait:
                 flush()
+            if not dry_run:
+                flush_missed_messages()
             maybe_send_report(state, dry_run=dry_run)
     finally:
         chunks.close()

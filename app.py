@@ -42,7 +42,7 @@ def health():
 def status():
     day = M.today_str()
     events = state.get("days", {}).get(day, [])
-    return {"today": day, "entries": len(events),
+    return {"today": day, "entries": len(events), **M.STORE.stats(),
             "unique_plates": len({e.get("plate") for e in events}),
             "subscribers": len(M.load_subscribers()),
             "last_event_time": state.get("last_event_time", ""),
