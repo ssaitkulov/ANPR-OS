@@ -1,0 +1,14 @@
+.env
+.env.tmp
+anpr_state.json
+anpr_state.tmp
+subscribers.json
+images/
+__pycache__/
+*.log
+service.pid
+subscribers.tmp
+.venv/
+# Local device notes may contain credentials or personal identifiers.
+PROJECT_CONTEXT.md
+Dahua-API-Python-Integration.SKILL.md
