@@ -15,6 +15,7 @@ from requests.auth import HTTPDigestAuth
 
 BASE = Path(__file__).resolve().parent
 ENV = BASE / '.env'
+DIRECTIONS = {'Оба направления': '', 'Только въезд': 'Approach', 'Только выезд': 'Leave'}
 FIELDS = [
     ('CAMERA_NAME', 'Название камеры', 'Главные ворота'),
     ('CAMERA_URL', 'Адрес камеры', 'http://192.168.100.249/'),
@@ -75,6 +76,8 @@ def validate(values):
     except (ZoneInfoNotFoundError, ValueError):
         raise ValueError('Неизвестный часовой пояс. Пример: Asia/Tashkent. Установите зависимости.')
     result = dict(values)
+    if 'DIRECTION' in result and result['DIRECTION'] not in DIRECTIONS.values():
+        raise ValueError('Выберите направление из списка.')
     result.pop('CAMERA_URL', None)
     result.update(DAHUA_HOST=host, DAHUA_PORT=port, ALLOWED_CHAT_IDS=','.join(dict.fromkeys(allowed)))
     return result
@@ -131,8 +134,8 @@ class SettingsWindow:
         self.root = root
         self.results = queue.Queue()
         root.title('ANPR · Настройки')
-        root.geometry('760x660')
-        root.minsize(720, 640)
+        root.geometry('760x710')
+        root.minsize(720, 700)
         panel = ttk.Frame(root, padding=24)
         panel.pack(fill='both', expand=True)
         panel.columnconfigure(1, weight=1)
@@ -147,9 +150,12 @@ class SettingsWindow:
             self.variables[key] = var
             secret = key in ('DAHUA_PASSWORD', 'TELEGRAM_BOT_TOKEN')
             ttk.Entry(panel, textvariable=var, show='•' if secret else '').grid(row=row, column=1, sticky='ew', pady=7)
-        ttk.Label(panel, text='Для личного чата: укажите свой ID в обоих полях и напишите боту /start.\nДля группы: добавьте её ID в оба поля. Команды будут доступны участникам этой группы.', wraplength=690).grid(row=10, column=0, columnspan=2, sticky='w', pady=(12, 8))
+        ttk.Label(panel, text='Какие проезды присылать').grid(row=10, column=0, sticky='w', pady=7)
+        self.direction = tk.StringVar(value=next((label for label, value in DIRECTIONS.items() if value == current.get('DIRECTION', 'Approach')), 'Оба направления'))
+        ttk.Combobox(panel, textvariable=self.direction, values=list(DIRECTIONS), state='readonly').grid(row=10, column=1, sticky='ew', pady=7)
+        ttk.Label(panel, text='Для личного чата: укажите свой ID в обоих полях и напишите боту /start.\nДля группы: добавьте её ID в оба поля. Команды будут доступны участникам этой группы.', wraplength=690).grid(row=11, column=0, columnspan=2, sticky='w', pady=(12, 8))
         buttons = ttk.Frame(panel)
-        buttons.grid(row=11, column=0, columnspan=2, sticky='w', pady=10)
+        buttons.grid(row=12, column=0, columnspan=2, sticky='w', pady=10)
         self.check_buttons = []
         for label, function in [('Проверить камеру', check_camera), ('Проверить бота', check_bot)]:
             button = ttk.Button(buttons, text=label, command=lambda f=function: self.check(f))
@@ -157,12 +163,12 @@ class SettingsWindow:
             self.check_buttons.append(button)
         ttk.Button(buttons, text='Сохранить', command=self.save).pack(side='left')
         self.status = tk.StringVar(value='Проверки не отправляют сообщения и не запускают сбор событий.')
-        ttk.Label(panel, textvariable=self.status, wraplength=690).grid(row=12, column=0, columnspan=2, sticky='w', pady=10)
-        ttk.Label(panel, text='Настройки сохраняются локально в .env (без шифрования).\nПосле изменения настроек перезапустите скрипт.', wraplength=690).grid(row=13, column=0, columnspan=2, sticky='w', pady=8)
+        ttk.Label(panel, textvariable=self.status, wraplength=690).grid(row=13, column=0, columnspan=2, sticky='w', pady=10)
+        ttk.Label(panel, text='Настройки сохраняются локально в .env (без шифрования).\nПосле сохранения нажмите «Перезапустить» в окне управления.', wraplength=690).grid(row=14, column=0, columnspan=2, sticky='w', pady=8)
         root.after(100, self.poll)
 
     def values(self):
-        return {key: var.get().strip() for key, var in self.variables.items()}
+        return {**{key: var.get().strip() for key, var in self.variables.items()}, 'DIRECTION': DIRECTIONS[self.direction.get()]}
 
     def save(self):
         try:

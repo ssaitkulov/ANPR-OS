@@ -244,7 +244,7 @@ def build_entry_caption(rec: dict) -> str:
     dir_h = " · Приближается" if direction and is_approach_value(str(direction)) else ""
     conf = rec.get("confidence", "")
     lines = [
-        f"🚗 <b>ВЪЕЗД · {plate}</b>",
+        f"🚗 <b>{direction_label(direction)} · {plate}</b>",
         f"🕐 {_esc(date)} {_esc(rec.get('time', ''))} · {_esc(TIMEZONE)}",
     ]
     if conf not in ("", None):
@@ -507,22 +507,31 @@ def is_countable(ev: dict) -> tuple:
         lanes = {x.strip() for x in ALLOWED_LANES.split(",") if x.strip()}
         if ev.get("Lane", "") not in lanes:
             return False, ""
-    # Направление: Approach (Приближается) по умолчанию. Если поля нет в событии — не фильтруем.
-    if DIRECTION and DIRECTION.lower() in ("approach", "приближается"):
-        dval, dkey = get_direction_value(ev)
-        if dval:
-            if not is_approach_value(dval):
-                return False, ""
-    elif DIRECTION and DIRECTION.lower() in ("leave", "удаляется"):
-        dval, dkey = get_direction_value(ev)
-        if dval and is_approach_value(dval):
-            return False, ""
+    if not direction_allowed(get_direction_value(ev)[0]):
+        return False, ""
     gid = ev.get("GroupID", "")
     idx = ev.get("IndexInGroup", "")
     plate = plate_of(ev)
     # GroupID alone is not unique on this firmware.
     key = f"{gid}:{idx}:{plate}:{ev.get('Lane','')}"
     return True, key
+
+
+def direction_kind(value):
+    value = str(value or '').strip().lower()
+    if value in APPROACH_VALUES:
+        return 'Approach'
+    if value in LEAVE_VALUES:
+        return 'Leave'
+    return ''
+
+
+def direction_allowed(value):
+    return not DIRECTION or direction_kind(value).lower() == DIRECTION.lower()
+
+
+def direction_label(value):
+    return {'Approach': 'ВЪЕЗД', 'Leave': 'ВЫЕЗД', '': 'ПРОЕЗД'}[direction_kind(value)]
 
 
 def record_event(state: dict, ev: dict, image: bytes | None) -> dict | None:
@@ -596,7 +605,7 @@ def build_report(state: dict, day: str | None = None) -> str:
         f"🚗 <b>ANPR отчёт — {day}</b>",
         f"Камера: {DAHUA_HOST} (канал {DAHUA_CHANNEL})",
         f"━━━━━━━━━━━━━━━",
-        f"Въездов за день: <b>{total}</b>",
+        f"Проездов за день: <b>{total}</b>",
         f"Уникальных номеров: <b>{unique}</b>",
         f"Средняя скорость: {avg_speed}",
         f"━━━━━━━━━━━━━━━",
@@ -608,7 +617,7 @@ def build_report(state: dict, day: str | None = None) -> str:
         _t = "" if _t in ("", "Unknown") else f" · {_t}"
         lines.append(f"• {e.get('time','')} — {e.get('plate','—')}{_c}{_t}")
     if not events:
-        lines.append("• въездов не зафиксировано")
+        lines.append("• проездов не зафиксировано")
     return "\n".join(lines)
 
 
@@ -664,11 +673,14 @@ def _timedelta_minutes(m: int):
     return timedelta(minutes=m)
 
 
-def is_duplicate_backfill(state: dict, plate: str, when: datetime) -> bool:
+def is_duplicate_backfill(state: dict, plate: str, when: datetime, direction: str = '') -> bool:
     """Тот же номер ±120с от уже записанного события того же дня — дубль."""
     day = when.strftime("%Y-%m-%d")
     for rec in state.get("days", {}).get(day, []):
         if rec.get("plate") != plate:
+            continue
+        old_direction, new_direction = direction_kind(rec.get('direction')), direction_kind(direction)
+        if old_direction and new_direction and old_direction != new_direction:
             continue
         iso = rec.get("iso", "")
         if iso:
@@ -687,7 +699,7 @@ def is_duplicate_backfill(state: dict, plate: str, when: datetime) -> bool:
 
 def record_backfill_event(state: dict, plate: str, when: datetime, speed: str = "", image: bytes | None = None,
                         lane: str = "", direction: str = "", color: str = "", category: str = "") -> dict | None:
-    if is_duplicate_backfill(state, plate, when):
+    if is_duplicate_backfill(state, plate, when, direction):
         return None
     rec = {"plate": plate or "—", "time": when.strftime("%H:%M:%S"), "iso": when.isoformat(),
            "lane": lane, "speed": speed, "type": category, "color": color,
@@ -798,6 +810,9 @@ def backfill_once(sess, state: dict, dry_run: bool = False) -> int:
             state["last_rec_no"] = rec_no
             continue
         when = archive_time(ts)
+        if not direction_allowed(r.get('JunctionDirection', '')):
+            state['last_rec_no'] = rec_no
+            continue
         if not last_no and start and when < start:
             state["last_rec_no"] = rec_no
             continue  # первый запуск — только за lookback-окно

@@ -5,6 +5,11 @@ import anpr_telegram as bot
 
 
 class DuplicateTests(unittest.TestCase):
+    def setUp(self):
+        direction = patch.object(bot, 'DIRECTION', '')
+        direction.start()
+        self.addCleanup(direction.stop)
+
     def test_reused_camera_id_does_not_block_later_passage(self):
         event = {'EventBaseInfo.Code': 'TrafficJunction', 'GroupID': '1048576',
                  'IndexInGroup': '1', 'TrafficCar.PlateNumber': '1', 'Lane': '1'}
