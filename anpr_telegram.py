@@ -76,6 +76,7 @@ DAHUA_PORT = cfg("DAHUA_PORT", "80")
 DAHUA_USERNAME = cfg("DAHUA_USERNAME", "admin")
 DAHUA_PASSWORD = cfg("DAHUA_PASSWORD", "")
 DAHUA_CHANNEL = cfg("DAHUA_CHANNEL", "1")          # 1 = первый канал
+CAMERA_NAME = cfg("CAMERA_NAME", "Fayz kırısh")
 ALLOWED_LANES = cfg("ALLOWED_LANES", "")           # пусто = все; напр. "0,1" (в событиях Lane с 0!)
 DIRECTION = cfg("DIRECTION", "Approach")        # пусто = все; Approach=Приближается, Leave=Удаляется
 DEBUG_RAW = cfg("DEBUG_RAW", "false").lower() in ("1", "true", "yes")
@@ -90,6 +91,7 @@ SEND_EACH_ENTRY = cfg("TELEGRAM_SEND_EACH_ENTRY", "true").lower() in ("1", "true
 SAVE_PHOTOS = cfg("SAVE_PHOTOS", "false").lower() in ("1", "true", "yes")
 BACKFILL_ENABLED = cfg("BACKFILL_ENABLED", "true").lower() in ("1", "true", "yes")
 BACKFILL_TIMESTAMP_MODE = cfg("BACKFILL_TIMESTAMP_MODE", "utc")
+INCLUDE_MANUAL_SNAPSHOTS = cfg("INCLUDE_MANUAL_SNAPSHOTS", "true").lower() in ("1", "true", "yes")
 BACKFILL_LOOKBACK_MINUTES = int(cfg("BACKFILL_LOOKBACK_MINUTES", "180"))
 BACKFILL_MAX_MINUTES = int(cfg("BACKFILL_MAX_MINUTES", "1440"))
 BACKFILL_SEND_PHOTOS = cfg("BACKFILL_SEND_PHOTOS", "false").lower() in ("1", "true", "yes")
@@ -214,7 +216,9 @@ def flush_missed_messages() -> bool:
         return False
     delivered = False
     for chat_id, rows in grouped.items():
-        body = '📥 <b>Пропущенные проезды</b>\n\n' + '\n'.join(f'• {row[3]}' for row in rows)
+        body = ('📥 <b>Telegram был недоступен. Накопилось проездов: '
+                f'{len(rows)}</b>\n\n' + '\n'.join(f'• {row[3]}' for row in rows) +
+                '\n\nФотографии этих проездов недоступны: в момент сбоя они не сохранялись.')
         if telegram_send_to(chat_id, body):
             for row in rows:
                 STORE.mark_sent(row[0])
@@ -268,25 +272,16 @@ def build_entry_caption(rec: dict) -> str:
     direction = rec.get("direction", "")
     dir_h = " · Приближается" if direction and is_approach_value(str(direction)) else ""
     conf = rec.get("confidence", "")
+    direction_text = {'Approach': 'ENTRY', 'Leave': 'EXIT', '': 'UNKNOWN'}[direction_kind(direction)]
     lines = [
-        f"🚗 <b>{direction_label(direction)} · {plate}</b>",
-        f"🕐 {_esc(date)} {_esc(rec.get('time', ''))} · {_esc(TIMEZONE)}",
+        f"🚧 <b>{_esc(CAMERA_NAME)}</b>",
+        f"🔢 <b>{plate}</b>",
+        f"🕐 {_esc(date)} {_esc(rec.get('time', ''))}",
+        f"↔️ {direction_text}",
     ]
-    if conf not in ("", None):
-        c = str(conf).strip()
-        if c.replace(".", "", 1).replace("-", "", 1).isdigit():
-            num = float(c)
-            conf_h = f"{num:.0f}%" if num <= 100 else f"{num:.0f}"
-        else:
-            conf_h = _esc(c)
-        lines.append(f"🎯 Уверенность: {_esc(conf_h)}")
-    else:
-        lines.append("🎯 Уверенность: —")
-    if rec.get("speed") not in ("", None):
-        lines.append(f"🚙 {_esc(rec.get('speed'))} км/ч")
-    extra = [_esc(x) for x in (rec.get("color", ""), rec.get("type", "")) if x]
-    if extra:
-        lines.append("🎨 " + " · ".join(extra))
+    color = rec.get("color", "")
+    if color not in ("", "Unknown"):
+        lines.append(f"🎨 {_esc(color)}")
     return "\n".join(lines)
 
 
@@ -378,14 +373,14 @@ def poll_telegram_updates(state: dict, stop_event=None) -> None:
                     if chat_id not in subs:
                         subs.append(chat_id)
                         save_subscribers(subs)
-                    telegram_send_to(chat_id, "✅ Подписан. Команды: /report — отчёт дня, /stop — отписка.")
+                    telegram_send_to(chat_id, "✅ Уведомления включены. Я буду присылать новые проезды в этот чат.\n\n/report — отчёт за сегодня\n/stop — выключить уведомления")
                 elif cmd == "/stop":
                     save_subscribers([x for x in load_subscribers() if x != chat_id])
-                    telegram_send_to(chat_id, "Отписан.")
+                    telegram_send_to(chat_id, "🔕 Уведомления выключены. Чтобы снова получать сообщения, отправьте /start")
                 elif cmd == "/report":
                     telegram_send_to(chat_id, build_report(state))
                 elif cmd.startswith("/"):
-                    telegram_send_to(chat_id, "Команды: /start /stop /report")
+                    telegram_send_to(chat_id, "Я понимаю три команды:\n/start — включить уведомления\n/stop — выключить уведомления\n/report — получить отчёт за сегодня")
         except Exception as e:  # pragma: no cover
             print(f"[telegram] getUpdates: {e}", file=sys.stderr)
             if stop_event is not None:
@@ -558,7 +553,7 @@ def direction_allowed(value):
 
 
 def direction_label(value):
-    return {'Approach': 'ВЪЕЗД', 'Leave': 'ВЫЕЗД', '': 'ПРОЕЗД'}[direction_kind(value)]
+    return {'Approach': 'Въезд', 'Leave': 'Выезд', '': 'не определено'}[direction_kind(value)]
 
 
 def record_event(state: dict, ev: dict, image: bytes | None) -> dict | None:
@@ -624,14 +619,12 @@ def build_report(state: dict, day: str | None = None) -> str:
     speeds = [float(e["speed"]) for e in events if str(e.get("speed", "")).replace(".", "").isdigit()]
     avg_speed = f"{sum(speeds)/len(speeds):.0f} км/ч" if speeds else "—"
     lines = [
-        f"🚗 <b>ANPR отчёт — {day}</b>",
-        f"Камера: {DAHUA_HOST} (канал {DAHUA_CHANNEL})",
-        f"━━━━━━━━━━━━━━━",
-        f"Проездов за день: <b>{total}</b>",
-        f"Уникальных номеров: <b>{unique}</b>",
-        f"Средняя скорость: {avg_speed}",
-        f"━━━━━━━━━━━━━━━",
-        "Список (время — номер, авто):",
+        f"📊 <b>Проезды за {day}</b>",
+        f"Всего проездов: <b>{total}</b>",
+        f"Разных номеров: <b>{unique}</b>",
+        f"Средняя скорость: <b>{avg_speed}</b>",
+        "",
+        "Номера и время:",
     ]
     for e in events:
         _c, _t = e.get("color", ""), e.get("type", "")
@@ -746,9 +739,9 @@ def _dir_human(direction) -> str:
 
 
 def build_backfill_text(records: list, start, end) -> str:
-    lines = [f"📥 <b>Добор пропущенных: {len(records)}</b>",
-             f"Период: {start.strftime('%d.%m %H:%M')} — {end.strftime('%d.%m %H:%M')} ({TIMEZONE})",
-             "━━━━━━━━━━━━━━━"]
+    lines = [f"📥 <b>Telegram был недоступен. Накопилось проездов: {len(records)}</b>",
+             f"Период: {start.strftime('%d.%m %H:%M')} — {end.strftime('%d.%m %H:%M')}",
+             ""]
     for rec in sorted(records, key=lambda r: r.get("iso", "")):
         day = (rec.get("iso") or "")[:10]
         _c, _t = rec.get("color", ""), rec.get("type", "")
@@ -756,6 +749,8 @@ def build_backfill_text(records: list, start, end) -> str:
         _t = "" if _t in ("", "Unknown") else f" · {_t}"
         dir_h = _dir_human(rec.get("direction", ""))
         lines.append(f"• {day} {rec.get('time', '')} — {rec.get('plate', '—')}{_c}{_t}{dir_h}")
+    lines.append("")
+    lines.append("Фотографии этих проездов недоступны: в момент сбоя они не сохранялись.")
     return "\n".join(lines)
 
 
@@ -819,9 +814,9 @@ def backfill_once(sess, state: dict, dry_run: bool = False) -> int:
         if rec_no <= last_no:
             continue
         source = (r.get("SnapSource", "") or "").lower()
-        if "force" in source or "manual" in source:
+        if ("force" in source or "manual" in source) and not INCLUDE_MANUAL_SNAPSHOTS:
             state["last_rec_no"] = rec_no
-            continue  # ручные тестовые снимки — не въезды
+            continue
         if ts <= 0:
             state["last_rec_no"] = rec_no
             continue

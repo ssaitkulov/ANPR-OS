@@ -13,5 +13,5 @@ class DirectionTests(unittest.TestCase):
 
     def test_caption_and_settings(self):
         self.assertEqual(set(DIRECTIONS.values()), {'', 'Approach', 'Leave'})
-        self.assertIn('ВЫЕЗД', bot.build_entry_caption({'plate':'TEST', 'direction':'Reverse'}))
-        self.assertIn('ПРОЕЗД', bot.build_entry_caption({'plate':'TEST', 'direction':'Unknown'}))
+        self.assertIn('↔️ EXIT', bot.build_entry_caption({'plate':'TEST', 'direction':'Reverse'}))
+        self.assertIn('↔️ UNKNOWN', bot.build_entry_caption({'plate':'TEST', 'direction':'Unknown'}))

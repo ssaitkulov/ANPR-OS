@@ -69,6 +69,16 @@ class OutboxTests(unittest.TestCase):
         self.assertIn('XYZ · 20:01', body)
         self.assertEqual(fake.sent, [1, 2])
 
+    def test_missed_list_explains_why_photos_are_missing(self):
+        class FakeStore:
+            def pending_grouped(self):
+                return {'42': [(1, None, '42', 'ABC · 20:00', 'entry_without_photo', 0)]}
+            def mark_sent(self, row_id): pass
+            def mark_failed(self, row_id, error): pass
+        with patch.object(bot, 'STORE', FakeStore()), patch.object(bot, 'TELEGRAM_BOT_TOKEN', '123:token'), patch.object(bot, 'telegram_send_to', return_value=True) as send:
+            bot.flush_missed_messages()
+        self.assertIn('Фотографии этих проездов недоступны', send.call_args.args[1])
+
 
 if __name__ == '__main__':
     unittest.main()

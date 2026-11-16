@@ -140,7 +140,7 @@ class SettingsWindow:
         panel.pack(fill='both', expand=True)
         panel.columnconfigure(1, weight=1)
         ttk.Label(panel, text='Камера → Telegram', font=('Segoe UI', 20, 'bold')).grid(row=0, column=0, columnspan=2, sticky='w')
-        ttk.Label(panel, text='Настройте одну камеру и получателей уведомлений.').grid(row=1, column=0, columnspan=2, sticky='w', pady=(6, 20))
+        ttk.Label(panel, text='Укажите камеру и куда присылать уведомления.').grid(row=1, column=0, columnspan=2, sticky='w', pady=(6, 20))
         current = read_settings()
         current['CAMERA_URL'] = f"http://{current.get('DAHUA_HOST', '192.168.100.249')}:{current.get('DAHUA_PORT', '80')}/"
         self.variables = {}
@@ -162,7 +162,7 @@ class SettingsWindow:
             button.pack(side='left', padx=(0, 10))
             self.check_buttons.append(button)
         ttk.Button(buttons, text='Сохранить', command=self.save).pack(side='left')
-        self.status = tk.StringVar(value='Проверки не отправляют сообщения и не запускают сбор событий.')
+        self.status = tk.StringVar(value='Проверка только показывает результат и не запускает сбор.')
         ttk.Label(panel, textvariable=self.status, wraplength=690).grid(row=13, column=0, columnspan=2, sticky='w', pady=10)
         ttk.Label(panel, text='Настройки сохраняются локально в .env (без шифрования).\nПосле сохранения нажмите «Перезапустить» в окне управления.', wraplength=690).grid(row=14, column=0, columnspan=2, sticky='w', pady=8)
         root.after(100, self.poll)
