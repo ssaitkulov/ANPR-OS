@@ -35,6 +35,7 @@ from zoneinfo import ZoneInfo
 
 import requests
 from requests.auth import HTTPDigestAuth
+from event_images import prepare_event_images
 
 # ---------------------------------------------------------------------------
 # Конфиг (переменные окружения / .env)
@@ -212,7 +213,7 @@ def telegram_send_media_group(items: list) -> bool:
         try:
             files, data = [], []
             for idx, (img, cap) in enumerate(items):
-                files.append(("photo", (f"{idx}.jpg", io.BytesIO(img), "image/jpeg")))
+                files.append((str(idx), (f"{idx}.jpg", io.BytesIO(img), "image/jpeg")))
                 first = {"caption": cap[:1024], "parse_mode": "HTML"} if idx == 0 else {}
                 data.append({"type": "photo", "media": f"attach://{idx}", **first})
             r = requests.post(f"{_tg_base()}/sendMediaGroup",
@@ -851,7 +852,10 @@ def flush_pending_events(state: dict, events: dict, images: list, dry_run: bool 
             print(f"[event] въезд: {rec['plate']} lane={rec['lane']} "
                   f"speed={rec['speed']} time={rec['time']} dir={rec.get('direction','')} photos={len(images)}",
                   file=sys.stderr)
-            send_entry_notification(rec, images, dry_run=dry_run)
+            prepared = prepare_event_images(ev, images)
+            if len(prepared) < 2:
+                print('[images] Вырезка номера недоступна: камера не передала подходящие координаты или второе фото.', file=sys.stderr)
+            send_entry_notification(rec, prepared, dry_run=dry_run)
 
 
 def stream_chunks_with_ticks(response, tick_seconds=0.25):
