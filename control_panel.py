@@ -53,12 +53,12 @@ class Panel:
         ttk.Label(page, textvariable=self.last, style='Last.TLabel').pack(anchor='w', pady=(18, 0))
 
         actions = ttk.Frame(page, style='Page.TFrame'); actions.pack(anchor='w', pady=(26, 0))
-        self.main_button = self._button(actions, 'Запустить сбор', self.toggle, self.RED); self.main_button.pack(side='left')
+        self.main_button = self._button(actions, 'Включить систему', self.toggle, self.RED); self.main_button.pack(side='left')
         self._button(actions, '⚙  Настройки', self.settings, self.CARD).pack(side='left', padx=(10, 0))
-        more = tk.Menubutton(actions, text='•••', bg=self.CARD, fg=self.TEXT, activebackground='#252a30', activeforeground=self.TEXT, relief='flat', bd=0, padx=20, pady=10, font=('Segoe UI', 10)); menu = tk.Menu(more, tearoff=False, bg=self.CARD, fg=self.TEXT, activebackground='#2d343d', activeforeground=self.TEXT); menu.add_command(label='Перезапустить сбор', command=self.restart); menu.add_command(label='Открыть журнал', command=self.open_log); more['menu'] = menu; more.pack(side='left', padx=(10, 0))
+        more = tk.Menubutton(actions, text='•••', bg=self.CARD, fg=self.TEXT, activebackground='#252a30', activeforeground=self.TEXT, relief='flat', bd=0, padx=20, pady=10, font=('Segoe UI', 10)); menu = tk.Menu(more, tearoff=False, bg=self.CARD, fg=self.TEXT, activebackground='#2d343d', activeforeground=self.TEXT); menu.add_command(label='Перезапустить систему', command=self.restart); menu.add_command(label='Открыть журнал', command=self.open_log); more['menu'] = menu; more.pack(side='left', padx=(10, 0))
 
         self.message = tk.StringVar(value=''); ttk.Label(page, textvariable=self.message, style='Message.TLabel', wraplength=530).pack(anchor='w', pady=(18, 0))
-        ttk.Label(page, text='Окно можно закрыть — сбор продолжится. После перезагрузки откройте run.bat.', style='Help.TLabel', wraplength=530).pack(anchor='w', pady=(14, 0))
+        ttk.Label(page, text='Окно можно закрыть — система продолжит работать. После перезагрузки откройте run.bat.', style='Help.TLabel', wraplength=530).pack(anchor='w', pady=(14, 0))
         root.after(100, self.process); self.work(service.start); root.after(1000, self.refresh)
 
     def _styles(self):
@@ -107,9 +107,9 @@ class Panel:
                 kind, data = self.queue.get_nowait()
                 if kind == 'message': self.message.set(data); self.busy = False; self.main_button.configure(state='normal')
                 elif kind == 'offline':
-                    self.running = False; self.status.set('Сбор остановлен'); self.hint.set('Нажмите «Запустить сбор», чтобы начать.'); self.main_button.configure(text='Запустить сбор', bg=self.GREEN); self.camera[0].set('Нет данных'); self.camera[1].set('Программа не подключена'); self.telegram[0].set('Нет данных'); self.telegram[1].set('Программа не подключена'); self.last.set('')
+                    self.running = False; self.status.set('Система выключена'); self.hint.set('Нажмите «Включить систему», чтобы начать.'); self.main_button.configure(text='Включить систему', bg=self.GREEN); self.camera[0].set('Нет данных'); self.camera[1].set('Программа не подключена'); self.telegram[0].set('Нет данных'); self.telegram[1].set('Программа не подключена'); self.last.set('')
                 else:
-                    self.running = data.get('status') == 'ok'; self.status.set('Сбор работает' if self.running else 'Сбор остановлен'); self.hint.set('Новые машины принимаются.' if self.running else 'Нажмите «Запустить сбор», чтобы начать.'); self.main_button.configure(text='Остановить сбор' if self.running else 'Запустить сбор', bg=self.RED if self.running else self.GREEN); self.camera[0].set('Подключена' if 'подключена' in data['camera_message'] else 'Проверяю…'); self.camera[1].set('Жду распознавание' if self.running else 'Нет связи'); self.telegram[0].set('Готов' if 'доставлено' in data['telegram_message'] else 'Готов к отправке'); self.telegram[1].set('Сообщение придёт после проезда'); self.last.set('Последний сигнал: ' + (data.get('last_camera_data') or 'пока нет'))
+                    self.running = data.get('status') == 'ok'; self.status.set('Система работает' if self.running else 'Система остановлена'); self.hint.set('Камера готова — новые машины будут отправляться в Telegram.' if self.running else 'Нажмите «Включить систему», чтобы начать.'); self.main_button.configure(text='Выключить систему' if self.running else 'Включить систему', bg=self.RED if self.running else self.GREEN); self.camera[0].set('Подключена' if 'подключена' in data['camera_message'] else 'Проверяю…'); self.camera[1].set('Ждём новую машину'); self.telegram[0].set('Готов' if 'доставлено' in data['telegram_message'] else 'Готов к работе'); self.telegram[1].set('Сообщение придёт после проезда'); self.last.set('Последний сигнал: ' + (data.get('last_camera_data') or 'пока нет'))
         except queue.Empty: pass
         self.root.after(100, self.process)
 

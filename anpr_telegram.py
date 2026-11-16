@@ -264,9 +264,21 @@ def _esc(s) -> str:
     return _html.escape(str(s), quote=False)
 
 
+def display_plate(value) -> str:
+    """Format Uzbek plate text for people, keeping unknown formats unchanged."""
+    raw = re.sub(r'\s+', '', str(value or '')).upper()
+    match = re.fullmatch(r'(\d{2})(\d{4})([A-Z]{2})', raw)
+    if match:
+        return f'{match.group(1)} {match.group(2)} {match.group(3)}'
+    match = re.fullmatch(r'(\d{2})([A-Z])(\d{3})([A-Z]{2})', raw)
+    if match:
+        return f'{match.group(1)} {match.group(2)} {match.group(3)} {match.group(4)}'
+    return str(value or '—')
+
+
 def build_entry_caption(rec: dict) -> str:
     """Компактный HTML-текст для альбома (caption первого фото, макс 1024 символа)."""
-    plate = _esc(rec.get("plate", "—"))
+    plate = _esc(display_plate(rec.get("plate", "—")))
     iso = rec.get("iso", "")
     date = iso[:10] if len(iso) >= 10 else ""
     direction = rec.get("direction", "")
@@ -630,7 +642,7 @@ def build_report(state: dict, day: str | None = None) -> str:
         _c, _t = e.get("color", ""), e.get("type", "")
         _c = "" if _c in ("", "Unknown") else f" · {_c}"
         _t = "" if _t in ("", "Unknown") else f" · {_t}"
-        lines.append(f"• {e.get('time','')} — {e.get('plate','—')}{_c}{_t}")
+        lines.append(f"• {e.get('time','')} — {display_plate(e.get('plate','—'))}{_c}{_t}")
     if not events:
         lines.append("• проездов не зафиксировано")
     return "\n".join(lines)
@@ -748,7 +760,7 @@ def build_backfill_text(records: list, start, end) -> str:
         _c = "" if _c in ("", "Unknown") else f" · {_c}"
         _t = "" if _t in ("", "Unknown") else f" · {_t}"
         dir_h = _dir_human(rec.get("direction", ""))
-        lines.append(f"• {day} {rec.get('time', '')} — {rec.get('plate', '—')}{_c}{_t}{dir_h}")
+        lines.append(f"• {day} {rec.get('time', '')} — {display_plate(rec.get('plate', '—'))}{_c}{_t}{dir_h}")
     lines.append("")
     lines.append("Фотографии этих проездов недоступны: в момент сбоя они не сохранялись.")
     return "\n".join(lines)
