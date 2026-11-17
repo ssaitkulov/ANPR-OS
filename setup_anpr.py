@@ -6,7 +6,7 @@ import queue
 import re
 import threading
 import tkinter as tk
-from tkinter import messagebox
+from tkinter import messagebox, filedialog
 import customtkinter as ctk
 from PIL import Image
 from urllib.parse import urlsplit
@@ -29,6 +29,7 @@ FIELDS = [
     ('TELEGRAM_CHAT_ID', 'Чат для уведомлений (ID)', ''),
     ('ALLOWED_CHAT_IDS', 'Разрешённые чаты (ID через запятую)', ''),
     ('TIMEZONE', 'Часовой пояс', 'Asia/Tashkent'),
+    ('IMAGE_DIR', 'Папка фотографий', str(BASE / 'images')),
 ]
 
 
@@ -218,9 +219,19 @@ class SettingsWindow:
         ctk.CTkOptionMenu(general, variable=self.direction, values=list(DIRECTIONS), height=32,
                           fg_color='#26364c', button_color='#334b6b', button_hover_color='#416087').grid(
                               row=1, column=1, sticky='ew', padx=(0, 12), pady=5)
+        ctk.CTkLabel(general, text='Папка фотографий', text_color=self.TEXT, anchor='w',
+                     font=('Segoe UI', 12)).grid(row=2, column=0, sticky='w', padx=(12, 16), pady=(14, 5))
+        folder_row = ctk.CTkFrame(general, fg_color='transparent')
+        folder_row.grid(row=2, column=1, sticky='ew', padx=(0, 12), pady=(14, 5))
+        ctk.CTkButton(folder_row, text='Обзор…', width=82, height=32, command=self.choose_photo_folder).pack(side='right', padx=(8, 0))
+        ctk.CTkEntry(folder_row, textvariable=self.variables['IMAGE_DIR'], height=32, fg_color='#111b29',
+                     border_color='#3a4a60').pack(side='left', fill='x', expand=True)
+        ctk.CTkLabel(general, text='Фото сохраняются файлами. Новая папка применяется после перезапуска.',
+                     text_color=self.MUTED, anchor='w', justify='left', wraplength=500,
+                     font=('Segoe UI', 11)).grid(row=3, column=0, columnspan=2, sticky='ew', padx=12, pady=(8, 0))
         ctk.CTkLabel(general, text='Настройки хранятся в .env без шифрования.',
                      text_color=self.MUTED, anchor='w', font=('Segoe UI', 11)).grid(
-                         row=2, column=0, columnspan=2, sticky='ew', padx=12, pady=(12, 0))
+                         row=4, column=0, columnspan=2, sticky='ew', padx=12, pady=(12, 0))
         try:
             autostart_enabled = preferences.get_autostart()
         except OSError:
@@ -236,6 +247,12 @@ class SettingsWindow:
                      text_color=self.MUTED, anchor='w', justify='left', wraplength=490,
                      font=('Segoe UI', 11)).grid(row=2, column=0, columnspan=2, sticky='ew', padx=12, pady=(4, 12))
         root.after(100, self.poll)
+
+    def choose_photo_folder(self):
+        selected = filedialog.askdirectory(parent=self.root.winfo_toplevel(), title='Папка фотографий',
+                                           initialdir=self.variables['IMAGE_DIR'].get() or str(BASE))
+        if selected:
+            self.variables['IMAGE_DIR'].set(selected)
 
     def _field(self, parent, row, label, key, secret=False):
         ctk.CTkLabel(parent, text=label, text_color=self.TEXT, anchor='w',

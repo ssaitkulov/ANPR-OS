@@ -18,7 +18,8 @@ class PhotoTests(unittest.TestCase):
         record={'iso':'2026-11-17T12:00:00+05:00','plate':'A','lane':'1','speed':'0','time':'12:00:00'}
         with patch.object(m, 'PHOTOS', cache), patch.object(m, 'record_event', return_value=record), \
              patch.object(m, 'prepare_event_images', return_value=[b'camera jpeg']), \
-             patch.object(m, 'send_entry_notification'), patch.object(m, 'EVENTS'):
+             patch.object(m, 'send_entry_notification'), patch.object(m, 'EVENTS'), \
+             patch.object(m, 'save_photo', return_value=None):
             m.flush_pending_events({}, {0:{}}, [b'camera jpeg'])
         self.assertEqual(cache.get(record['iso'], 'A'), b'camera jpeg')
 

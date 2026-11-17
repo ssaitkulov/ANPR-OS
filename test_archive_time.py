@@ -6,6 +6,11 @@ import anpr_telegram as bot
 
 
 class ArchiveTimeTests(unittest.TestCase):
+    def test_old_archive_entry_with_wrong_timezone_does_not_hide_new_passage(self):
+        when = datetime.fromisoformat('2026-11-16T21:43:02+05:00')
+        state = {'days': {'2026-11-16': [{'plate': '010047MV', 'iso': '2026-11-16T19:43:54+03:00', 'direction': '0', 'backfill': True}]}}
+        self.assertFalse(bot.is_duplicate_backfill(state, '010047MV', when, '0'))
+
     def test_local_archive_matches_live_across_original_date_error(self):
         stamp = int(datetime(2026, 11, 16, 20, 3, 6, tzinfo=timezone.utc).timestamp())
         with patch.object(bot, 'BACKFILL_TIMESTAMP_MODE', 'local'), patch.object(bot, 'TZ', ZoneInfo('Asia/Tashkent')):

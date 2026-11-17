@@ -23,6 +23,7 @@ import hashlib
 import io
 import json
 import os
+import sqlite3
 import re
 import queue
 import sys
@@ -39,6 +40,7 @@ from event_images import prepare_event_images
 from storage import Store
 from system_events import EVENTS
 from passage_photos import PHOTOS
+from photo_archive import save_photo
 
 # ---------------------------------------------------------------------------
 # Конфиг (переменные окружения / .env)
@@ -90,7 +92,7 @@ STATE_FILE = Path(cfg("STATE_FILE", str(BASE_DIR / "anpr_state.json")))
 DB_FILE = Path(cfg("DB_FILE", str(BASE_DIR / "anpr.sqlite3")))
 IMAGE_DIR = Path(cfg("IMAGE_DIR", str(BASE_DIR / "images")))
 SEND_EACH_ENTRY = cfg("TELEGRAM_SEND_EACH_ENTRY", "true").lower() in ("1", "true", "yes")
-SAVE_PHOTOS = cfg("SAVE_PHOTOS", "false").lower() in ("1", "true", "yes")
+SAVE_PHOTOS = cfg("SAVE_PHOTOS", "false").lower() in ("1", "true", "yes")  # legacy configuration compatibility
 BACKFILL_ENABLED = cfg("BACKFILL_ENABLED", "true").lower() in ("1", "true", "yes")
 BACKFILL_TIMESTAMP_MODE = cfg("BACKFILL_TIMESTAMP_MODE", "utc")
 INCLUDE_MANUAL_SNAPSHOTS = cfg("INCLUDE_MANUAL_SNAPSHOTS", "true").lower() in ("1", "true", "yes")
@@ -623,7 +625,7 @@ def record_event(state: dict, ev: dict, image: bytes | None) -> dict | None:
     state["last_event_time"] = rec["iso"]
     state["seen"].append(key)
     state["seen"] = state["seen"][-5000:]  # не разрастаться
-    # Photos are intentionally never written to disk.
+    # Images are stored separately after event metadata is recorded.
     save_state(state)
     return rec
 
@@ -710,6 +712,10 @@ def is_duplicate_backfill(state: dict, plate: str, when: datetime, direction: st
     """Тот же номер ±120с от уже записанного события того же дня — дубль."""
     day = when.strftime("%Y-%m-%d")
     for rec in state.get("days", {}).get(day, []):
+        # Archive entries have their own RecNo; old imported records may use
+        # an incorrect timezone and must never suppress a new archive record.
+        if rec.get('backfill'):
+            continue
         if rec.get("plate") != plate:
             continue
         old_direction, new_direction = direction_kind(rec.get('direction')), direction_kind(direction)
@@ -757,7 +763,7 @@ def _dir_human(direction) -> str:
 
 
 def build_backfill_text(records: list, start, end) -> str:
-    lines = [f"📥 <b>Telegram был недоступен. Накопилось проездов: {len(records)}</b>",
+    lines = [f"📥 <b>Проезды из архива камеры: {len(records)}</b>",
              f"Период: {start.strftime('%d.%m %H:%M')} — {end.strftime('%d.%m %H:%M')}",
              ""]
     for rec in sorted(records, key=lambda r: r.get("iso", "")):
@@ -901,6 +907,13 @@ def flush_pending_events(state: dict, events: dict, images: list, dry_run: bool 
             prepared = prepare_event_images(ev, images)
             if prepared and not dry_run:
                 PHOTOS.put(rec.get('iso'), rec.get('plate'), prepared[0])
+                try:
+                    folder = IMAGE_DIR if IMAGE_DIR.is_absolute() else BASE_DIR / IMAGE_DIR
+                    path = save_photo(folder, rec.get('iso'), rec.get('plate'), prepared[0])
+                    if path:
+                        STORE.set_photo_path(rec['iso'], rec['plate'], path)
+                except (OSError, ValueError, sqlite3.Error) as error:
+                    print(f'[photo] Не удалось сохранить снимок: {error}', file=sys.stderr)
             if len(prepared) < 2:
                 print('[images] Вырезка номера недоступна: камера не передала подходящие координаты или второе фото.', file=sys.stderr)
             send_entry_notification(rec, prepared, dry_run=dry_run)

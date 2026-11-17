@@ -1,6 +1,6 @@
 """Small SQLite metadata store and durable text outbox.
 
-Images are deliberately absent from this module. They remain in memory only.
+Images are stored separately as files; SQLite keeps only their paths.
 """
 import json
 import sqlite3
@@ -30,6 +30,12 @@ class Store:
                 confidence TEXT,
                 backfill INTEGER NOT NULL DEFAULT 0,
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+            CREATE TABLE IF NOT EXISTS passage_photo_paths (
+                captured_at TEXT NOT NULL,
+                plate TEXT NOT NULL,
+                path TEXT NOT NULL,
+                PRIMARY KEY (captured_at, plate)
             );
             CREATE TABLE IF NOT EXISTS outbox (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -70,6 +76,18 @@ class Store:
     def passage_identity(self, event_id):
         with self.lock:
             return self.conn.execute('SELECT captured_at, plate FROM events WHERE id=?', (event_id,)).fetchone()
+
+    def set_photo_path(self, captured_at, plate, path):
+        with self.lock:
+            self.conn.execute('INSERT OR REPLACE INTO passage_photo_paths (captured_at, plate, path) VALUES (?, ?, ?)',
+                              (captured_at, plate, path))
+            self.conn.commit()
+
+    def get_photo_path(self, captured_at, plate):
+        with self.lock:
+            row = self.conn.execute('SELECT path FROM passage_photo_paths WHERE captured_at=? AND plate=?',
+                                    (captured_at, plate)).fetchone()
+        return row[0] if row else None
 
     def enqueue_text(self, event_id, chat_id, body, kind='text'):
         with self.lock:

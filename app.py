@@ -4,6 +4,7 @@
 import threading
 import os
 import time
+from pathlib import Path
 
 import anpr_telegram as M
 from fastapi import FastAPI, BackgroundTasks, HTTPException
@@ -58,6 +59,13 @@ def recent_passages():
 def passage_photo(event_id: int):
     identity = M.STORE.passage_identity(event_id)
     photo = M.PHOTOS.get(*identity) if identity else None
+    if photo is None and identity:
+        path = M.STORE.get_photo_path(*identity)
+        if path:
+            try:
+                photo = Path(path).read_bytes()
+            except OSError:
+                pass
     if photo is None:
         raise HTTPException(status_code=404, detail="Фото недоступно")
     return Response(content=photo, media_type='image/jpeg', headers={'Cache-Control': 'no-store'})
