@@ -37,6 +37,7 @@ import requests
 from requests.auth import HTTPDigestAuth
 from event_images import prepare_event_images
 from storage import Store
+from system_events import EVENTS
 
 # ---------------------------------------------------------------------------
 # Конфиг (переменные окружения / .env)
@@ -347,6 +348,10 @@ def send_entry_notification(rec: dict, images, dry_run: bool = False) -> None:
         ok = telegram_send_photo(image_list[0], caption)
     else:
         ok = telegram_send(caption)
+    delivered_at = now_local().isoformat()
+    RUNTIME['telegram_delivery'] = {'ok': ok, 'at': delivered_at}
+    EVENTS.add('telegram_ok' if ok else 'telegram_error',
+               'Сообщение отправлено' if ok else 'Ошибка отправки Telegram', delivered_at)
     RUNTIME['telegram_message'] = ('последнее уведомление доставлено хотя бы в один разрешённый чат.' if ok else 'не удалось доставить уведомление. Проверьте интернет, токен и ID чата.')
     elapsed = time.monotonic() - send_started
     RUNTIME['telegram_message'] += f' Отправка заняла {elapsed:.1f} с.'
@@ -887,6 +892,8 @@ def flush_pending_events(state: dict, events: dict, images: list, dry_run: bool 
         first = images[0] if images else None
         rec = record_event(state, ev, first)
         if rec:
+            if not dry_run:
+                EVENTS.add('vehicle', 'Получено событие камеры', now_local().isoformat())
             print(f"[event] въезд: {rec['plate']} lane={rec['lane']} "
                   f"speed={rec['speed']} time={rec['time']} dir={rec.get('direction','')} photos={len(images)}",
                   file=sys.stderr)
@@ -987,6 +994,8 @@ def subscribe_loop(state: dict, dry_run: bool = False) -> None:
     sess.auth = HTTPDigestAuth(DAHUA_USERNAME, DAHUA_PASSWORD)
     url = f"http://{DAHUA_HOST}:{DAHUA_PORT}/cgi-bin/snapManager.cgi"
     stop = threading.Event()
+    camera_connected = False
+    connection_failed = False
     if BROADCAST_ENABLED and TELEGRAM_BOT_TOKEN and not dry_run:
         threading.Thread(target=poll_telegram_updates, args=(state, stop), daemon=True).start()
         print("[telegram] подписчики: /start /stop /report (getUpdates)", file=sys.stderr)
@@ -1023,13 +1032,25 @@ def subscribe_loop(state: dict, dry_run: bool = False) -> None:
             with sess.get(url, params=params, stream=True, timeout=(10, 60)) as r:
                 r.raise_for_status()
                 RUNTIME['camera_message'] = 'подключена. Ожидаю проезд автомобиля.'
+                if not dry_run:
+                    EVENTS.add('camera_connected', 'Камера подключена', now_local().isoformat())
+                camera_connected = True
+                connection_failed = False
                 consume_camera_stream(r, state, dry_run=dry_run)
                 RUNTIME['camera_message'] = 'соединение закрыто. Подключаюсь снова.'
+                if not dry_run and camera_connected:
+                    EVENTS.add('camera_disconnected', 'Соединение с камерой потеряно', now_local().isoformat())
+                camera_connected = False
+                connection_failed = True
         except KeyboardInterrupt:
             print("\n[subscribe] остановлено пользователем", file=sys.stderr)
             raise
         except Exception as e:
             RUNTIME['camera_message'] = 'связь прервалась. Программа попробует подключиться снова.'
+            if not dry_run and not connection_failed:
+                EVENTS.add('camera_disconnected', 'Соединение с камерой потеряно' if camera_connected else 'Камера недоступна', now_local().isoformat())
+            camera_connected = False
+            connection_failed = True
             print(f"[subscribe] ошибка: {e}. Переподключение через {RECONNECT_DELAY}с", file=sys.stderr)
             time.sleep(RECONNECT_DELAY)
 

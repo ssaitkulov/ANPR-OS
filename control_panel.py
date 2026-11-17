@@ -1,104 +1,135 @@
-"""Minimal native Windows control panel for the ANPR collector."""
+"""Windows control panel for the ANPR collector."""
 import queue
 import subprocess
 import sys
 import threading
+from collections import deque
+from datetime import datetime
 import tkinter as tk
-from tkinter import ttk
 from pathlib import Path
+import customtkinter as ctk
+import pystray
+import requests
+from PIL import Image
 import service_control as service
 
+ctk.set_appearance_mode('dark')
+ASSETS = Path(__file__).resolve().parent / 'assets'
 
 class Panel:
-    BG = '#0b0d0f'; TEXT = '#f2f4f7'; MUTED = '#9aa4b2'; GREEN = '#36d17c'; RED = '#ff6b72'; AMBER = '#e5ad52'; CARD = '#171a1e'; BORDER = '#2a3037'
+    BG = '#101722'; TEXT = '#f2f5fa'; MUTED = '#a5b1c2'; GREEN = '#56d8a0'; RED = '#ff8792'
+    CARD = '#1a2432'; BORDER = '#303e51'; BLUE = '#2869df'; BLUE_HOVER = '#1d55b9'
 
     def __init__(self, root):
         self.root, self.queue, self.busy = root, queue.Queue(), False
         self.running = False
         self.animation_phase = 0
-        root.title('Система Управления'); root.geometry('650x600'); root.minsize(600, 580); root.configure(bg=self.BG)
-        self._styles()
-        try:
-            self.app_icon = tk.PhotoImage(file=str(Path(__file__).resolve().parent / 'icon.svg'))
-            root.iconphoto(True, self.app_icon)
-        except tk.TclError:
-            self.app_icon = None
-        self.icons = {}
-        icon_dir = Path(__file__).resolve().parent / 'filled'
-        for key, name in {'camera': 'camera.svg', 'telegram': 'send.svg', 'settings': 'settings.svg'}.items():
-            try: self.icons[key] = tk.PhotoImage(file=str(icon_dir / name)).subsample(2)
-            except tk.TclError: pass
-        try:
-            self.logo = tk.PhotoImage(file=r'D:\PROJECT\2x2 Shield System\Branding\Logo\SVG\SVG\uz logo.svg').subsample(2)
-        except tk.TclError:
-            self.logo = None
+        self.events = deque(maxlen=100)
+        self.previous = None
+        self.events_expanded = False
+        self.event_seen = set()
+        self.event_fetching = False
+        root.title('Evrika · Панель управления'); root.geometry('680x640'); root.minsize(570, 580)
+        root.configure(fg_color=self.BG)
+        root.iconbitmap(str(ASSETS / 'evrika.ico'))
+        root.protocol('WM_DELETE_WINDOW', self.hide)
+        page = ctk.CTkFrame(root, fg_color='transparent')
+        page.pack(fill='both', expand=True, padx=24, pady=18)
 
-        page = ttk.Frame(root, style='Page.TFrame', padding=(24, 24, 24, 24)); page.pack(fill='both', expand=True, padx=20, pady=20)
-        if self.logo:
-            ttk.Label(page, image=self.logo, style='Logo.TLabel').pack(anchor='w')
-        else:
-            ttk.Label(page, text='Камера и Telegram', style='Title.TLabel').pack(anchor='w')
-        ttk.Label(page, text='Система управления', style='Subtitle.TLabel').pack(anchor='w', pady=(6, 20))
+        header = ctk.CTkFrame(page, fg_color='transparent')
+        header.pack(fill='x', pady=(0, 16))
+        ctk.CTkButton(header, text='Настройки', command=self.settings, fg_color=self.CARD,
+                      hover_color='#34455a', border_color=self.BORDER, border_width=1,
+                      height=34, width=110).pack(side='right')
+        brand = ctk.CTkFrame(header, fg_color='transparent'); brand.pack(side='left', fill='x', expand=True)
+        self.logo = ctk.CTkImage(light_image=Image.open(ASSETS / 'evrika-logo-ru.png'), size=(145, 30))
+        ctk.CTkLabel(brand, text='', image=self.logo, anchor='w').pack(fill='x')
+        ctk.CTkLabel(brand, text='Панель управления', text_color=self.MUTED, font=('Segoe UI', 12), anchor='w').pack(fill='x')
 
-        state = ttk.Frame(page, style='State.TFrame', padding=(20, 14)); state.pack(fill='x')
+        self.state_card = ctk.CTkFrame(page, fg_color='#202735', border_color=self.BORDER, border_width=1, corner_radius=12)
+        self.state_card.pack(fill='x')
+        state_inner = ctk.CTkFrame(self.state_card, fg_color='transparent')
+        state_inner.pack(fill='x', padx=18, pady=15)
+        self.main_button = ctk.CTkButton(state_inner, text='Запустить', command=self.toggle,
+                                         fg_color=self.BLUE, hover_color=self.BLUE_HOVER,
+                                         height=40, width=135, font=('Segoe UI', 12, 'bold'))
+        self.main_button.pack(side='right', padx=(12, 0))
+        state_text = ctk.CTkFrame(state_inner, fg_color='transparent')
+        state_text.pack(side='left', fill='both', expand=True)
         self.status = tk.StringVar(value='Проверяю…'); self.hint = tk.StringVar(value='')
-        ttk.Label(state, textvariable=self.status, style='State.TLabel').pack(anchor='w')
-        ttk.Label(state, textvariable=self.hint, style='Hint.TLabel').pack(anchor='w', pady=(6, 0))
+        ctk.CTkLabel(state_text, text='МОНИТОРИНГ', text_color=self.MUTED, font=('Segoe UI', 10, 'bold'), anchor='w').pack(fill='x')
+        ctk.CTkLabel(state_text, textvariable=self.status, text_color=self.TEXT, font=('Segoe UI', 18, 'bold'), anchor='w').pack(fill='x')
+        ctk.CTkLabel(state_text, textvariable=self.hint, text_color=self.MUTED, font=('Segoe UI', 11), anchor='w', justify='left', wraplength=330).pack(fill='x', pady=(2, 0))
 
-        connections = ttk.Frame(page, style='Page.TFrame'); connections.pack(fill='x', pady=(16, 0))
-        self.camera = self._connection(connections, 'camera', 'Камера', 'Проверяю…')
-        self.telegram = self._connection(connections, 'telegram', 'Telegram', 'Проверяю…')
-        connections.columnconfigure(0, weight=1); connections.columnconfigure(1, weight=1)
+        ctk.CTkLabel(page, text='Подключения', text_color=self.TEXT, font=('Segoe UI', 13, 'bold'), anchor='w').pack(fill='x', pady=(16, 6))
+        connections = ctk.CTkFrame(page, fg_color='transparent'); connections.pack(fill='x')
+        self._status_widgets = {}
+        self.camera = self._connection(connections, 'camera', 'Камера', 0)
+        self.telegram = self._connection(connections, 'telegram', 'Telegram', 1)
+        connections.columnconfigure((0, 1), weight=1, uniform='connections')
 
-        self.last = tk.StringVar(value='')
-        ttk.Label(page, textvariable=self.last, style='Last.TLabel').pack(anchor='w', pady=(18, 0))
+        journal = ctk.CTkFrame(page, fg_color=self.CARD, border_color=self.BORDER, border_width=1, corner_radius=12)
+        journal.pack(fill='both', expand=True, pady=(14, 0))
+        journal_header = ctk.CTkFrame(journal, fg_color='transparent')
+        journal_header.pack(fill='x', padx=14, pady=(10, 0))
+        ctk.CTkLabel(journal_header, text='Последние события', text_color=self.TEXT, font=('Segoe UI', 13, 'bold'), anchor='w').pack(side='left', fill='x', expand=True)
+        self.events_button = ctk.CTkButton(journal_header, text='Показать все', command=self.toggle_events,
+                                           fg_color='transparent', hover_color='#34455a', text_color='#86b4ff',
+                                           width=110, height=28, font=('Segoe UI', 11))
+        self.events_button.pack(side='right')
+        self.events_label = ctk.CTkTextbox(journal, text_color=self.MUTED, fg_color='transparent',
+                                          font=('Segoe UI', 12), height=65, wrap='word', activate_scrollbars=True)
+        self.events_label.pack(fill='both', expand=True, padx=9, pady=(0, 8))
+        self.render_events()
 
-        actions = ttk.Frame(page, style='Page.TFrame'); actions.pack(anchor='w', pady=(20, 0))
-        self.main_button = self._button(actions, 'Включить систему', self.toggle, self.RED); self.main_button.pack(side='left')
-        settings_button = self._button(actions, '  Настройки', self.settings, self.CARD)
-        if self.icons.get('settings'):
-            settings_button.configure(image=self.icons['settings'], compound='left')
-        settings_button.pack(side='left', padx=(10, 0))
-        more = tk.Menubutton(actions, text='•••', bg=self.CARD, fg=self.TEXT, activebackground='#252a30', activeforeground=self.TEXT, relief='flat', bd=0, padx=20, pady=10, font=('Segoe UI', 10)); menu = tk.Menu(more, tearoff=False, bg=self.CARD, fg=self.TEXT, activebackground='#2d343d', activeforeground=self.TEXT); menu.add_command(label='Перезапустить систему', command=self.restart); menu.add_command(label='Открыть журнал', command=self.open_log); more['menu'] = menu; more.pack(side='left', padx=(10, 0))
+        footer = ctk.CTkFrame(page, fg_color='transparent'); footer.pack(fill='x', pady=(10, 0))
+        self.more = ctk.CTkOptionMenu(footer, values=['Ещё', 'Перезапустить систему', 'Открыть журнал'], command=self._more,
+                                      fg_color=self.CARD, button_color=self.CARD, button_hover_color='#34455a', width=100, height=32)
+        self.more.pack(side='right')
+        ctk.CTkLabel(footer, text='Работает в фоне при закрытии окна', text_color=self.MUTED,
+                     anchor='w', font=('Segoe UI', 11)).pack(side='left', fill='x', expand=True)
+        self.message = tk.StringVar(value='')
+        ctk.CTkLabel(page, textvariable=self.message, text_color='#ff9ca5', anchor='w', wraplength=500, font=('Segoe UI', 11)).pack(fill='x')
+        self._start_tray()
+        root.after(100, self.process); self.work(service.start); root.after(1000, self.refresh); root.after(1200, self.refresh_events)
 
-        self.message = tk.StringVar(value=''); ttk.Label(page, textvariable=self.message, style='Message.TLabel', wraplength=530).pack(anchor='w', pady=(10, 0))
-        ttk.Label(page, text='Окно можно закрыть — система продолжит работать. После перезагрузки откройте run.bat.', style='Help.TLabel', wraplength=530).pack(anchor='w', pady=(14, 0))
-        root.after(100, self.process); self.work(service.start); root.after(1000, self.refresh)
-
-    def _styles(self):
-        s = ttk.Style(self.root)
-        try: s.theme_use('vista')
-        except tk.TclError: pass
-        self.BG = '#13161a'
-        s.configure('Page.TFrame', background=self.BG); s.configure('State.TFrame', background='#163126'); s.configure('Logo.TLabel', background=self.BG)
-        s.configure('Title.TLabel', background=self.BG, foreground=self.TEXT, font=('Segoe UI', 23, 'bold')); s.configure('Subtitle.TLabel', background=self.BG, foreground=self.MUTED, font=('Segoe UI', 11))
-        s.configure('State.TLabel', background='#163126', foreground=self.TEXT, font=('Segoe UI', 17, 'bold')); s.configure('Hint.TLabel', background='#163126', foreground='#b9c8c2', font=('Segoe UI', 10))
-        s.configure('Connection.TFrame', background=self.CARD); s.configure('Connection.TLabel', background=self.CARD, foreground=self.TEXT, font=('Segoe UI', 11)); s.configure('ConnectionHint.TLabel', background=self.CARD, foreground=self.MUTED, font=('Segoe UI', 9))
-        s.configure('Last.TLabel', background=self.BG, foreground=self.MUTED, font=('Segoe UI', 9)); s.configure('Primary.TButton', font=('Segoe UI', 10, 'bold'), padding=(17, 10), foreground=self.GREEN); s.configure('Stop.TButton', font=('Segoe UI', 10, 'bold'), padding=(17, 10), foreground=self.RED); s.configure('Action.TButton', padding=(13, 10)); s.configure('Message.TLabel', background=self.BG, foreground=self.GREEN, font=('Segoe UI', 10, 'bold')); s.configure('Help.TLabel', background=self.BG, foreground=self.MUTED, font=('Segoe UI', 9))
-
-    def _connection(self, parent, key, title, value):
-        box = tk.Frame(parent, bg=self.CARD, highlightbackground=self.BORDER, highlightthickness=1, padx=14, pady=11); box.grid(row=0, column=len(getattr(self, '_connection_boxes', [])), sticky='nsew', padx=(0 if not getattr(self, '_connection_boxes', []) else 12, 0)); self._connection_boxes = getattr(self, '_connection_boxes', []) + [box]
-        if not hasattr(self, '_status_widgets'):
-            self._status_widgets = {}
-        var, hint = tk.StringVar(value=value), tk.StringVar(value='')
-        header = tk.Frame(box, bg=self.CARD)
-        header.pack(anchor='w', fill='x')
-        if self.icons.get(key):
-            tk.Label(header, image=self.icons[key], bg=self.CARD, bd=0, padx=0, pady=0).pack(side='left', padx=(0, 8))
-        tk.Label(header, text=title, bg=self.CARD, fg=self.MUTED, font=('Segoe UI', 9), padx=0, pady=0).pack(side='left')
-        indicator = tk.Label(box, textvariable=var, bg=self.CARD, fg=self.TEXT, font=('Segoe UI', 10, 'bold'), anchor='w', padx=0, pady=0)
-        indicator.pack(anchor='w', pady=(7, 0))
+    def _connection(self, parent, key, title, column):
+        box = ctk.CTkFrame(parent, fg_color=self.CARD, border_color=self.BORDER, border_width=1, corner_radius=10)
+        box.grid(row=0, column=column, sticky='nsew', padx=(0, 6) if column == 0 else (6, 0))
+        var, hint = tk.StringVar(value='Проверяю…'), tk.StringVar(value='')
+        ctk.CTkLabel(box, text=title, text_color=self.MUTED, font=('Segoe UI', 12, 'bold'), anchor='w').pack(fill='x', padx=14, pady=(12, 4))
+        indicator = ctk.CTkLabel(box, textvariable=var, text_color=self.TEXT, font=('Segoe UI', 13, 'bold'), anchor='w')
+        indicator.pack(fill='x', padx=14)
+        ctk.CTkLabel(box, textvariable=hint, text_color=self.MUTED, font=('Segoe UI', 11), anchor='w').pack(fill='x', padx=14, pady=(0, 10))
         self._status_widgets[key] = (box, indicator)
-        tk.Label(box, textvariable=hint, bg=self.CARD, fg=self.MUTED, font=('Segoe UI', 9), anchor='w', padx=0, pady=0).pack(anchor='w', pady=(4, 0))
         return var, hint
 
-    def _button(self, parent, text, command, color):
-        return tk.Button(parent, text=text, command=command, bg='#252a30', fg=self.TEXT, activebackground='#343a42', activeforeground=self.TEXT, relief='flat', bd=0, padx=16, pady=8, font=('Segoe UI', 10, 'bold'), cursor='hand2', highlightthickness=1, highlightbackground=self.BORDER)
+    def _more(self, choice):
+        self.more.set('Ещё')
+        if choice == 'Перезапустить систему': self.restart()
+        elif choice == 'Открыть журнал': self.open_log()
+
+    def _start_tray(self):
+        image = Image.open(ASSETS / 'evrika-tray.png').convert('RGBA')
+        self.tray = pystray.Icon('Evrika', image, 'Evrika', pystray.Menu(
+            pystray.MenuItem('Открыть', lambda icon, item: self.queue.put(('show', None)), default=True),
+            pystray.MenuItem('Выход', lambda icon, item: self.queue.put(('quit', None)))))
+        self.tray.run_detached()
+
+    def hide(self):
+        self.root.withdraw()
+
+    def _quit(self):
+        self.tray.stop()
+        self.root.destroy()
 
     def settings(self): subprocess.Popen([sys.executable, str(service.BASE / 'setup_anpr.py')], cwd=service.BASE)
     def open_log(self): subprocess.Popen(['notepad.exe', str(service.BASE / 'service.stderr.log')])
     def restart(self): self.work(self._restart)
-    def _restart(self): service.stop(); return service.start()
+    def _restart(self):
+        service.stop()
+        self.queue.put(('stopped', None))
+        return service.start()
     def toggle(self): self.work(service.stop if self.running else service.start)
 
     def work(self, action):
@@ -107,8 +138,12 @@ class Panel:
         self.status.set('Подождите')
         self.hint.set('Меняем состояние системы…')
         self.animate_status()
+        stopping = action == service.stop
         def worker():
-            try: action(); self.queue.put(('message', ''))
+            try:
+                action()
+                if stopping: self.queue.put(('stopped', None))
+                self.queue.put(('message', ''))
             except Exception as error: self.queue.put(('message', str(error) if isinstance(error, (RuntimeError, ValueError)) else 'Не удалось выполнить действие.'))
         threading.Thread(target=worker, daemon=True).start()
 
@@ -118,34 +153,126 @@ class Panel:
             except Exception: self.queue.put(('offline', None))
         threading.Thread(target=worker, daemon=True).start(); self.root.after(3000, self.refresh)
 
+    def refresh_events(self):
+        if not self.event_fetching:
+            self.event_fetching = True
+            def worker():
+                try:
+                    with requests.Session() as session:
+                        session.trust_env = False
+                        response = session.get(service.URL + '/events', timeout=2)
+                        response.raise_for_status()
+                        data = response.json()
+                    if data.get('service') != 'anpr-fayz':
+                        raise ValueError('Неизвестный сервис')
+                    self.queue.put(('events', data))
+                except (requests.RequestException, ValueError):
+                    self.queue.put(('events_unavailable', None))
+            threading.Thread(target=worker, daemon=True).start()
+        self.root.after(1500, self.refresh_events)
+
+    def merge_events(self, data):
+        pid = data.get('instance') or data.get('pid')
+        changed = False
+        for event in data.get('events', []):
+            key = (pid, event.get('id'))
+            if key in self.event_seen or event.get('id') is None:
+                continue
+            stamp = self.event_time(event.get('time'))
+            if stamp and event.get('text'):
+                self.event_seen.add(key)
+                self.events.appendleft(f"{stamp:%H:%M:%S} · {event['text']}")
+                changed = True
+        if len(self.event_seen) > 1000:
+            self.event_seen = {key for key in self.event_seen if key[0] == pid}
+        if changed:
+            self.render_events()
+
+    def toggle_events(self):
+        self.events_expanded = not self.events_expanded
+        self.events_button.configure(text='Свернуть' if self.events_expanded else 'Показать все')
+        self.render_events()
+
+    def render_events(self):
+        events = list(self.events) if self.events_expanded else list(self.events)[:3]
+        self.events_label.configure(state='normal')
+        self.events_label.delete('1.0', 'end')
+        self.events_label.insert('1.0', '\n'.join(events) if events else 'Событий пока нет')
+        self.events_label.configure(state='disabled')
+
+    def record_event(self, description, at=None):
+        stamp = at or datetime.now().astimezone()
+        self.events.appendleft(f'{stamp:%H:%M:%S} · {description}')
+        self.render_events()
+
+    @staticmethod
+    def event_time(value):
+        try:
+            return datetime.fromisoformat(value)
+        except (TypeError, ValueError):
+            return None
+
+    def update_status(self, data):
+        running = bool(data and data.get('status') == 'ok')
+        camera_message = data.get('camera_message', '').lower() if data else ''
+        telegram_message = data.get('telegram_message', '').lower() if data else ''
+        if not running:
+            camera_state, telegram_state = 'Неактивна', 'Неактивен'
+        else:
+            camera_state = ('Подключена' if camera_message.startswith('подключена') else
+                            'Нет соединения' if 'прервалась' in camera_message or 'закрыто' in camera_message else 'Подключение…')
+            telegram_state = ('Отправлено' if 'доставлено' in telegram_message else
+                              'Ошибка отправки' if 'не удалось' in telegram_message else 'Ожидание отправки')
+        delivery = data.get('telegram_delivery') if data else None
+        if running and delivery is not None:
+            telegram_state = 'Отправлено' if delivery.get('ok') else 'Ошибка отправки'
+        delivery_at = delivery.get('at') if delivery else None
+        started_at = data.get('started_at') if data else None
+        current = (running, camera_state, telegram_state, delivery_at, data.get('pid') if data else None)
+        self.previous = current
+        self.running = running
+        self.status.set('Система активна' if running else 'Система остановлена')
+        if running:
+            started = datetime.fromtimestamp(started_at).astimezone().strftime('%H:%M') if isinstance(started_at, (int, float)) else None
+            self.hint.set('Мониторинг запущен' + (f'  ·  Работает с {started}' if started else ''))
+        else:
+            self.hint.set('Мониторинг не выполняется\nНажмите «Запустить» для начала работы')
+        self.main_button.configure(text='Остановить' if running else 'Запустить',
+                                   fg_color='#45303a' if running else self.BLUE,
+                                   hover_color='#603844' if running else self.BLUE_HOVER, text_color=self.TEXT)
+        self.camera[0].set(camera_state)
+        self.camera[1].set('Данные поступают' if running and camera_message == 'подключена, получаю данные.' and data.get('last_camera_data') else '')
+        self.telegram[0].set(telegram_state)
+        delivery_time = self.event_time(delivery_at)
+        self.telegram[1].set(f'Последняя отправка: {delivery_time:%H:%M}' if telegram_state == 'Отправлено' and delivery_time else '')
+        self._state_color(running)
+        self._connection_color('camera', camera_state == 'Подключена')
+        self._connection_color('telegram', telegram_state == 'Отправлено')
+
     def process(self):
         try:
             while True:
                 kind, data = self.queue.get_nowait()
-                if kind == 'message': self.message.set(data); self.busy = False; self.main_button.configure(state='normal')
+                if kind == 'show': self.root.deiconify(); self.root.lift(); self.root.focus_force()
+                elif kind == 'quit': self._quit(); return
+                elif kind == 'stopped': self.record_event('Система остановлена')
+                elif kind == 'events': self.event_fetching = False; self.merge_events(data)
+                elif kind == 'events_unavailable': self.event_fetching = False
+                elif kind == 'message': self.message.set(data); self.busy = False; self.main_button.configure(state='normal')
                 elif kind == 'offline':
-                    if self.busy: continue
-                    self.running = False; self.status.set('Система выключена'); self.hint.set('Нажмите «Включить систему», чтобы начать.'); self.main_button.configure(text='Включить систему', bg='#174334', fg=self.GREEN); self.camera[0].set('Нет данных'); self.camera[1].set('Программа не подключена'); self.telegram[0].set('Нет данных'); self.telegram[1].set('Программа не подключена'); self.last.set(''); self._state_color(False); self._connection_color('camera', False); self._connection_color('telegram', False)
-                else:
-                    if self.busy: continue
-                    self.running = data.get('status') == 'ok'; self.status.set('Система работает' if self.running else 'Система остановлена'); self.hint.set('Программа запущена. Состояние подключений — ниже.' if self.running else 'Проверьте состояние программы и перезапустите её.'); self.main_button.configure(text='Выключить систему' if self.running else 'Включить систему', bg='#382124' if self.running else '#174334', fg=self.RED if self.running else self.GREEN); camera_ok = 'подключена' in data.get('camera_message', '').lower(); self.camera[0].set('Подключена' if camera_ok else 'Нет подтверждения'); self.camera[1].set('Получаем данные' if camera_ok else 'Проверяем связь'); tg = data.get('telegram_message', '').lower(); self.telegram[0].set('Отправлено' if 'доставлено' in tg else ('Ошибка отправки' if 'не удалось' in tg else 'Не проверено')); self.telegram[1].set('Последнее уведомление принято' if 'доставлено' in tg else ('Проверьте интернет и настройки' if 'не удалось' in tg else 'Ждём первую отправку')); self.last.set('Последний сигнал: ' + (data.get('last_camera_data') or 'пока нет'))
-                    self._state_color(self.running)
-                    self._connection_color('camera', self.running and camera_ok)
-                    self._connection_color('telegram', self.running and 'доставлено' in tg)
+                    if not self.busy: self.update_status(None)
+                elif kind == 'health':
+                    if not self.busy: self.update_status(data)
         except queue.Empty: pass
         self.root.after(100, self.process)
 
     def _state_color(self, running):
-        color = '#163126' if running else '#272423'
-        style = ttk.Style(self.root)
-        style.configure('State.TFrame', background=color)
-        style.configure('State.TLabel', background=color)
-        style.configure('Hint.TLabel', background=color)
+        self.state_card.configure(fg_color='#142e2a' if running else '#202735', border_color='#246253' if running else self.BORDER)
 
     def _connection_color(self, key, confirmed):
         box, label = self._status_widgets[key]
-        box.configure(highlightbackground='#287a50' if confirmed else self.BORDER)
-        label.configure(fg=self.GREEN if confirmed else self.TEXT)
+        box.configure(border_color='#246253' if confirmed else self.BORDER)
+        label.configure(text_color=self.GREEN if confirmed else self.TEXT)
 
     def animate_status(self):
         if not self.busy:
@@ -156,4 +283,7 @@ class Panel:
 
 
 if __name__ == '__main__':
-    root = tk.Tk(); Panel(root); root.mainloop()
+    if sys.platform == 'win32':
+        import ctypes
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID('Evrika.ANPR.ControlPanel')
+    root = ctk.CTk(); Panel(root); root.mainloop()

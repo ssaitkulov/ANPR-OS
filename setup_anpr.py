@@ -6,7 +6,9 @@ import queue
 import re
 import threading
 import tkinter as tk
-from tkinter import ttk, messagebox
+from tkinter import messagebox
+import customtkinter as ctk
+from PIL import Image
 from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -15,6 +17,7 @@ from requests.auth import HTTPDigestAuth
 
 BASE = Path(__file__).resolve().parent
 ENV = BASE / '.env'
+ASSETS = BASE / 'assets'
 DIRECTIONS = {'Оба направления': '', 'Только въезд': 'Approach', 'Только выезд': 'Leave'}
 FIELDS = [
     ('CAMERA_NAME', 'Название камеры', 'Главные ворота'),
@@ -130,42 +133,98 @@ def check_bot(values):
 
 
 class SettingsWindow:
+    BG = '#101722'
+    CARD = '#1a2432'
+    BORDER = '#303e51'
+    TEXT = '#f2f5fa'
+    MUTED = '#a5b1c2'
+    BLUE = '#2869df'
+
     def __init__(self, root):
         self.root = root
         self.results = queue.Queue()
-        root.title('ANPR · Настройки')
-        root.geometry('760x710')
-        root.minsize(720, 700)
-        panel = ttk.Frame(root, padding=24)
-        panel.pack(fill='both', expand=True)
-        panel.columnconfigure(1, weight=1)
-        ttk.Label(panel, text='Камера → Telegram', font=('Segoe UI', 20, 'bold')).grid(row=0, column=0, columnspan=2, sticky='w')
-        ttk.Label(panel, text='Укажите камеру и куда присылать уведомления.').grid(row=1, column=0, columnspan=2, sticky='w', pady=(6, 20))
+        ctk.set_appearance_mode('dark')
+        root.title('Evrika · Настройки')
+        root.configure(fg_color=self.BG)
+        root.iconbitmap(str(ASSETS / 'evrika.ico'))
+        root.geometry('670x530')
+        root.minsize(590, 480)
+
+        header = ctk.CTkFrame(root, fg_color='transparent')
+        header.pack(fill='x', padx=22, pady=(14, 4))
+        ctk.CTkLabel(header, text='Настройки', text_color=self.TEXT,
+                     font=('Segoe UI', 20, 'bold'), anchor='w').pack(side='left')
+        self.logo = ctk.CTkImage(light_image=Image.open(ASSETS / 'evrika-logo-ru.png'), size=(116, 24))
+        ctk.CTkLabel(header, text='', image=self.logo).pack(side='right')
+
+        footer = ctk.CTkFrame(root, fg_color='#151f2d', corner_radius=0)
+        footer.pack(side='bottom', fill='x')
+        actions = ctk.CTkFrame(footer, fg_color='transparent')
+        actions.pack(fill='x', padx=22, pady=(8, 2))
+        ctk.CTkButton(actions, text='Сохранить', command=self.save, width=140,
+                      height=34, fg_color=self.BLUE, hover_color='#1d55b9',
+                      font=('Segoe UI', 12, 'bold')).pack(side='right')
+        ctk.CTkLabel(actions, text='После сохранения перезапустите систему',
+                     text_color=self.MUTED, font=('Segoe UI', 11), anchor='w').pack(side='left', fill='x', expand=True)
+        self.status = tk.StringVar(value='')
+        ctk.CTkLabel(footer, textvariable=self.status, text_color='#b8c9e1', font=('Segoe UI', 11),
+                     anchor='w', justify='left', wraplength=500).pack(fill='x', padx=22, pady=(0, 6))
+
+        tabs = ctk.CTkTabview(root, fg_color=self.CARD, segmented_button_fg_color='#111b29',
+                              segmented_button_selected_color=self.BLUE,
+                              segmented_button_selected_hover_color='#1d55b9')
+        tabs.pack(fill='both', expand=True, padx=20, pady=(0, 8))
         current = read_settings()
         current['CAMERA_URL'] = f"http://{current.get('DAHUA_HOST', '192.168.100.249')}:{current.get('DAHUA_PORT', '80')}/"
-        self.variables = {}
-        for row, (key, label, default) in enumerate(FIELDS, 2):
-            ttk.Label(panel, text=label).grid(row=row, column=0, sticky='w', padx=(0, 16), pady=7)
-            var = tk.StringVar(value=current.get(key, default))
-            self.variables[key] = var
-            secret = key in ('DAHUA_PASSWORD', 'TELEGRAM_BOT_TOKEN')
-            ttk.Entry(panel, textvariable=var, show='•' if secret else '').grid(row=row, column=1, sticky='ew', pady=7)
-        ttk.Label(panel, text='Какие проезды присылать').grid(row=10, column=0, sticky='w', pady=7)
-        self.direction = tk.StringVar(value=next((label for label, value in DIRECTIONS.items() if value == current.get('DIRECTION', 'Approach')), 'Оба направления'))
-        ttk.Combobox(panel, textvariable=self.direction, values=list(DIRECTIONS), state='readonly').grid(row=10, column=1, sticky='ew', pady=7)
-        ttk.Label(panel, text='Для личного чата: укажите свой ID в обоих полях и напишите боту /start.\nДля группы: добавьте её ID в оба поля. Команды будут доступны участникам этой группы.', wraplength=690).grid(row=11, column=0, columnspan=2, sticky='w', pady=(12, 8))
-        buttons = ttk.Frame(panel)
-        buttons.grid(row=12, column=0, columnspan=2, sticky='w', pady=10)
+        self.variables = {key: tk.StringVar(value=current.get(key, default)) for key, _, default in FIELDS}
+        self.direction = tk.StringVar(value=next((label for label, value in DIRECTIONS.items()
+                                                 if value == current.get('DIRECTION', 'Approach')), 'Оба направления'))
         self.check_buttons = []
-        for label, function in [('Проверить камеру', check_camera), ('Проверить бота', check_bot)]:
-            button = ttk.Button(buttons, text=label, command=lambda f=function: self.check(f))
-            button.pack(side='left', padx=(0, 10))
-            self.check_buttons.append(button)
-        ttk.Button(buttons, text='Сохранить', command=self.save).pack(side='left')
-        self.status = tk.StringVar(value='Проверка только показывает результат и не запускает сбор.')
-        ttk.Label(panel, textvariable=self.status, wraplength=690).grid(row=13, column=0, columnspan=2, sticky='w', pady=10)
-        ttk.Label(panel, text='Настройки сохраняются локально в .env (без шифрования).\nПосле сохранения нажмите «Перезапустить» в окне управления.', wraplength=690).grid(row=14, column=0, columnspan=2, sticky='w', pady=8)
+        camera = tabs.add('Камера')
+        telegram = tabs.add('Telegram')
+        general = tabs.add('Мониторинг')
+        for tab in (camera, telegram, general):
+            tab.grid_columnconfigure(1, weight=1)
+
+        self._field(camera, 0, 'Название', 'CAMERA_NAME')
+        self._field(camera, 1, 'Адрес камеры', 'CAMERA_URL')
+        self._field(camera, 2, 'Логин', 'DAHUA_USERNAME')
+        self._field(camera, 3, 'Пароль', 'DAHUA_PASSWORD', secret=True)
+        self._check_button(camera, 4, 'Проверить камеру', check_camera)
+
+        self._field(telegram, 0, 'Токен бота', 'TELEGRAM_BOT_TOKEN', secret=True)
+        self._field(telegram, 1, 'Чат уведомлений (ID)', 'TELEGRAM_CHAT_ID')
+        self._field(telegram, 2, 'Разрешённые чаты (ID)', 'ALLOWED_CHAT_IDS')
+        note = ('ID через запятую. Добавьте ID получателя в оба поля; для личного чата напишите боту /start.\n'
+                'В группе команды доступны её участникам.')
+        ctk.CTkLabel(telegram, text=note, text_color=self.MUTED, justify='left', anchor='w',
+                     wraplength=500, font=('Segoe UI', 11)).grid(row=3, column=0, columnspan=2, sticky='ew', padx=12, pady=(8, 0))
+        self._check_button(telegram, 4, 'Проверить бота', check_bot)
+
+        self._field(general, 0, 'Часовой пояс', 'TIMEZONE')
+        ctk.CTkLabel(general, text='Проезды', text_color=self.TEXT,
+                     anchor='w', font=('Segoe UI', 12)).grid(row=1, column=0, sticky='w', padx=(12, 16), pady=5)
+        ctk.CTkOptionMenu(general, variable=self.direction, values=list(DIRECTIONS), height=32,
+                          fg_color='#26364c', button_color='#334b6b', button_hover_color='#416087').grid(
+                              row=1, column=1, sticky='ew', padx=(0, 12), pady=5)
+        ctk.CTkLabel(general, text='Настройки хранятся в .env без шифрования.',
+                     text_color=self.MUTED, anchor='w', font=('Segoe UI', 11)).grid(
+                         row=2, column=0, columnspan=2, sticky='ew', padx=12, pady=(12, 0))
         root.after(100, self.poll)
+
+    def _field(self, parent, row, label, key, secret=False):
+        ctk.CTkLabel(parent, text=label, text_color=self.TEXT, anchor='w',
+                     font=('Segoe UI', 12)).grid(row=row, column=0, sticky='w', padx=(12, 16), pady=5)
+        ctk.CTkEntry(parent, textvariable=self.variables[key], show='•' if secret else '',
+                     height=32, fg_color='#111b29', border_color='#3a4a60',
+                     text_color=self.TEXT).grid(row=row, column=1, sticky='ew', padx=(0, 12), pady=5)
+
+    def _check_button(self, parent, row, label, function):
+        button = ctk.CTkButton(parent, text=label, command=lambda: self.check(function),
+                               height=32, width=155, fg_color='#283a53', hover_color='#365172',
+                               border_width=1, border_color='#405471')
+        button.grid(row=row, column=1, sticky='e', padx=(0, 12), pady=(12, 8))
+        self.check_buttons.append(button)
 
     def values(self):
         return {**{key: var.get().strip() for key, var in self.variables.items()}, 'DIRECTION': DIRECTIONS[self.direction.get()]}
@@ -183,7 +242,7 @@ class SettingsWindow:
         values = self.values()
         self.status.set('Проверяю подключение…')
         for button in self.check_buttons:
-            button.state(['disabled'])
+            button.configure(state='disabled')
         def worker():
             try:
                 result = function(values)
@@ -198,13 +257,13 @@ class SettingsWindow:
         try:
             self.status.set(self.results.get_nowait())
             for button in self.check_buttons:
-                button.state(['!disabled'])
+                button.configure(state='normal')
         except queue.Empty:
             pass
         self.root.after(100, self.poll)
 
 
 if __name__ == '__main__':
-    root = tk.Tk()
+    root = ctk.CTk()
     SettingsWindow(root)
     root.mainloop()

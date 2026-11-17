@@ -27,6 +27,7 @@ app = FastAPI(title="ANPR FAYZ", version="1.0")
 def on_startup():
     global _worker_started, _worker
     if not _worker_started:
+        M.EVENTS.add('started', 'Система запущена', M.now_local().isoformat())
         t = threading.Thread(target=M.subscribe_loop, args=(state,), kwargs={"dry_run": False}, daemon=True)
         t.start()
         _worker = t
@@ -35,7 +36,12 @@ def on_startup():
 
 @app.get("/health")
 def health():
-    return {"service": "anpr-fayz", "pid": os.getpid(), "status": "ok" if _worker and _worker.is_alive() else "worker_stopped", "camera": M.DAHUA_HOST, "time": M.now_local().isoformat(), **M.RUNTIME}
+    return {"service": "anpr-fayz", "pid": os.getpid(), "status": "ok" if _worker and _worker.is_alive() else "worker_stopped", "camera": M.DAHUA_HOST, "time": M.now_local().isoformat(), "started_at": started_at, **M.RUNTIME}
+
+
+@app.get("/events")
+def operational_events(after: int = 0):
+    return {"service": "anpr-fayz", "pid": os.getpid(), **M.EVENTS.snapshot(max(0, after))}
 
 
 @app.get("/status")
