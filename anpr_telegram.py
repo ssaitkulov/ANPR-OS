@@ -38,6 +38,7 @@ from requests.auth import HTTPDigestAuth
 from event_images import prepare_event_images
 from storage import Store
 from system_events import EVENTS
+from passage_photos import PHOTOS
 
 # ---------------------------------------------------------------------------
 # Конфиг (переменные окружения / .env)
@@ -898,6 +899,8 @@ def flush_pending_events(state: dict, events: dict, images: list, dry_run: bool 
                   f"speed={rec['speed']} time={rec['time']} dir={rec.get('direction','')} photos={len(images)}",
                   file=sys.stderr)
             prepared = prepare_event_images(ev, images)
+            if prepared and not dry_run:
+                PHOTOS.put(rec.get('iso'), rec.get('plate'), prepared[0])
             if len(prepared) < 2:
                 print('[images] Вырезка номера недоступна: камера не передала подходящие координаты или второе фото.', file=sys.stderr)
             send_entry_notification(rec, prepared, dry_run=dry_run)

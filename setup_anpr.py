@@ -12,6 +12,7 @@ from PIL import Image
 from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+import app_preferences as preferences
 import requests
 from requests.auth import HTTPDigestAuth
 
@@ -140,18 +141,26 @@ class SettingsWindow:
     MUTED = '#a5b1c2'
     BLUE = '#2869df'
 
-    def __init__(self, root):
+    def __init__(self, root, on_close=None):
+        self.on_close = on_close
+        if on_close is not None:
+            root = ctk.CTkFrame(root, fg_color=self.BG, corner_radius=0)
+            root.pack(fill='both', expand=True)
+        else:
+            ctk.set_appearance_mode('dark')
+            root.title('Evrika · Настройки')
+            root.configure(fg_color=self.BG)
+            root.iconbitmap(str(ASSETS / 'evrika.ico'))
+            root.geometry('670x530')
+            root.minsize(590, 480)
         self.root = root
         self.results = queue.Queue()
-        ctk.set_appearance_mode('dark')
-        root.title('Evrika · Настройки')
-        root.configure(fg_color=self.BG)
-        root.iconbitmap(str(ASSETS / 'evrika.ico'))
-        root.geometry('670x530')
-        root.minsize(590, 480)
 
         header = ctk.CTkFrame(root, fg_color='transparent')
         header.pack(fill='x', padx=22, pady=(14, 4))
+        if self.on_close is not None:
+            ctk.CTkButton(header, text='‹  Назад', width=85, height=32, fg_color=self.CARD,
+                          hover_color='#34455a', command=self.close).pack(side='left', padx=(0, 14))
         ctk.CTkLabel(header, text='Настройки', text_color=self.TEXT,
                      font=('Segoe UI', 20, 'bold'), anchor='w').pack(side='left')
         self.logo = ctk.CTkImage(light_image=Image.open(ASSETS / 'evrika-logo-ru.png'), size=(116, 24))
@@ -164,7 +173,7 @@ class SettingsWindow:
         ctk.CTkButton(actions, text='Сохранить', command=self.save, width=140,
                       height=34, fg_color=self.BLUE, hover_color='#1d55b9',
                       font=('Segoe UI', 12, 'bold')).pack(side='right')
-        ctk.CTkLabel(actions, text='После сохранения перезапустите систему',
+        ctk.CTkLabel(actions, text='Настройки камеры применяются после перезапуска',
                      text_color=self.MUTED, font=('Segoe UI', 11), anchor='w').pack(side='left', fill='x', expand=True)
         self.status = tk.StringVar(value='')
         ctk.CTkLabel(footer, textvariable=self.status, text_color='#b8c9e1', font=('Segoe UI', 11),
@@ -174,6 +183,7 @@ class SettingsWindow:
                               segmented_button_selected_color=self.BLUE,
                               segmented_button_selected_hover_color='#1d55b9')
         tabs.pack(fill='both', expand=True, padx=20, pady=(0, 8))
+        self.tabs = tabs
         current = read_settings()
         current['CAMERA_URL'] = f"http://{current.get('DAHUA_HOST', '192.168.100.249')}:{current.get('DAHUA_PORT', '80')}/"
         self.variables = {key: tk.StringVar(value=current.get(key, default)) for key, _, default in FIELDS}
@@ -183,7 +193,8 @@ class SettingsWindow:
         camera = tabs.add('Камера')
         telegram = tabs.add('Telegram')
         general = tabs.add('Мониторинг')
-        for tab in (camera, telegram, general):
+        application = tabs.add('Приложение')
+        for tab in (camera, telegram, general, application):
             tab.grid_columnconfigure(1, weight=1)
 
         self._field(camera, 0, 'Название', 'CAMERA_NAME')
@@ -210,6 +221,20 @@ class SettingsWindow:
         ctk.CTkLabel(general, text='Настройки хранятся в .env без шифрования.',
                      text_color=self.MUTED, anchor='w', font=('Segoe UI', 11)).grid(
                          row=2, column=0, columnspan=2, sticky='ew', padx=12, pady=(12, 0))
+        try:
+            autostart_enabled = preferences.get_autostart()
+        except OSError:
+            autostart_enabled = False
+            self.status.set('Не удалось прочитать автозапуск Windows.')
+        self.autostart = tk.BooleanVar(value=autostart_enabled)
+        self.minimize_to_tray = tk.BooleanVar(value=preferences.get_minimize_to_tray())
+        ctk.CTkSwitch(application, text='Запускать с Windows', variable=self.autostart,
+                      progress_color=self.BLUE).grid(row=0, column=0, columnspan=2, sticky='w', padx=12, pady=(18, 10))
+        ctk.CTkSwitch(application, text='Сворачивать в трей кнопкой «—»', variable=self.minimize_to_tray,
+                      progress_color=self.BLUE).grid(row=1, column=0, columnspan=2, sticky='w', padx=12, pady=10)
+        ctk.CTkLabel(application, text='Кнопка × всегда сворачивает панель в трей.',
+                     text_color=self.MUTED, anchor='w', justify='left', wraplength=490,
+                     font=('Segoe UI', 11)).grid(row=2, column=0, columnspan=2, sticky='ew', padx=12, pady=(4, 12))
         root.after(100, self.poll)
 
     def _field(self, parent, row, label, key, secret=False):
@@ -226,17 +251,34 @@ class SettingsWindow:
         button.grid(row=row, column=1, sticky='e', padx=(0, 12), pady=(12, 8))
         self.check_buttons.append(button)
 
+    def close(self):
+        self.root.destroy()
+        if self.on_close:
+            self.on_close()
+
     def values(self):
         return {**{key: var.get().strip() for key, var in self.variables.items()}, 'DIRECTION': DIRECTIONS[self.direction.get()]}
 
     def save(self):
+        if self.tabs.get() == 'Приложение':
+            self.save_application()
+            return
         try:
             save_settings(self.values())
             self.status.set('Настройки сохранены. Перезапустите скрипт, чтобы применить изменения.')
         except ValueError as error:
-            messagebox.showerror('Проверьте настройки', str(error))
+            messagebox.showerror('Проверьте настройки', str(error), parent=self.root.winfo_toplevel())
         except OSError:
-            messagebox.showerror('Не удалось сохранить', 'Проверьте доступ к папке проекта.')
+            messagebox.showerror('Не удалось сохранить', 'Проверьте доступ к папке проекта.', parent=self.root.winfo_toplevel())
+
+    def save_application(self):
+        try:
+            preferences.set_autostart(self.autostart.get())
+            preferences.set_minimize_to_tray(self.minimize_to_tray.get())
+            self.status.set('Параметры приложения сохранены.')
+        except OSError as error:
+            self.status.set('Не удалось сохранить параметры приложения.')
+            messagebox.showerror('Не удалось сохранить', str(error), parent=self.root.winfo_toplevel())
 
     def check(self, function):
         values = self.values()

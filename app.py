@@ -6,7 +6,8 @@ import os
 import time
 
 import anpr_telegram as M
-from fastapi import FastAPI, BackgroundTasks
+from fastapi import FastAPI, BackgroundTasks, HTTPException
+from fastapi.responses import Response
 
 try:
     import sys
@@ -42,6 +43,24 @@ def health():
 @app.get("/events")
 def operational_events(after: int = 0):
     return {"service": "anpr-fayz", "pid": os.getpid(), **M.EVENTS.snapshot(max(0, after))}
+
+
+@app.get("/passages")
+def recent_passages():
+    records = M.STORE.recent_passages()
+    for record in records:
+        record['plate'] = M.display_plate(record['plate'])
+        record['direction'] = M.direction_label(record['direction'])
+    return {"service": "anpr-fayz", "passages": records}
+
+
+@app.get("/passages/{event_id}/photo")
+def passage_photo(event_id: int):
+    identity = M.STORE.passage_identity(event_id)
+    photo = M.PHOTOS.get(*identity) if identity else None
+    if photo is None:
+        raise HTTPException(status_code=404, detail="Фото недоступно")
+    return Response(content=photo, media_type='image/jpeg', headers={'Cache-Control': 'no-store'})
 
 
 @app.get("/status")

@@ -15,3 +15,6 @@ subscribers.tmp
 # Local device notes may contain credentials or personal identifiers.
 PROJECT_CONTEXT.md
 Dahua-API-Python-Integration.SKILL.md
+
+ui_preferences.json
+ui_preferences.json.tmp

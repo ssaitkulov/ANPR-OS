@@ -6,12 +6,14 @@ import threading
 from collections import deque
 from datetime import datetime
 import tkinter as tk
+from tkinter import messagebox
 from pathlib import Path
 import customtkinter as ctk
 import pystray
 import requests
 from PIL import Image
 import service_control as service
+import app_preferences as preferences
 
 ctk.set_appearance_mode('dark')
 ASSETS = Path(__file__).resolve().parent / 'assets'
@@ -33,7 +35,9 @@ class Panel:
         root.configure(fg_color=self.BG)
         root.iconbitmap(str(ASSETS / 'evrika.ico'))
         root.protocol('WM_DELETE_WINDOW', self.hide)
+        root.bind('<Unmap>', self._on_unmap)
         page = ctk.CTkFrame(root, fg_color='transparent')
+        self.page = page
         page.pack(fill='both', expand=True, padx=24, pady=18)
 
         header = ctk.CTkFrame(page, fg_color='transparent')
@@ -41,6 +45,8 @@ class Panel:
         ctk.CTkButton(header, text='Настройки', command=self.settings, fg_color=self.CARD,
                       hover_color='#34455a', border_color=self.BORDER, border_width=1,
                       height=34, width=110).pack(side='right')
+        ctk.CTkButton(header, text='Мониторинг', command=self.open_monitor, fg_color=self.BLUE,
+                      hover_color=self.BLUE_HOVER, height=34, width=120).pack(side='right', padx=(0, 8))
         brand = ctk.CTkFrame(header, fg_color='transparent'); brand.pack(side='left', fill='x', expand=True)
         self.logo = ctk.CTkImage(light_image=Image.open(ASSETS / 'evrika-logo-ru.png'), size=(145, 30))
         ctk.CTkLabel(brand, text='', image=self.logo, anchor='w').pack(fill='x')
@@ -72,7 +78,7 @@ class Panel:
         journal.pack(fill='both', expand=True, pady=(14, 0))
         journal_header = ctk.CTkFrame(journal, fg_color='transparent')
         journal_header.pack(fill='x', padx=14, pady=(10, 0))
-        ctk.CTkLabel(journal_header, text='Последние события', text_color=self.TEXT, font=('Segoe UI', 13, 'bold'), anchor='w').pack(side='left', fill='x', expand=True)
+        ctk.CTkLabel(journal_header, text='Последние проезды', text_color=self.TEXT, font=('Segoe UI', 13, 'bold'), anchor='w').pack(side='left', fill='x', expand=True)
         self.events_button = ctk.CTkButton(journal_header, text='Показать все', command=self.toggle_events,
                                            fg_color='transparent', hover_color='#34455a', text_color='#86b4ff',
                                            width=110, height=28, font=('Segoe UI', 11))
@@ -113,17 +119,88 @@ class Panel:
         image = Image.open(ASSETS / 'evrika-tray.png').convert('RGBA')
         self.tray = pystray.Icon('Evrika', image, 'Evrika', pystray.Menu(
             pystray.MenuItem('Открыть', lambda icon, item: self.queue.put(('show', None)), default=True),
-            pystray.MenuItem('Выход', lambda icon, item: self.queue.put(('quit', None)))))
+            pystray.MenuItem('Остановить и выйти', lambda icon, item: self.queue.put(('confirm_exit', None)))))
         self.tray.run_detached()
+
+    def _on_unmap(self, event):
+        if event.widget is self.root and self.root.state() == 'iconic' and preferences.get_minimize_to_tray():
+            self.root.after_idle(self.root.withdraw)
 
     def hide(self):
         self.root.withdraw()
+
+    def confirm_stop_and_exit(self):
+        self.root.deiconify()
+        self.root.lift()
+        if self.busy:
+            messagebox.showinfo('Эврика', 'Дождитесь завершения текущей операции.', parent=self.root)
+            return
+        if not messagebox.askyesno('Выход из Эврики',
+                                   'Остановить мониторинг и выйти из программы?',
+                                   parent=self.root, default=messagebox.NO):
+            return
+        self.busy = True
+        self.main_button.configure(state='disabled')
+        self.message.set('')
+        self.status.set('Останавливаем систему…')
+        self.hint.set('Пожалуйста, подождите.')
+        def worker():
+            try:
+                service.stop()
+            except Exception as error:
+                detail = str(error) if isinstance(error, (RuntimeError, ValueError)) else 'Не удалось остановить систему.'
+                self.queue.put(('exit_error', detail))
+            else:
+                self.queue.put(('exit_complete', None))
+        threading.Thread(target=worker, daemon=True).start()
 
     def _quit(self):
         self.tray.stop()
         self.root.destroy()
 
-    def settings(self): subprocess.Popen([sys.executable, str(service.BASE / 'setup_anpr.py')], cwd=service.BASE)
+    def open_monitor(self):
+        if getattr(self, 'monitor', None) and self.monitor.root.winfo_exists():
+            return
+        from dashboard import MonitorWindow
+        self.root.update_idletasks()
+        self.panel_geometry = self.root.geometry()
+        self.page.pack_forget()
+        self.root.minsize(900, 620)
+        self.root.geometry('1180x760')
+        self.root.title('Эврика · Мониторинг')
+        try:
+            self.monitor = MonitorWindow(self.root, on_close=self.close_monitor)
+        except Exception:
+            self.close_monitor()
+            raise
+
+    def close_monitor(self):
+        self.monitor = None
+        self.root.minsize(570, 580)
+        self.root.geometry(self.panel_geometry)
+        self.root.title('Evrika · Панель управления')
+        self.page.pack(fill='both', expand=True, padx=24, pady=18)
+
+    def settings(self):
+        from setup_anpr import SettingsWindow
+        self.root.update_idletasks()
+        self.panel_geometry = self.root.geometry()
+        self.page.pack_forget()
+        self.root.minsize(590, 480)
+        self.root.geometry('670x530')
+        self.root.title('Эврика · Настройки')
+        try:
+            self.settings_view = SettingsWindow(self.root, on_close=self.close_settings)
+        except Exception:
+            self.close_settings()
+            raise
+
+    def close_settings(self):
+        self.settings_view = None
+        self.root.minsize(570, 580)
+        self.root.geometry(self.panel_geometry)
+        self.root.title('Evrika · Панель управления')
+        self.page.pack(fill='both', expand=True, padx=24, pady=18)
     def open_log(self): subprocess.Popen(['notepad.exe', str(service.BASE / 'service.stderr.log')])
     def restart(self): self.work(self._restart)
     def _restart(self):
@@ -160,7 +237,7 @@ class Panel:
                 try:
                     with requests.Session() as session:
                         session.trust_env = False
-                        response = session.get(service.URL + '/events', timeout=2)
+                        response = session.get(service.URL + '/passages', timeout=2)
                         response.raise_for_status()
                         data = response.json()
                     if data.get('service') != 'anpr-fayz':
@@ -172,20 +249,25 @@ class Panel:
         self.root.after(1500, self.refresh_events)
 
     def merge_events(self, data):
-        pid = data.get('instance') or data.get('pid')
-        changed = False
-        for event in data.get('events', []):
-            key = (pid, event.get('id'))
-            if key in self.event_seen or event.get('id') is None:
+        lines = []
+        for passage in data.get('passages', []):
+            stamp = self.event_time(passage.get('captured_at'))
+            if stamp is None:
                 continue
-            stamp = self.event_time(event.get('time'))
-            if stamp and event.get('text'):
-                self.event_seen.add(key)
-                self.events.appendleft(f"{stamp:%H:%M:%S} · {event['text']}")
-                changed = True
-        if len(self.event_seen) > 1000:
-            self.event_seen = {key for key in self.event_seen if key[0] == pid}
-        if changed:
+            plate = str(passage.get('plate') or 'Номер не распознан')
+            if plate == '—':
+                plate = 'Номер не распознан'
+            details = [f'{stamp:%d.%m %H:%M:%S}', plate]
+            direction = passage.get('direction')
+            if direction and direction != 'не определено': details.append(direction)
+            lane = str(passage.get('lane') or '').strip()
+            if lane: details.append(f'Полоса {lane}')
+            speed = str(passage.get('speed') or '').strip()
+            if speed and speed.lower() not in ('unknown', 'none'): details.append(f'{speed} км/ч')
+            if passage.get('backfill'): details.append('Архив')
+            lines.append(' · '.join(details))
+        if list(self.events) != lines:
+            self.events = deque(lines, maxlen=100)
             self.render_events()
 
     def toggle_events(self):
@@ -197,7 +279,7 @@ class Panel:
         events = list(self.events) if self.events_expanded else list(self.events)[:3]
         self.events_label.configure(state='normal')
         self.events_label.delete('1.0', 'end')
-        self.events_label.insert('1.0', '\n'.join(events) if events else 'Событий пока нет')
+        self.events_label.insert('1.0', '\n'.join(events) if events else 'Проездов пока нет')
         self.events_label.configure(state='disabled')
 
     def record_event(self, description, at=None):
@@ -254,8 +336,14 @@ class Panel:
             while True:
                 kind, data = self.queue.get_nowait()
                 if kind == 'show': self.root.deiconify(); self.root.lift(); self.root.focus_force()
-                elif kind == 'quit': self._quit(); return
-                elif kind == 'stopped': self.record_event('Система остановлена')
+                elif kind == 'confirm_exit': self.confirm_stop_and_exit()
+                elif kind == 'exit_complete': self._quit(); return
+                elif kind == 'exit_error':
+                    self.busy = False
+                    self.main_button.configure(state='normal')
+                    self.message.set(data)
+                    messagebox.showerror('Не удалось остановить систему', data, parent=self.root)
+                elif kind == 'stopped': pass
                 elif kind == 'events': self.event_fetching = False; self.merge_events(data)
                 elif kind == 'events_unavailable': self.event_fetching = False
                 elif kind == 'message': self.message.set(data); self.busy = False; self.main_button.configure(state='normal')
@@ -286,4 +374,22 @@ if __name__ == '__main__':
     if sys.platform == 'win32':
         import ctypes
         ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID('Evrika.ANPR.ControlPanel')
-    root = ctk.CTk(); Panel(root); root.mainloop()
+    from panel_instance import PanelInstance
+    instance = PanelInstance()
+    try:
+        try:
+            instance.acquire()
+        except RuntimeError as error:
+            messagebox.showerror('Эврика', str(error))
+        else:
+            root = ctk.CTk()
+            panel = Panel(root)
+            def check_replacement():
+                if instance.replacement_requested():
+                    panel._quit()
+                else:
+                    root.after(200, check_replacement)
+            root.after(200, check_replacement)
+            root.mainloop()
+    finally:
+        instance.close()

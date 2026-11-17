@@ -5,3 +5,4 @@ fastapi>=0.110
 uvicorn>=0.29
 customtkinter>=5.2,<6
 pystray>=0.19,<1
+opencv-python-headless>=4.10,<6

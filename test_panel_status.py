@@ -39,9 +39,11 @@ class StatusTests(unittest.TestCase):
                                   'telegram_delivery': {'ok': True, 'at': '2026-11-17T13:04:05+05:00'}})
         self.assertEqual(self.panel.camera[1].value, 'Данные поступают')
         self.assertEqual(self.panel.telegram[1].value, 'Последняя отправка: 13:04')
-        self.panel.merge_events({'instance': 'one', 'events': [{'id': 1, 'time': '2026-11-17T13:04:05+05:00', 'text': 'Сообщение отправлено'}]})
-        self.panel.merge_events({'instance': 'one', 'events': [{'id': 1, 'time': '2026-11-17T13:04:05+05:00', 'text': 'Сообщение отправлено'}]})
-        self.assertEqual(list(self.panel.events), ['13:04:05 · Сообщение отправлено'])
+        data = {'passages': [{'id': 1, 'captured_at': '2026-11-17T13:04:05+05:00',
+                              'plate': '01 A 123 BC', 'direction': 'Въезд', 'lane': '1', 'speed': '20'}]}
+        self.panel.merge_events(data)
+        self.panel.merge_events(data)
+        self.assertEqual(list(self.panel.events), ['17.11 13:04:05 · 01 A 123 BC · Въезд · Полоса 1 · 20 км/ч'])
         self.panel.update_status(None)
         self.assertEqual(self.panel.camera[0].value, 'Неактивна')
         self.assertEqual(self.panel.telegram[0].value, 'Неактивен')

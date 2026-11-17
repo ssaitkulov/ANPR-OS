@@ -57,6 +57,20 @@ class Store:
             self.conn.commit()
             return cur.lastrowid or None
 
+    def recent_passages(self, limit=100):
+        """Return recent passage metadata only; no images or delivery data."""
+        with self.lock:
+            rows = self.conn.execute(
+                """SELECT id, captured_at, plate, direction, lane, speed, backfill
+                   FROM events ORDER BY captured_at DESC, id DESC LIMIT ?""", (limit,)
+            ).fetchall()
+        keys = ('id', 'captured_at', 'plate', 'direction', 'lane', 'speed', 'backfill')
+        return [dict(zip(keys, row)) for row in rows]
+
+    def passage_identity(self, event_id):
+        with self.lock:
+            return self.conn.execute('SELECT captured_at, plate FROM events WHERE id=?', (event_id,)).fetchone()
+
     def enqueue_text(self, event_id, chat_id, body, kind='text'):
         with self.lock:
             self.conn.execute('INSERT INTO outbox(event_id,chat_id,body,kind) VALUES(?,?,?,?)',
