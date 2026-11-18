@@ -37,7 +37,8 @@ from zoneinfo import ZoneInfo
 import requests
 from requests.auth import HTTPDigestAuth
 from event_images import prepare_event_images
-from storage import Store, passage_key, backfill_key
+from storage import Store, event_key, passage_key, normalize_plate
+import storage as storage_module
 from system_events import EVENTS
 from passage_photos import PHOTOS
 from photo_archive import save_photo
@@ -107,7 +108,19 @@ RECONNECT_DELAY = int(cfg("RECONNECT_DELAY", "10"))
 HEARTBEAT = cfg("HEARTBEAT", "5")
 DEDUP_WINDOW_SECONDS = max(0.0, float(cfg('DEDUP_WINDOW_SECONDS', '15')))
 STATE_KEEP_DAYS = max(1, int(cfg('STATE_KEEP_DAYS', '30')))  # сколько дней хранить JSON-зеркало
-OUTBOX_FLUSH_INTERVAL = max(5, int(cfg('OUTBOX_FLUSH_INTERVAL', '15')))  # сек между попытками доставки очереди
+OUTBOX_FLUSH_INTERVAL = max(10, int(cfg('OUTBOX_FLUSH_INTERVAL', '15')))  # сек между попытками доставки очереди
+OUTBOX_MAX_ATTEMPTS = max(1, int(cfg('OUTBOX_MAX_ATTEMPTS', '10')))  # попыток до статуса dead
+OUTBOX_RETRY_BASE_SECONDS = max(1, int(cfg('OUTBOX_RETRY_BASE_SECONDS', '30')))  # первая пауза повтора
+OUTBOX_RETRY_MAX_SECONDS = max(OUTBOX_RETRY_BASE_SECONDS,
+                               int(cfg('OUTBOX_RETRY_MAX_SECONDS', '3600')))  # потолок паузы повтора
+
+# Политика повторов очереди живёт в storage.py — передаём туда значения из .env.
+storage_module.DEFAULT_MAX_ATTEMPTS = OUTBOX_MAX_ATTEMPTS
+storage_module.RETRY_BASE_DELAY = float(OUTBOX_RETRY_BASE_SECONDS)
+storage_module.RETRY_MAX_DELAY = float(OUTBOX_RETRY_MAX_SECONDS)
+
+# Широковещательная запись очереди: получателей станет известно позже.
+BROADCAST_CHAT = ''
 BACKFILL_INTERVAL = max(15, int(cfg('BACKFILL_INTERVAL', '60')))  # сек между доборами архива
 RUNTIME = {'camera_message': 'подключаюсь…', 'telegram_message': 'ожидаю первую отправку.', 'last_camera_data': ''}
 
@@ -219,51 +232,97 @@ def _tg_base() -> str:
     return f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
 
 
-def telegram_send_to(chat_id: str, text: str) -> bool:
+# Недоставленный хвост последней отправки по чатам: доставленное не повторяем.
+_LAST_TAIL: dict = {}
+# Итог последней рассылки: кому доставлено, кому ушло в очередь.
+_LAST_DELIVERY: dict = {'delivered': [], 'failed': [], 'seq': 0}
+_DELIVERY_SEQ = {'n': 0}
+
+
+def _set_delivery(delivered: list, failed: list) -> None:
+    """Запомнить итог рассылки по чатам (пустые списки — отправки не было)."""
+    _DELIVERY_SEQ['n'] += 1
+    _LAST_DELIVERY.update({'delivered': list(delivered), 'failed': list(failed),
+                            'seq': _DELIVERY_SEQ['n']})
+
+
+def _telegram_post_message(chat_id: str, text: str) -> bool:
+    """Один вызов sendMessage (текст не длиннее 4000 символов)."""
     try:
-        for i in range(0, len(text), 4000):
-            r = requests.post(f"{_tg_base()}/sendMessage",
-                              json={"chat_id": chat_id, "text": text[i:i + 4000],
-                                    "parse_mode": "HTML", "disable_web_page_preview": True},
-                              timeout=30)
-            r.raise_for_status()
+        r = requests.post(f"{_tg_base()}/sendMessage",
+                          json={"chat_id": chat_id, "text": text,
+                                "parse_mode": "HTML", "disable_web_page_preview": True},
+                          timeout=30)
+        r.raise_for_status()
         return True
     except Exception as e:  # pragma: no cover
         print(f"[telegram] {chat_id}: {e}", file=sys.stderr)
         return False
 
 
+def telegram_send_to(chat_id: str, text: str) -> bool:
+    """Отправить текст в чат. True — доставлено целиком.
+
+    Длинный текст идёт частями по 4000 символов. Если сбой случился посередине,
+    недоставленный хвост остаётся в `_LAST_TAIL[chat_id]`: в очередь кладётся
+    только хвост, поэтому уже доставленное не дублируется.
+    """
+    parts = [text[i:i + 4000] for i in range(0, len(text), 4000)] or ['']
+    for idx, part in enumerate(parts):
+        if not _telegram_post_message(chat_id, part):
+            _LAST_TAIL[chat_id] = ''.join(parts[idx:])
+            return False
+    _LAST_TAIL.pop(chat_id, None)
+    return True
+
+
+def _tail_of(chat_id: str) -> str:
+    """Недоставленный хвост последней отправки в чат ('' — всё доставлено)."""
+    return _LAST_TAIL.pop(chat_id, '')
+
+
 def telegram_send(text: str, photo_path: Path | None = None, caption: str = "", kind: str = "text") -> bool:
     """Отправить текст всем получателям.
 
-    Чат, где отправка не удалась, получает этот же текст в очередь — сообщение
-    не пропадает и докачается, когда Telegram снова доступен.
+    Успех считается по каждому чату отдельно: чату, где отправка не удалась,
+    текст кладётся в очередь с его chat_id — докачается, когда Telegram доступен.
     """
     if not TELEGRAM_BOT_TOKEN:
-        print("[telegram] не задан TELEGRAM_BOT_TOKEN — отправка пропущена", file=sys.stderr)
+        print("[telegram] не задан TELEGRAM_BOT_TOKEN — сообщение ждёт в очереди", file=sys.stderr)
+        queue_missed_text(text, kind=kind, chats=[])
         return False
     recs = get_recipients()
     if not recs:
-        print("[telegram] нет получателей (TELEGRAM_CHAT_ID + /start подписчиков)", file=sys.stderr)
+        # Получателей ещё нет — сообщение не должно потеряться: ждёт в очереди.
+        queue_missed_text(text, kind=kind, chats=[])
+        print("[telegram] нет получателей — сообщение сохранено в очереди", file=sys.stderr)
+        _set_delivery([], [])
         return False
     if photo_path and photo_path.exists():
         data = photo_path.read_bytes()
         return telegram_send_photo(data, caption, kind=kind)
-    failed = []
-    ok = False
+    delivered, failed = [], []
     for cid in recs:
         if telegram_send_to(cid, text):
-            ok = True
+            delivered.append(cid)
         else:
             failed.append(cid)
-    if failed:
-        queue_missed_text(text, kind=kind, chats=failed)
-    return ok
+    _set_delivery(delivered, failed)
+    for cid in failed:
+        # В очередь — только недоставленный хвост: доставленное не повторяем.
+        queue_missed_text(_tail_of(cid) or text, kind=kind, chats=[cid])
+    return bool(delivered)
 
 
 def queue_missed_text(text: str, kind: str = 'text', chats: list | None = None) -> None:
-    """Сохранить текст в очереди недоставленных (для chats — по умолчанию для всех получателей)."""
+    """Сохранить текст в очереди недоставленных.
+
+    chats=None — всем текущим получателям; chats=[] — широковещательно
+    (получателей пока нет): сообщение дойдёт, как только подписчики появятся.
+    """
     targets = list(chats) if chats is not None else get_recipients()
+    if not targets:
+        targets = [BROADCAST_CHAT]
     for cid in targets:
         try:
             STORE.enqueue_text(None, cid, text, kind)
@@ -292,20 +351,80 @@ def flush_missed_messages() -> bool:
         return _flush_missed_messages()
 
 
+def _mark_failed(row_id, error) -> str:
+    """Отметить неудачную попытку; вернуть новый статус ('pending' или 'dead')."""
+    try:
+        status = STORE.mark_failed(row_id, error)
+    except sqlite3.Error as failure:  # pragma: no cover
+        print(f'[outbox] не удалось записать попытку: {failure}', file=sys.stderr)
+        return 'pending'
+    return status or 'pending'
+
+
+def _report_dead(row_id, row, chat_id: str) -> None:
+    """Попытки исчерпаны: запись в журнал событий (/events) и в stderr."""
+    try:
+        attempts = STORE.attempts_of(row_id)
+    except Exception:  # pragma: no cover - хранилище без такого метода
+        attempts = row[5] if len(row) > 5 else OUTBOX_MAX_ATTEMPTS
+    body = row[3] if len(row) > 3 else ''
+    text = (f'Сообщение не доставлено в чат {chat_id}: попыток {attempts}. '
+            f'Текст: {str(body)[:120]}')
+    print(f'[outbox] {text}', file=sys.stderr)
+    EVENTS.add('telegram_dead', text, now_local().isoformat())
+
+
+def _flush_broadcast(rows: list) -> bool:
+    """Раздать широковещательное сообщение текущим получателям.
+
+    Каждому получателю — своя копия; чату, где отправка не удалась, сообщение
+    остаётся в очереди отдельной записью с его chat_id.
+    """
+    recipients = get_recipients()
+    if not recipients:
+        print('[outbox] получателей нет — сообщение ждёт в очереди', file=sys.stderr)
+        return False
+    body = _outbox_body(rows)
+    kind = rows[0][4] if len(rows[0]) > 4 else 'text'
+    delivered = False
+    for cid in recipients:
+        if telegram_send_to(cid, body):
+            delivered = True
+        else:
+            # В очередь — только недоставленный хвост: доставленное не повторяем.
+            queue_missed_text(_tail_of(cid) or body, kind=kind, chats=[cid])
+    for row in rows:
+        STORE.mark_sent(row[0])
+    return delivered
+
+
 def _flush_missed_messages() -> bool:
+    """Доставка очереди по чатам: успех считается по каждому чату отдельно."""
     grouped = STORE.pending_grouped()
     if not grouped or not TELEGRAM_BOT_TOKEN:
         return False
     delivered = False
     for chat_id, rows in grouped.items():
+        if not str(chat_id):
+            delivered = _flush_broadcast(rows) or delivered
+            continue
         body = _outbox_body(rows)
         if telegram_send_to(chat_id, body):
             for row in rows:
                 STORE.mark_sent(row[0])
             delivered = True
         else:
+            tail = _tail_of(chat_id)
+            if tail:
+                # Часть длинного сообщения дошла — её не повторяем, хвост ждёт отдельно.
+                for row in rows:
+                    STORE.mark_partial(row[0])
+                queue_missed_text(tail, kind=rows[0][4] if len(rows[0]) > 4 else 'text',
+                                  chats=[chat_id])
+                continue
             for row in rows:
-                STORE.mark_failed(row[0], 'Telegram недоступен')
+                if _mark_failed(row[0], 'Telegram недоступен') == 'dead':
+                    _report_dead(row[0], row, chat_id)
     return delivered
 
 
@@ -314,6 +433,7 @@ def outbox_worker(stop_event: threading.Event) -> None:
 
     Работает независимо от камеры: камера может быть недоступна часами,
     а накопленные сообщения всё равно уходят, как только Telegram доступен.
+    Повторы идут с экспоненциальной паузой (next_attempt_at в базе).
     """
     while not stop_event.is_set():
         try:
@@ -342,25 +462,33 @@ def telegram_send_media_group_to(chat_id: str, items: list) -> bool:
 def telegram_send_media_group(items: list, kind: str = 'entry_without_photo') -> bool:
     """items: [(image_bytes, caption), ...] — одним sendMediaGroup в каждый чат (макс 10 фото).
 
-    Чату, где альбом не доставился, текст уходит в очередь: сообщение докачается позже.
+    Чату, где альбом не доставился, текст уходит в очередь с его chat_id:
+    сообщение докачается позже отдельной записью очереди.
     """
-    if not TELEGRAM_BOT_TOKEN or not items:
+    if not items:
+        return False
+    if not TELEGRAM_BOT_TOKEN:
+        print("[telegram] не задан TELEGRAM_BOT_TOKEN — подпись ждёт в очереди", file=sys.stderr)
+        queue_missed_text(items[0][1] if items else '', kind=kind, chats=[])
         return False
     items = items[:10]
     recs = get_recipients()
-    if not recs:
-        return False
     caption = items[0][1] if items else ''
-    failed = []
-    ok = False
+    if not recs:
+        queue_missed_text(caption, kind=kind, chats=[])
+        print("[telegram] нет получателей — подпись сохранена в очереди", file=sys.stderr)
+        _set_delivery([], [])
+        return False
+    delivered, failed = [], []
     for cid in recs:
         if telegram_send_media_group_to(cid, items):
-            ok = True
+            delivered.append(cid)
         else:
             failed.append(cid)
-    if failed:
-        queue_missed_text(caption, kind=kind, chats=failed)
-    return ok
+    _set_delivery(delivered, failed)
+    for cid in failed:
+        queue_missed_text(caption, kind=kind, chats=[cid])
+    return bool(delivered)
 
 
 # ---------------------------------------------------------------------------
@@ -430,22 +558,25 @@ def telegram_send_photo_to(chat_id: str, image_bytes: bytes | None, caption: str
 def telegram_send_photo(image_bytes: bytes | None, caption: str, kind: str = 'entry_without_photo') -> bool:
     """Отправить снимок всем получателям; недоставленным чатам текст уходит в очередь."""
     if not TELEGRAM_BOT_TOKEN:
-        print("[telegram] не задан TELEGRAM_BOT_TOKEN — отправка пропущена", file=sys.stderr)
+        print("[telegram] не задан TELEGRAM_BOT_TOKEN — подпись ждёт в очереди", file=sys.stderr)
+        queue_missed_text(caption, kind=kind, chats=[])
         return False
     recs = get_recipients()
     if not recs:
-        print("[telegram] нет получателей", file=sys.stderr)
+        queue_missed_text(caption, kind=kind, chats=[])
+        print("[telegram] нет получателей — подпись сохранена в очереди", file=sys.stderr)
+        _set_delivery([], [])
         return False
-    failed = []
-    ok = False
+    delivered, failed = [], []
     for cid in recs:
         if telegram_send_photo_to(cid, image_bytes, caption):
-            ok = True
+            delivered.append(cid)
         else:
             failed.append(cid)
-    if failed:
-        queue_missed_text(caption, kind=kind, chats=failed)
-    return ok
+    _set_delivery(delivered, failed)
+    for cid in failed:
+        queue_missed_text(caption, kind=kind, chats=[cid])
+    return bool(delivered)
 
 
 def send_entry_notification(rec: dict, images, dry_run: bool = False) -> None:
@@ -464,6 +595,7 @@ def send_entry_notification(rec: dict, images, dry_run: bool = False) -> None:
     if not SEND_EACH_ENTRY:
         return
     send_started = time.monotonic()
+    seq_before = _DELIVERY_SEQ['n']
     if len(image_list) >= 2:
         ok = telegram_send_media_group([(image_list[0], caption)] + [(im, "") for im in image_list[1:]])
     elif len(image_list) == 1:
@@ -471,9 +603,20 @@ def send_entry_notification(rec: dict, images, dry_run: bool = False) -> None:
     else:
         ok = telegram_send(caption, kind='entry_without_photo')
     delivered_at = now_local().isoformat()
-    RUNTIME['telegram_delivery'] = {'ok': ok, 'at': delivered_at}
-    EVENTS.add('telegram_ok' if ok else 'telegram_error',
-               'Сообщение отправлено' if ok else 'Ошибка отправки Telegram', delivered_at)
+    # Итог по чатам берём только если рассылка действительно была сейчас.
+    if _LAST_DELIVERY.get('seq', 0) != seq_before:
+        good = len(_LAST_DELIVERY.get('delivered') or [])
+        bad = len(_LAST_DELIVERY.get('failed') or [])
+    else:
+        good, bad = (1, 0) if ok else (0, 1)
+    RUNTIME['telegram_delivery'] = {'ok': ok, 'delivered': good, 'failed': bad, 'at': delivered_at}
+    if ok and bad:
+        EVENTS.add('telegram_partial',
+                   f'Доставлено чатам: {good}, в очереди (Telegram недоступен): {bad}', delivered_at)
+    elif ok:
+        EVENTS.add('telegram_ok', 'Сообщение отправлено', delivered_at)
+    else:
+        EVENTS.add('telegram_error', 'Ошибка отправки Telegram', delivered_at)
     RUNTIME['telegram_message'] = ('последнее уведомление доставлено хотя бы в один разрешённый чат.' if ok else 'не удалось доставить уведомление (в очередь). Проверьте интернет, токен и ID чата.')
     elapsed = time.monotonic() - send_started
     RUNTIME['telegram_message'] += f' Отправка заняла {elapsed:.1f} с.'
@@ -658,6 +801,11 @@ def is_approach_value(val: str) -> bool:
     return low in APPROACH_VALUES or any(v in low for v in APPROACH_VALUES if len(v) > 3)
 
 
+def camera_group_id(ev: dict) -> str:
+    """GroupID прошивки — хранится отдельной колонкой, в ключ не входит."""
+    return str(ev.get("GroupID", "") or "").strip()
+
+
 def is_countable(ev: dict) -> tuple:
     """Возвращает (считать ли, прошивный ключ события).
 
@@ -698,15 +846,8 @@ def direction_label(value):
     return {'Approach': 'Въезд', 'Leave': 'Выезд', '': 'не определено'}[direction_kind(value)]
 
 
-def store_passage(rec: dict, source_key: str | None = None) -> int | None:
-    """Сохранить проезд в SQLite — единый источник истины для всех проездов."""
-    iso = rec.get('iso', '')
-    plate = rec.get('plate', '')
-    lane = rec.get('lane', '')
-    if rec.get('backfill'):
-        key = backfill_key(rec.get('rec_no'), iso, plate, lane)
-    else:
-        key = passage_key(iso, plate, lane)
+def store_event(rec: dict, key: str, source_key: str | None = None) -> int | None:
+    """Записать проезд в SQLite по готовому ключу события."""
     try:
         return STORE.add_event(key, rec, source_key)
     except sqlite3.Error as error:
@@ -714,9 +855,17 @@ def store_passage(rec: dict, source_key: str | None = None) -> int | None:
         return None
 
 
-def normalize_plate(value) -> str:
-    """Номер без пробелов и регистра — для сравнения номеров из разных источников."""
-    return re.sub(r'\s+', '', str(value or '')).upper()
+def store_passage(rec: dict, source_key: str | None = None) -> int | None:
+    """Сохранить проезд в SQLite — единый источник истины для всех проездов.
+
+    Ключ события — контентный (sha256 от дня, времени, номера, полосы и
+    направления), поэтому повторный проезд с переиспользованным GroupID
+    получает свою строку, а тот же самый проезд — не получает.
+    """
+    iso = rec.get('iso', '')
+    key = event_key(iso[:10], iso, rec.get('plate', ''), rec.get('lane', ''),
+                    rec.get('direction', ''))
+    return store_event(rec, key, source_key)
 
 
 def find_archive_row(plate: str, when: datetime, window: int = 120):
@@ -777,6 +926,8 @@ def record_from_row(row: dict) -> dict:
         'direction': row.get('direction', ''),
         'confidence': row.get('confidence', ''),
         'backfill': bool(row.get('backfill')),
+        'group_id': row.get('group_id', ''),
+        'rec_no': row.get('rec_no'),
     }
 
 
@@ -796,8 +947,7 @@ def _reconcile_state_with_store(state: dict) -> int:
                 continue
             if STORE.passage_exists(iso, plate):
                 continue
-            key = (backfill_key(rec.get('rec_no'), iso, plate, rec.get('lane', ''))
-                   if rec.get('backfill') else passage_key(iso, plate, rec.get('lane', '')))
+            key = event_key(iso[:10], iso, plate, rec.get('lane', ''), rec.get('direction', ''))
             items.append((key, rec, None))
     if not items:
         return 0
@@ -859,6 +1009,7 @@ def _record_event(state: dict, ev: dict, image: bytes | None) -> dict | None:
         "direction": get_direction_value(ev)[0],
         "confidence": (ev.get("TrafficCar.Confidence") or ev.get("Confidence")
                        or ev.get("Object.Confidence") or ev.get("Vehicle.Confidence") or ""),
+        "group_id": camera_group_id(ev),
     }
     day = today_str(now)
     archived = find_archive_row(plate, now)
@@ -871,7 +1022,8 @@ def _record_event(state: dict, ev: dict, image: bytes | None) -> dict | None:
         save_passage(rec, source_key)
         state["days"].setdefault(day, []).append(rec)
     state["last_event_time"] = rec["iso"]
-    state["seen"].append(passage_key(rec["iso"], rec.get("plate", ""), rec.get("lane", "")))
+    state["seen"].append(passage_key(rec["iso"], rec.get("plate", ""), rec.get("lane", ""),
+                                     rec.get("direction", "")))
     state["seen"] = state["seen"][-5000:]  # не разрастаться
     # Images are stored separately after event metadata is recorded.
     save_state(state)
@@ -919,10 +1071,12 @@ def maybe_send_report(state: dict, dry_run: bool = False) -> bool:
     print(text)
     if not dry_run:
         ok = telegram_send(text, kind='report')
-        if ok:
-            state["last_report_date"] = day
-            save_state(state)
-            print("[report] отчёт отправлен в Telegram ✅", file=sys.stderr)
+        # Дату отмечаем всегда: неудачная отправка уже легла в очередь и дойдёт
+        # позже. Повтор в ту же минуту набил бы очередь копиями отчёта.
+        state["last_report_date"] = day
+        save_state(state)
+        print("[report] отчёт отправлен в Telegram ✅" if ok else
+              "[report] отчёт не доставлен — ждёт в очереди", file=sys.stderr)
     return True
 
 
@@ -1015,7 +1169,10 @@ def _record_backfill_event(state: dict, plate: str, when: datetime, speed: str =
     if rec_no not in (None, ''):
         rec["rec_no"] = int(rec_no)
     day = when.strftime("%Y-%m-%d")
-    store_passage(rec)
+    # Проезд из архива пишется в SQLite с флагом backfill=1; ключ события
+    # контентный — по времени и номеру (плюс полоса и направление).
+    key = event_key(day, when.isoformat(), rec["plate"], lane, direction)
+    store_event(rec, key)
     state["days"].setdefault(day, []).append(rec)
     state["last_event_time"] = when.isoformat()
     # Backfill has no image payload and stores metadata only.

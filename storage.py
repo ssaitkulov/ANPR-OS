@@ -6,32 +6,66 @@ Images are stored separately as files; SQLite keeps only their paths.
 (live detection or archive/backfill record).
 
 `event_key` identifies one concrete passage and is therefore UNIQUE. It is
-derived from the passage itself (timestamp + plate + lane), never from the
-firmware identifiers, because firmware reuses `GroupID` for different
-vehicles. The firmware key (`GroupID:IndexInGroup:plate:lane`) is kept
-separately in `source_key` for diagnostics only.
+content-derived: `sha256(day|iso|plate|lane|direction)`. Firmware identifiers
+(`GroupID`, `IndexInGroup`) are never part of the key, because this firmware
+reuses `GroupID` for different vehicles — a repeated passage must still create
+a new row. The firmware key (`GroupID:IndexInGroup:plate:lane`) is kept in
+`source_key`, the bare group id in `group_id`, and the camera archive record
+number in `rec_no` — all for diagnostics only.
 
 Deduplication of live events is done by the caller (time window + snapshot
 fingerprint); the database only guarantees that the same passage is never
 stored twice under the same key.
 """
+import hashlib
 import sqlite3
+import sys
 import threading
+import time
 from pathlib import Path
 
 
-def passage_key(captured_at: str, plate: str, lane: str = '', backfill: bool = False) -> str:
-    """Deterministic key of one passage (live or archive)."""
-    stamp = (captured_at or '').strip()
-    prefix = 'backfill' if backfill else 'live'
-    return f"{prefix}:{stamp}|{plate or ''}|{lane or ''}"
+def normalize_plate(value) -> str:
+    """Plate without spaces and case — used for comparisons and keys."""
+    return ''.join(str(value or '').split()).upper()
 
 
-def backfill_key(rec_no, captured_at: str, plate: str, lane: str = '') -> str:
-    """Key of an archive record; the camera RecNo wins when it is known."""
-    if rec_no not in (None, '', 0):
-        return f"backfill:rec:{int(rec_no)}"
-    return passage_key(captured_at, plate, lane, backfill=True)
+def event_key(day: str, captured_at: str, plate: str = '', lane: str = '',
+              direction: str = '') -> str:
+    """Content-unique key of one passage: sha256(day|iso|plate|lane|direction)."""
+    parts = [str(day or '').strip(), str(captured_at or '').strip(),
+             normalize_plate(plate), str(lane or '').strip(), str(direction or '').strip()]
+    return hashlib.sha256('|'.join(parts).encode('utf-8')).hexdigest()
+
+
+def passage_key(captured_at: str, plate: str, lane: str = '', direction: str = '') -> str:
+    """Key of one passage; the day is taken from the timestamp."""
+    return event_key(str(captured_at or '')[:10], captured_at, plate, lane, direction)
+
+
+def is_event_key(value) -> bool:
+    """True when the key is already in the current sha256 format."""
+    text = str(value or '')
+    return len(text) == 64 and all(ch in '0123456789abcdef' for ch in text)
+
+
+def group_id_of(source_key) -> str:
+    """Group id out of the firmware key `GroupID:IndexInGroup:plate:lane`."""
+    text = str(source_key or '').strip()
+    if not text or ':' not in text:
+        return ''
+    return text.split(':', 1)[0].strip()
+
+
+def rec_no_of(event_key_value) -> int | None:
+    """Archive record number out of the legacy key `backfill:rec:<n>`."""
+    text = str(event_key_value or '')
+    if text.startswith('backfill:rec:'):
+        try:
+            return int(text.rsplit(':', 1)[1])
+        except ValueError:
+            return None
+    return None
 
 
 CREATE_EVENTS_TABLE = '''
@@ -39,6 +73,8 @@ CREATE_EVENTS_TABLE = '''
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         event_key TEXT UNIQUE,
         source_key TEXT,
+        group_id TEXT,
+        rec_no INTEGER,
         day TEXT NOT NULL,
         captured_at TEXT NOT NULL,
         plate TEXT NOT NULL,
@@ -58,10 +94,29 @@ CREATE_EVENTS_INDEXES = '''
     CREATE INDEX IF NOT EXISTS events_plate_idx ON events(plate, captured_at);
     CREATE INDEX IF NOT EXISTS events_capture_idx ON events(captured_at, plate);
     CREATE INDEX IF NOT EXISTS events_source_idx ON events(source_key);
+    CREATE INDEX IF NOT EXISTS events_group_idx ON events(group_id, captured_at);
 '''
 
-EVENT_FIELDS = ('id', 'event_key', 'source_key', 'day', 'captured_at', 'plate', 'direction',
-                'lane', 'speed', 'vehicle_color', 'plate_type', 'confidence', 'backfill')
+EVENT_FIELDS = ('id', 'event_key', 'source_key', 'group_id', 'rec_no', 'day', 'captured_at',
+                'plate', 'direction', 'lane', 'speed', 'vehicle_color', 'plate_type',
+                'confidence', 'backfill')
+
+# -- политика повторов очереди недоставленных ------------------------------
+# Значения по умолчанию; anpr_telegram.py переопределяет их из .env при импорте.
+DEFAULT_MAX_ATTEMPTS = 10      # после стольких неудачных попыток запись становится 'dead'
+RETRY_BASE_DELAY = 30.0        # первая пауза перед повтором, секунды
+RETRY_MAX_DELAY = 3600.0       # потолок экспоненциальной паузы, секунды
+
+
+def backoff_delay(attempts: int, base: float = RETRY_BASE_DELAY,
+                  cap: float = RETRY_MAX_DELAY) -> float:
+    """Пауза перед следующей попыткой: base, 2*base, 4*base ... (не больше cap)."""
+    try:
+        attempts = int(attempts)
+    except (TypeError, ValueError):
+        attempts = 1
+    attempts = max(1, attempts)
+    return float(min(cap, base * (2 ** (attempts - 1))))
 
 
 class Store:
@@ -87,18 +142,27 @@ class Store:
                 status TEXT NOT NULL DEFAULT 'pending',
                 attempts INTEGER NOT NULL DEFAULT 0,
                 last_error TEXT,
+                next_attempt_at REAL,
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 sent_at TEXT
             );
             CREATE INDEX IF NOT EXISTS outbox_pending ON outbox(status, id);
         ''')
         self._upgrade_events()
+        self._upgrade_outbox()
+        self.conn.executescript('''
+            CREATE INDEX IF NOT EXISTS outbox_due ON outbox(status, next_attempt_at);
+        ''')
         self.conn.commit()
 
     # -- schema ------------------------------------------------------------
 
     def _upgrade_events(self):
-        """Bring an older events table to the current layout.
+        """Bring an older events table to the current layout (hot migration).
+
+        Two things happen here, both idempotent:
+          * missing columns (`group_id`, `rec_no`) are added;
+          * legacy `event_key` values are replaced by content-derived sha256 keys.
 
         Legacy databases kept the firmware key in a UNIQUE column, so every
         repeated passage (same GroupID, same plate, same lane) was silently
@@ -111,8 +175,24 @@ class Store:
             columns = {row[1] for row in conn.execute('PRAGMA table_info(events)')}
             if 'source_key' not in columns:
                 self._rebuild_events(columns)
+            else:
+                self._add_missing_columns(columns)
         conn.executescript(CREATE_EVENTS_TABLE)
         conn.executescript(CREATE_EVENTS_INDEXES)
+        self._migrate_event_keys()
+
+    def _upgrade_outbox(self):
+        """Добавить в старую очередь колонку отложенной попытки (next_attempt_at)."""
+        columns = {row[1] for row in self.conn.execute('PRAGMA table_info(outbox)')}
+        if 'next_attempt_at' not in columns:
+            self.conn.execute('ALTER TABLE outbox ADD COLUMN next_attempt_at REAL')
+
+    def _add_missing_columns(self, columns):
+        conn = self.conn
+        for name, ddl in (('group_id', 'ALTER TABLE events ADD COLUMN group_id TEXT'),
+                          ('rec_no', 'ALTER TABLE events ADD COLUMN rec_no INTEGER')):
+            if name not in columns:
+                conn.execute(ddl)
 
     def _rebuild_events(self, columns):
         conn = self.conn
@@ -130,33 +210,71 @@ class Store:
             captured = data.get('captured_at') or ''
             plate = data.get('plate') or ''
             lane = data.get('lane') or ''
+            direction = data.get('direction') or ''
             backfill = bool(data.get('backfill'))
-            key = passage_key(captured, plate, lane, backfill)
+            day = data.get('day') or captured[:10]
+            key = event_key(day, captured, plate, lane, direction)
             if key in used:
+                # Two rows describe the same passage — keep both, disambiguate.
                 key = f"{key}#{data.get('id')}"
             used.add(key)
             conn.execute('''INSERT OR IGNORE INTO events
-                (event_key, source_key, day, captured_at, plate, direction, lane, speed,
-                 vehicle_color, plate_type, confidence, backfill, created_at)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)''',
-                         (key, data.get('event_key'), data.get('day') or captured[:10], captured,
-                          plate, data.get('direction'), lane, data.get('speed'),
-                          data.get('vehicle_color'), data.get('plate_type'), data.get('confidence'),
-                          int(backfill), data.get('created_at')))
+                (event_key, source_key, group_id, rec_no, day, captured_at, plate, direction, lane,
+                 speed, vehicle_color, plate_type, confidence, backfill, created_at)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',
+                         (key, data.get('event_key'), group_id_of(data.get('event_key')),
+                          rec_no_of(data.get('event_key')), day, captured, plate, direction, lane,
+                          data.get('speed'), data.get('vehicle_color'), data.get('plate_type'),
+                          data.get('confidence'), int(backfill), data.get('created_at')))
+
+    def _migrate_event_keys(self):
+        """Replace legacy keys with content-derived ones; fill the new columns."""
+        conn = self.conn
+        rows = conn.execute('''SELECT id, event_key, source_key, group_id, rec_no,
+                                      day, captured_at, plate, direction, lane
+                               FROM events ORDER BY id''').fetchall()
+        if not rows:
+            return
+        owner = {}
+        for row in rows:
+            owner.setdefault(row[1], row[0])
+        migrated = 0
+        for (rid, key, source_key, group_id, rec_no, day, captured_at,
+             plate, direction, lane) in rows:
+            gid = group_id or group_id_of(source_key)
+            rec = rec_no if rec_no is not None else rec_no_of(key)
+            if gid != (group_id or '') or (rec is not None and rec_no is None):
+                conn.execute('UPDATE events SET group_id=?, rec_no=? WHERE id=?', (gid, rec, rid))
+            if is_event_key(key):
+                continue
+            fresh = event_key(day, captured_at, plate, lane, direction)
+            if owner.get(fresh, rid) != rid:
+                # Another row already owns that key (same content) — keep this row as is.
+                print(f'[storage] дубликат содержимого, ключ строки {rid} оставлен прежним',
+                      file=sys.stderr)
+                continue
+            conn.execute('UPDATE events SET event_key=? WHERE id=?', (fresh, rid))
+            owner[fresh] = rid
+            owner.pop(key, None)
+            migrated += 1
+        if migrated:
+            conn.commit()
+            print(f'[storage] ключи событий пересчитаны (sha256): {migrated}', file=sys.stderr)
 
     # -- passages ----------------------------------------------------------
 
-    def add_event(self, event_key, record, source_key=None):
+    def add_event(self, key, record, source_key=None):
         """Store one passage. Returns its row id (existing id if already stored)."""
         iso = record.get('iso', '') or ''
-        key = event_key or passage_key(iso, record.get('plate', ''), record.get('lane', ''),
-                                       bool(record.get('backfill')))
+        key = key or passage_key(iso, record.get('plate', ''), record.get('lane', ''),
+                                 record.get('direction', ''))
         with self.lock:
             cur = self.conn.execute('''INSERT OR IGNORE INTO events
-                (event_key, source_key, day, captured_at, plate, direction, lane, speed,
-                 vehicle_color, plate_type, confidence, backfill)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?)''',
-                (key, source_key, iso[:10], iso, record.get('plate', '—'),
+                (event_key, source_key, group_id, rec_no, day, captured_at, plate, direction, lane,
+                 speed, vehicle_color, plate_type, confidence, backfill)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',
+                (key, source_key, record.get('group_id', ''), _rec_no(record),
+                 iso[:10], iso, record.get('plate', '—'),
                  record.get('direction', ''), record.get('lane', ''), record.get('speed', ''),
                  record.get('color', ''), record.get('type', ''), record.get('confidence', ''),
                  int(bool(record.get('backfill')))))
@@ -170,12 +288,13 @@ class Store:
         """Store many passages at once. items: [(event_key, record, source_key), ...]."""
         rows = []
         for item in items:
-            event_key, record = item[0], item[1]
+            key, record = item[0], item[1]
             source_key = item[2] if len(item) > 2 else None
             iso = record.get('iso', '') or ''
-            key = event_key or passage_key(iso, record.get('plate', ''), record.get('lane', ''),
-                                           bool(record.get('backfill')))
-            rows.append((key, source_key, iso[:10], iso, record.get('plate', '—'),
+            key = key or passage_key(iso, record.get('plate', ''), record.get('lane', ''),
+                                     record.get('direction', ''))
+            rows.append((key, source_key, record.get('group_id', ''), _rec_no(record),
+                         iso[:10], iso, record.get('plate', '—'),
                          record.get('direction', ''), record.get('lane', ''), record.get('speed', ''),
                          record.get('color', ''), record.get('type', ''), record.get('confidence', ''),
                          int(bool(record.get('backfill')))))
@@ -184,21 +303,23 @@ class Store:
         with self.lock:
             before = self.conn.total_changes
             self.conn.executemany('''INSERT OR IGNORE INTO events
-                (event_key, source_key, day, captured_at, plate, direction, lane, speed,
-                 vehicle_color, plate_type, confidence, backfill)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?)''', rows)
+                (event_key, source_key, group_id,rec_no, day, captured_at, plate, direction, lane,
+                 speed, vehicle_color, plate_type, confidence, backfill)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)''', rows)
             self.conn.commit()
             return self.conn.total_changes - before
 
     def update_event(self, event_id, record, source_key=None):
         """Обновить существующую запись проезда (live-событие поверх архивной)."""
         iso = record.get('iso', '') or ''
-        key = passage_key(iso, record.get('plate', ''), record.get('lane', ''),
-                          bool(record.get('backfill')))
+        key = event_key(iso[:10], iso, record.get('plate', ''), record.get('lane', ''),
+                        record.get('direction', ''))
         with self.lock:
-            self.conn.execute('''UPDATE events SET source_key=?, day=?, captured_at=?, plate=?, direction=?,
+            self.conn.execute('''UPDATE events SET source_key=?, group_id=COALESCE(NULLIF(?,''), group_id),
+                rec_no=COALESCE(?, rec_no), day=?, captured_at=?, plate=?, direction=?,
                 lane=?, speed=?, vehicle_color=?, plate_type=?, confidence=?, backfill=? WHERE id=?''',
-                (source_key, iso[:10], iso, record.get('plate', '—'), record.get('direction', ''),
+                (source_key, record.get('group_id', ''), _rec_no(record),
+                 iso[:10], iso, record.get('plate', '—'), record.get('direction', ''),
                  record.get('lane', ''), record.get('speed', ''), record.get('color', ''),
                  record.get('type', ''), record.get('confidence', ''),
                  int(bool(record.get('backfill'))), event_id))
@@ -255,15 +376,19 @@ class Store:
     # -- outbox ------------------------------------------------------------
 
     def enqueue_text(self, event_id, chat_id, body, kind='text'):
+        """Положить сообщение в очередь. Повтор разрешён сразу."""
         with self.lock:
-            self.conn.execute('INSERT INTO outbox(event_id,chat_id,body,kind) VALUES(?,?,?,?)',
-                              (event_id, str(chat_id), body, kind))
+            self.conn.execute('INSERT INTO outbox(event_id,chat_id,body,kind,next_attempt_at) VALUES(?,?,?,?,?)',
+                              (event_id, str(chat_id), body, kind, time.time()))
             self.conn.commit()
 
     def pending(self, limit=100):
+        """Записи, готовые к отправке: статус pending и пауза повтора истекла."""
         with self.lock:
-            return self.conn.execute('''SELECT id,event_id,chat_id,body,kind,attempts FROM outbox
-                                        WHERE status='pending' ORDER BY id LIMIT ?''', (limit,)).fetchall()
+            return self.conn.execute('''SELECT id,event_id,chat_id,body,kind,attempts,next_attempt_at FROM outbox
+                                        WHERE status='pending'
+                                          AND (next_attempt_at IS NULL OR next_attempt_at<=?)
+                                        ORDER BY id LIMIT ?''', (time.time(), limit)).fetchall()
 
     def pending_grouped(self, limit=1000):
         grouped = {}
@@ -276,10 +401,58 @@ class Store:
             self.conn.execute("UPDATE outbox SET status='sent',sent_at=CURRENT_TIMESTAMP WHERE id=?", (outbox_id,))
             self.conn.commit()
 
-    def mark_failed(self, outbox_id, error):
+    def mark_partial(self, outbox_id):
+        """Запись доставлена частично (длинное сообщение) — хвост ждёт отдельной строки."""
         with self.lock:
-            self.conn.execute("UPDATE outbox SET attempts=attempts+1,last_error=? WHERE id=?", (str(error)[:500], outbox_id))
+            self.conn.execute("UPDATE outbox SET status='partial' WHERE id=?", (outbox_id,))
             self.conn.commit()
+
+    def attempts_of(self, outbox_id) -> int:
+        """Сколько попыток доставки было у записи."""
+        with self.lock:
+            row = self.conn.execute('SELECT attempts FROM outbox WHERE id=?', (outbox_id,)).fetchone()
+            return int(row[0]) if row else 0
+
+    def mark_failed(self, outbox_id, error, max_attempts=None, base_delay=None, max_delay=None):
+        """Записать неудачную попытку.
+
+        Возвращает новый статус записи: 'pending' (ждёт следующего повтора) или
+        'dead' (попытки исчерпаны — сообщение больше не отправляется автоматически).
+        """
+        max_attempts = DEFAULT_MAX_ATTEMPTS if max_attempts is None else max_attempts
+        base_delay = RETRY_BASE_DELAY if base_delay is None else base_delay
+        max_delay = RETRY_MAX_DELAY if max_delay is None else max_delay
+        with self.lock:
+            self.conn.execute('UPDATE outbox SET attempts=attempts+1 WHERE id=?', (outbox_id,))
+            row = self.conn.execute('SELECT attempts FROM outbox WHERE id=?', (outbox_id,)).fetchone()
+            attempts = int(row[0]) if row else 0
+            if attempts >= max_attempts:
+                self.conn.execute("UPDATE outbox SET status='dead',last_error=? WHERE id=?",
+                                  (str(error)[:500], outbox_id))
+                status = 'dead'
+            else:
+                delay = backoff_delay(attempts, base_delay, max_delay)
+                self.conn.execute('UPDATE outbox SET last_error=?,next_attempt_at=? WHERE id=?',
+                                  (str(error)[:500], time.time() + delay, outbox_id))
+                status = 'pending'
+            self.conn.commit()
+            return status
+
+    def dead_messages(self, limit=100):
+        """Записи, которые не удалось доставить (статус dead)."""
+        with self.lock:
+            return self.conn.execute('''SELECT id,chat_id,body,kind,attempts,last_error,created_at
+                                        FROM outbox WHERE status='dead' ORDER BY id DESC LIMIT ?''',
+                                      (limit,)).fetchall()
+
+    def outbox_stats(self):
+        """Счётчики очереди по статусам: pending / sent / partial / dead."""
+        with self.lock:
+            rows = self.conn.execute('SELECT status, COUNT(*) FROM outbox GROUP BY status').fetchall()
+        counts = {'pending': 0, 'sent': 0, 'partial': 0, 'dead': 0}
+        for status, count in rows:
+            counts[str(status)] = int(count)
+        return counts
 
     def stats(self):
         with self.lock:
@@ -290,3 +463,14 @@ class Store:
     def close(self):
         with self.lock:
             self.conn.close()
+
+
+def _rec_no(record):
+    """Archive record number of a passage record (None when it is unknown)."""
+    value = record.get('rec_no')
+    if value in (None, ''):
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None

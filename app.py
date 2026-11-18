@@ -81,6 +81,7 @@ def status():
     day = M.today_str()
     passages = M.STORE.day_passages(day)
     return {"today": day, "entries": len(passages), **M.STORE.stats(),
+            "outbox": M.STORE.outbox_stats(),
             "unique_plates": len({row.get("plate") for row in passages}),
             "subscribers": len(M.load_subscribers()),
             "last_event_time": state.get("last_event_time", ""),

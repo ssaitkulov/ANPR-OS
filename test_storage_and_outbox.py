@@ -1,4 +1,5 @@
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -24,15 +25,19 @@ class StorageTests(unittest.TestCase):
             self.assertNotIn('photo', {row[4] for row in reopened.pending()})
             reopened.close()
 
-    def test_failed_message_stays_pending_and_attempt_increases(self):
+    def test_failed_message_stays_in_queue_with_backoff(self):
         with tempfile.TemporaryDirectory() as folder:
             store = Store(Path(folder) / 'events.sqlite3')
             store.enqueue_text(None, '42', 'missed', 'entry_without_photo')
             row_id = store.pending()[0][0]
-            store.mark_failed(row_id, 'offline')
-            row = store.pending()[0]
-            self.assertEqual(row[5], 1)
-            self.assertEqual(store.stats()['pending_messages'], 1)
+            status = store.mark_failed(row_id, 'offline')
+            self.assertEqual(status, 'pending')
+            attempts, next_at = store.conn.execute(
+                'SELECT attempts, next_attempt_at FROM outbox WHERE id=?', (row_id,)).fetchone()
+            self.assertEqual(attempts, 1)
+            self.assertGreater(next_at, time.time())  # пауза перед повтором
+            self.assertEqual(store.pending(), [])       # до срока не повторяем
+            self.assertEqual(store.stats()['pending_messages'], 1)  # но запись жива
             store.close()
 
 
