@@ -135,7 +135,13 @@ def check_bot(values):
         return 'Не удалось проверить Telegram. Проверьте интернет и токен.'
 
 
-class SettingsWindow:
+class SettingsSection:
+    """Раздел «Настройки»: вкладки камеры, бота, мониторинга и приложения.
+
+    Может работать как отдельное окно (`setup_anpr.py`) и как раздел
+    единого окна приложения (параметр `container`).
+    """
+
     BG = '#101722'
     CARD = '#1a2432'
     BORDER = '#303e51'
@@ -143,24 +149,32 @@ class SettingsWindow:
     MUTED = '#a5b1c2'
     BLUE = '#2869df'
 
-    def __init__(self, root, on_close=None):
+    def __init__(self, master, on_close=None, container=None, show_back=None):
         self.on_close = on_close
-        if on_close is not None:
-            root = ctk.CTkFrame(root, fg_color=self.BG, corner_radius=0)
-            root.pack(fill='both', expand=True)
+        self.container = container
+        self.stopped = False
+        if container is not None or on_close is not None:
+            parent = container if container is not None else master
+            root = ctk.CTkFrame(parent, fg_color=self.BG, corner_radius=0)
+            if container is None:
+                root.pack(fill='both', expand=True)
         else:
             ctk.set_appearance_mode('dark')
+            root = master
             root.title('Evrika · Настройки')
             root.configure(fg_color=self.BG)
             root.iconbitmap(str(ASSETS / 'evrika.ico'))
             root.geometry('670x530')
             root.minsize(590, 480)
         self.root = root
+        if show_back is None:
+            show_back = on_close is not None and container is None
+        self.show_back = show_back
         self.results = queue.Queue()
 
         header = ctk.CTkFrame(root, fg_color='transparent')
         header.pack(fill='x', padx=22, pady=(14, 4))
-        if self.on_close is not None:
+        if self.show_back:
             ctk.CTkButton(header, text='‹  Назад', width=85, height=32, fg_color=self.CARD,
                           hover_color='#34455a', command=self.close).pack(side='left', padx=(0, 14))
         ctk.CTkLabel(header, text='Настройки', text_color=self.TEXT,
@@ -314,6 +328,8 @@ class SettingsWindow:
         threading.Thread(target=worker, daemon=True).start()
 
     def poll(self):
+        if self.stopped:
+            return
         try:
             self.status.set(self.results.get_nowait())
             for button in self.check_buttons:
@@ -322,11 +338,19 @@ class SettingsWindow:
             pass
         self.root.after(100, self.poll)
 
+    def shutdown(self):
+        """Остановить опрос результатов перед закрытием приложения."""
+        self.stopped = True
+
+
+#: Прежнее имя класса окна настроек — тот же раздел в новом окне.
+SettingsWindow = SettingsSection
+
 
 def main() -> None:
     """Запуск окна настроек. Вызывается корневым лаунчером setup_anpr.py."""
     root = ctk.CTk()
-    SettingsWindow(root)
+    SettingsSection(root)
     root.mainloop()
 
 

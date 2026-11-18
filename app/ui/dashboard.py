@@ -98,11 +98,24 @@ def archived_photo(path, event_id):
         return None
 
 
-class MonitorWindow:
-    def __init__(self, master, on_close=None):
+class MonitoringSection:
+    """Раздел «Мониторинг»: видео, показатели, статистика и лента проездов.
+
+    Раздел живёт всё время работы приложения: переключение на другой
+    раздел не пересоздаёт ни видеопоток, ни фоновые задачи.
+    """
+
+    def __init__(self, master, on_close=None, show_back=True, service_hook=None, embedded=False):
         self.root = ctk.CTkFrame(master, fg_color=BG, corner_radius=0)
-        self.root.pack(fill='both', expand=True)
+        if not embedded:
+            self.root.pack(fill='both', expand=True)
         self.on_close = on_close
+        self.show_back = show_back
+        self.service_hook = service_hook
+        # Пауза показа видео (сворачивание в трей) — отдельно от того,
+        # что пользователь отключил видео вручную.
+        self.paused = threading.Event()
+        self.threads = []
         self.stop = threading.Event(); self.frames = queue.Queue(maxsize=1); self.results = queue.Queue(maxsize=1)
         # None tracks the current day, including the rollover at midnight.
         self.period_selection = (0, None)
@@ -128,8 +141,9 @@ class MonitorWindow:
         except (ZoneInfoNotFoundError, ValueError): self.tz = None
         root = self.root
         header = ctk.CTkFrame(root, fg_color='transparent'); header.pack(fill='x', padx=22, pady=(15, 8))
-        ctk.CTkButton(header, text='‹  Назад', width=85, height=32, fg_color=CARD,
-                      hover_color='#34455a', command=self.close).pack(side='left', padx=(0, 14))
+        if self.show_back:
+            ctk.CTkButton(header, text='‹  Назад', width=85, height=32, fg_color=CARD,
+                          hover_color='#34455a', command=self.close).pack(side='left', padx=(0, 14))
         ctk.CTkLabel(header, text='Мониторинг', font=('Segoe UI', 22, 'bold'), text_color=TEXT).pack(side='left')
         # Rasterized from filled/calendar-month.svg; Pillow handles the PNG at runtime.
         self.calendar_icon = ctk.CTkImage(light_image=Image.open(BASE / 'assets' / 'calendar-month-filled.png'), size=(16, 16))
@@ -170,6 +184,15 @@ class MonitorWindow:
         self.video_label = ctk.CTkLabel(video, text='Подключение к камере…', text_color=MUTED, fg_color='#090e16')
         self.video_label.pack(fill='both', expand=True, padx=10, pady=(0, 10))
         self.video_label.bind('<Double-Button-1>', self.open_video_fullscreen)
+        # Запуск и остановка ANPR-мониторинга — внутри блока камеры.
+        anpr = ctk.CTkFrame(video, fg_color='transparent')
+        anpr.pack(fill='x', padx=10, pady=(0, 10))
+        self.service_button = ctk.CTkButton(anpr, text='Запустить', width=118, height=30,
+                                             fg_color='#2869df', hover_color='#1d55b9',
+                                             text_color=TEXT, font=('Segoe UI', 11, 'bold'),
+                                             command=self._toggle_service)
+        self.service_button.pack(side='right')
+        ctk.CTkLabel(anpr, text='ANPR-мониторинг', text_color=MUTED, font=('Segoe UI', 11), anchor='w').pack(side='left')
         right = ctk.CTkFrame(layout, fg_color='transparent')
         right.grid(row=0, column=1, rowspan=2, sticky='nsew', padx=(7, 0))
         right.grid_columnconfigure((0, 1), weight=1, uniform='metric')
@@ -237,8 +260,10 @@ class MonitorWindow:
         self.chart_axis_font = tkfont.Font(root=self.graph, family='Segoe UI', size=9)
         self.graph.bind('<Configure>', lambda _: self.draw_chart())
         self._feed_content = None
-        threading.Thread(target=self.data_worker, daemon=True).start()
-        threading.Thread(target=self.video_worker, daemon=True).start()
+        self.threads = [threading.Thread(target=self.data_worker, daemon=True),
+                        threading.Thread(target=self.video_worker, daemon=True)]
+        for thread in self.threads:
+            thread.start()
         root.after(100, self.poll)
 
     def card(self, parent, row, col, **kwargs):
@@ -544,12 +569,46 @@ class MonitorWindow:
         self.set_video_status('connecting' if enabled else 'disabled')
         self.show_video_message('Подключение к камере…' if enabled else 'Видео выключено')
 
+    def _toggle_service(self):
+        """Кнопка ANPR-мониторинга в блоке камеры."""
+        if self.service_hook is not None:
+            self.service_hook()
+
+    def pause_video(self):
+        """Приостановить показ видео (окно свёрнуто в трей).
+
+        Соединение закрывается, ANPR-мониторинг при этом продолжает
+        работать: события камеры обрабатывает сервис, а не это окно.
+        """
+        self.paused.set()
+        self.stream_changed.set()
+        if self.video_enabled.get():
+            self.set_video_status('paused')
+
+    def resume_video(self):
+        """Снять автоматическую паузу (окно вернулось из трея).
+
+        Ручное отключение видео пользователем — отдельное состояние: поток
+        продолжит молчать, пока переключатель «Видео» выключен.
+        """
+        self.paused.clear()
+        self.stream_changed.set()
+
+    def shutdown(self):
+        """Остановить фоновые потоки раздела перед закрытием приложения."""
+        self.stop.set()
+        self.stream_changed.set()
+        self.data_changed.set()
+        for thread in self.threads:
+            thread.join(2)
+
     def set_video_status(self, state):
         text, color = {
             'connecting': ('● Подключение', MUTED),
             'online': ('● Онлайн', '#54d49a'),
             'offline': ('● Офлайн', '#ec8181'),
             'disabled': ('● Выключен', MUTED),
+            'paused': ('● Пауза', MUTED),
         }[state]
         self.video_status.configure(text=text, text_color=color)
 
@@ -599,10 +658,13 @@ class MonitorWindow:
         host=self.settings.get('DAHUA_HOST', '')
         user=quote(self.settings.get('DAHUA_USERNAME', ''), safe=''); password=quote(self.settings.get('DAHUA_PASSWORD', ''), safe='')
         channel=self.settings.get('DAHUA_CHANNEL', '1')
+        # Пауза показа видео не смешана с ручным отключением: поток просто
+        # ждёт возобновления и не открывает второе соединение.
+        paused = getattr(self, 'paused', None)
         while not self.stop.is_set():
             self.stream_changed.clear()
             generation, subtype, enabled = self.stream_selection
-            if not enabled:
+            if not enabled or (paused is not None and paused.is_set()):
                 self.stream_changed.wait()
                 continue
             url=f'rtsp://{user}:{password}@{host}:554/cam/realmonitor?channel={channel}&subtype={subtype}'
@@ -612,6 +674,8 @@ class MonitorWindow:
                 if not capture.isOpened(): raise OSError('video unavailable')
                 last_published = 0.0
                 while not self.stop.is_set() and self.stream_selection[0] == generation:
+                    if paused is not None and paused.is_set():
+                        break
                     ok, frame=capture.read()
                     if not ok: break
                     now = time.monotonic()
@@ -631,6 +695,10 @@ class MonitorWindow:
             except Exception: pass
             finally: capture.release()
             if not self.stop.is_set() and self.stream_selection[0] == generation:
+                if paused is not None and paused.is_set():
+                    # Пауза — это не обрыв сигнала: ждём возобновления.
+                    self.stream_changed.wait()
+                    continue
                 try:
                     if self.frames.full(): self.frames.get_nowait()
                     self.frames.put_nowait((generation, 'error', 'Нет видеосигнала · повторное подключение…'))
@@ -756,3 +824,7 @@ class MonitorWindow:
         self.root.destroy()
         if self.on_close:
             self.on_close()
+
+
+#: Прежнее имя класса окна мониторинга — тот же раздел в новом окне.
+MonitorWindow = MonitoringSection

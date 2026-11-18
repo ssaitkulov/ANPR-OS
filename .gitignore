@@ -7,6 +7,8 @@ subscribers.json
 subscribers.tmp
 ui_preferences.json
 ui_preferences.json.tmp
+ui_window.json
+ui_window.json.tmp
 service.pid
 anpr.sqlite3
 anpr.sqlite3-shm
