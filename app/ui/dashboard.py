@@ -17,10 +17,12 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import customtkinter as ctk
 from PIL import Image, ImageOps
-import setup_anpr
+from app.ui.settings import read_settings
 import requests
 
-BASE = Path(__file__).resolve().parent
+from app.core.paths import PROJECT_ROOT
+
+BASE = PROJECT_ROOT
 BG = '#101722'; CARD = '#1a2432'; BORDER = '#303e51'; TEXT = '#f2f5fa'; MUTED = '#a5b1c2'; BLUE = '#377df1'
 
 
@@ -121,7 +123,7 @@ class MonitorWindow:
         self.photo_results = queue.Queue(maxsize=60)
         self.photo_bytes = {}
         self.photo_buttons = {}
-        self.settings = setup_anpr.read_settings()
+        self.settings = read_settings()
         try: self.tz = ZoneInfo(self.settings.get('TIMEZONE', 'Asia/Tashkent'))
         except (ZoneInfoNotFoundError, ValueError): self.tz = None
         root = self.root

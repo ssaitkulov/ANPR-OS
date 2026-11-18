@@ -7,7 +7,7 @@ from datetime import date, datetime
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
-from dashboard import MonitorWindow, aggregate_hours, archived_photo, chart_last_hour, direction, load_dashboard
+from app.ui.dashboard import MonitorWindow, aggregate_hours, archived_photo, chart_last_hour, direction, load_dashboard
 from app.storage.database import Store
 
 class DashboardTests(unittest.TestCase):
