@@ -43,7 +43,7 @@ jobs:
       # Этап 4: версии в requirements.txt, requirements-lock.txt и pyproject.toml
       # должны совпадать — иначе машины поставят разные наборы.
       - name: Проверить согласованность файлов зависимостей
-        run: python tools/check_lock.py
+        run: python scripts/check_lock.py
 
       - name: Проверить, что импорт не создаёт рабочую базу и состояние
         run: |

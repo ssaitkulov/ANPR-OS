@@ -1,4 +1,4 @@
-"""Сверка источников: JSON-зеркало состояния ↔ SQLite (tools/verify_state.py)."""
+"""Сверка источников: JSON-зеркало состояния ↔ SQLite (scripts/verify_state.py)."""
 import anpr_testenv  # noqa: F401  — изоляция тестов от боевой БД
 
 import importlib.util
@@ -10,7 +10,7 @@ from pathlib import Path
 from app.storage.database import Store
 
 SPEC = importlib.util.spec_from_file_location(
-    'verify_state', Path(__file__).resolve().parent / 'tools' / 'verify_state.py')
+    'verify_state', Path(__file__).resolve().parent / 'scripts' / 'verify_state.py')
 verify = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(verify)
 

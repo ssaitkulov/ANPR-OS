@@ -69,7 +69,7 @@ python -m pip install dist/anpr_os_fayz-1.0.0-py3-none-any.whl
 не теряются. Идентификаторы прошивки хранятся отдельно и в ключ не входят:
 `source_key` = `GroupID:IndexInGroup:номер:полоса`, `group_id` = сам `GroupID`,
 `rec_no` = номер записи в архиве камеры (у проездов из архива). Схема и старые ключи
-пересчитываются при старте — миграция идемпотентная (`storage.py`).
+пересчитываются при старте — миграция идемпотентная (`app/storage/database.py`).
 Фотографии лежат файлами в `images/` (в базе — только пути). Запись снимков на диск
 включается настройкой `SAVE_PHOTOS` (по умолчанию `true`); выключается только осознанно,
 иначе мониторинг не сможет показать фото проезда.
@@ -81,7 +81,7 @@ python -m pip install dist/anpr_os_fayz-1.0.0-py3-none-any.whl
 
 Отчёт в Telegram, `/status`, `/entries/today` и мониторинг читают один и тот же SQLite.
 
-Сверка двух источников (JSON-зеркало ↔ SQLite) — `python tools/verify_state.py`:
+Сверка двух источников (JSON-зеркало ↔ SQLite) — `python scripts/verify_state.py`:
 печатает расхождения и возвращает код 1, если они есть.
 
 ## Локальные эндпоинты
@@ -118,7 +118,7 @@ python -m pip install dist/anpr_os_fayz-1.0.0-py3-none-any.whl
   `python -m pip install -r requirements-lock.txt`.
 - `pyproject.toml` — метаданные проекта, `requires-python = ">=3.11,<3.15"` и те же
   зафиксированные версии; `pip install .` даёт то же самое окружение.
-- `python tools/check_lock.py` — проверка, что версии в этих трёх файлах не
+- `python scripts/check_lock.py` — проверка, что версии в этих трёх файлах не
   разошлись (код 0 — совпадают). Запускается вручную и в CI.
 - `run.bat` доустанавливает `requirements.txt` сам, если чего-то не хватает.
 
@@ -303,24 +303,50 @@ git config core.hooksPath .githooks
 получателям.
 
 - Полный чек-лист (ручные шаги и ожидаемые результаты): [docs/ACCEPTANCE.md](docs/ACCEPTANCE.md).
-- Автоматическая часть: `python tools/acceptance_check.py` — сверка источников,
+- Автоматическая часть: `python scripts/acceptance_check.py` — сверка источников,
   очередь доставки, отчёт, фотоархив, получатели, живой сервис.
   Код 0 — блокирующих замечаний нет.
-- Сверка источников отдельно: `python tools/verify_state.py` (код 1 при расхождениях).
+- Сверка источников отдельно: `python scripts/verify_state.py` (код 1 при расхождениях).
 
 ## Состав репозитория
 
-- В код попадает только то, что нужно для работы: `anpr_telegram.py` (ядро),
-  `app.py` (HTTP-сервис), `storage.py` (SQLite), `dashboard.py` и `control_panel.py`
-  (окна), `setup_anpr.py` (настройки), `photo_archive.py`, `passage_photos.py`,
-  `event_images.py`, `service_control.py`, `service_logs.py`.
+Код приложения лежит в пакете `app/`:
+
+```
+app/
+├── core/       ядро: anpr_telegram.py (сбор проездов), paths.py (пути),
+│               system_events.py (журнал событий), preferences.py (автозапуск
+│               Windows и настройки панели)
+├── services/   http_api.py (HTTP-сервис), control.py (запуск и остановка),
+│               logs.py (журналы с ротацией), panel_lock.py (один экземпляр панели)
+├── storage/    database.py (SQLite), photo_archive.py, passage_photos.py,
+│               event_images.py
+└── ui/         panel.py (панель управления), dashboard.py (мониторинг),
+                settings.py (настройки)
+```
+
+- В корне — совместимые точки входа: `app.py` (HTTP-сервис), `control_panel.py`
+  (панель управления — её запускают `run.bat` и автозапуск Windows),
+  `setup_anpr.py` (настройки — их запускает `settings.bat`), `anpr_telegram.py`
+  (CLI ядра: `--check`, `--report-now`, `--dry-run`, `--parser-test`,
+  `--backfill-now`). Это тонкие лаунчеры: они запускают код из `app/` и
+  подставляют тот же объект модуля в `sys.modules` — поэтому `import
+  anpr_telegram` и подмены вида `patch.object(bot, 'STORE')` работают как
+  раньше.
+- `scripts/` — служебные сценарии: сверка состояния, приёмка, проверка
+  согласованности зависимостей.
+- `tests/` — автоматические тесты и изоляция от боевой базы.
 - `assets/` — иконки и логотипы, которые использует интерфейс.
+- `data/` — каталог изменяемых данных (база, фото, журналы). Сейчас пуст:
+  перенос рабочих данных в него выполняется отдельной согласованной процедурой
+  (см. `data/README.md`), до тех пор база, фото и журналы лежат в корне.
 - `filled/` — набор иконок Material Symbols (~1050 файлов). Полный набор в
   репозиторий **не входит**: в `.gitignore` оставлены только те иконки, что
   реально рисуются, и `LICENSE`/`README.md` набора. Остальное берётся из
   исходного набора при необходимости.
 - Рабочие данные в репозиторий не попадают: `images/`, `*.log`, `anpr.sqlite3`,
-  `anpr_state.json`, `subscribers.json`, `.env` — всё в `.gitignore`.
+  `anpr_state.json`, `subscribers.json`, `.env`, содержимое `data/` — всё
+  в `.gitignore`.
 - Локальные заметки (`PROJECT_CONTEXT.md`, `Dahua-API-Python-Integration.SKILL.md`)
   и макеты (`*.pdf`, `*.html`, `evrika-*.png`) тоже не коммитятся.
 

@@ -1,7 +1,7 @@
 """Этап 4: тесты инструментов приёмки и проверки зависимостей.
 
-Инструменты приёмки (`tools/acceptance_check.py`) и проверки файлов
-зависимостей (`tools/check_lock.py`) — часть поставки: по ним принимают
+Инструменты приёмки (`scripts/acceptance_check.py`) и проверки файлов
+зависимостей (`scripts/check_lock.py`) — часть поставки: по ним принимают
 работу в бой. Поэтому их поведение проверяется тестами, а не «руками».
 """
 import json
@@ -13,7 +13,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent
-sys.path.insert(0, str(BASE_DIR / 'tools'))
+sys.path.insert(0, str(BASE_DIR / 'scripts'))
 
 import acceptance_check  # noqa: E402
 import check_lock  # noqa: E402

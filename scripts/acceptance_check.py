@@ -12,9 +12,9 @@
 * локальный сервис отвечает и его рабочий поток жив.
 
 Запуск:
-    python tools/acceptance_check.py                 # сегодня
-    python tools/acceptance_check.py --day 2026-11-18
-    python tools/acceptance_check.py --json          # отчёт в JSON
+    python scripts/acceptance_check.py                 # сегодня
+    python scripts/acceptance_check.py --day 2026-11-18
+    python scripts/acceptance_check.py --json          # отчёт в JSON
 
 Код возврата: 0 — замечаний нет (FAIL нет), 1 — есть блокирующие замечания.
 """
@@ -90,7 +90,7 @@ def open_readonly(path: Path) -> sqlite3.Connection:
 
 def check_sources(report: Report, state_path: Path, db_path: Path) -> None:
     """JSON-зеркало ↔ SQLite: расхождений быть не должно."""
-    sys.path.insert(0, str(BASE_DIR / 'tools'))
+    sys.path.insert(0, str(BASE_DIR / 'scripts'))
     try:
         from verify_state import verify
     except Exception as error:  # pragma: no cover

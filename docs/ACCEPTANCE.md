@@ -4,12 +4,12 @@
 Проверка состоит из двух частей: автоматической (по данным сервиса) и ручной
 (то, что нельзя увидеть в базе: доставка сообщений, фото в мониторинге).
 
-Автоматическая часть — `tools/acceptance_check.py`:
+Автоматическая часть — `scripts/acceptance_check.py`:
 
 ```bash
-python tools/acceptance_check.py            # все проверки по сегодняшнему дню
-python tools/acceptance_check.py --day 2026-11-18
-python tools/acceptance_check.py --json     # отчёт для отчёта о приёмке
+python scripts/acceptance_check.py            # все проверки по сегодняшнему дню
+python scripts/acceptance_check.py --day 2026-11-18
+python scripts/acceptance_check.py --json     # отчёт для отчёта о приёмке
 ```
 
 Код возврата: `0` — блокирующих замечаний нет, `1` — есть (`FAIL`).
@@ -23,9 +23,9 @@ python tools/acceptance_check.py --json     # отчёт для отчёта о 
 | Шаг | Команда / действие | Ожидаемый результат |
 |---|---|---|
 | Состояние сервиса | `curl http://127.0.0.1:18749/health` | `"status": "ok"`, камера и Telegram без ошибок |
-| Согласованность зависимостей | `python tools/check_lock.py` | версии в `requirements.txt`, `requirements-lock.txt` и `pyproject.toml` совпадают |
+| Согласованность зависимостей | `python scripts/check_lock.py` | версии в `requirements.txt`, `requirements-lock.txt` и `pyproject.toml` совпадают |
 | Тесты | `python -m unittest discover -v` | `OK`, без падений |
-| Сверка источников | `python tools/verify_state.py` | `расхождений нет`, код 0 |
+| Сверка источников | `python scripts/verify_state.py` | `расхождений нет`, код 0 |
 | Резервная копия | копия `.env`, `anpr.sqlite3`, `anpr_state.json`, `subscribers.json` | копия вне рабочей папки (регламент — в [MAINTENANCE.md](MAINTENANCE.md)) |
 | Список получателей | `python -c "import json;print(json.load(open('subscribers.json',encoding='utf-8')))"` | все ожидаемые чаты на месте (основной чат + подписчики) |
 
@@ -56,8 +56,8 @@ python tools/acceptance_check.py --json     # отчёт для отчёта о 
 ## 2. Сверка источников после суток
 
 ```bash
-python tools/verify_state.py        # код 0 — расхождений быть не должно
-python tools/acceptance_check.py    # та же проверка плюс остальные
+python scripts/verify_state.py        # код 0 — расхождений быть не должно
+python scripts/acceptance_check.py    # та же проверка плюс остальные
 ```
 
 Критерий приёмки: **расхождений между JSON-зеркалом и SQLite — 0**
@@ -98,7 +98,7 @@ python tools/acceptance_check.py    # та же проверка плюс ост
 
    ```bash
    curl -X POST http://127.0.0.1:18749/backfill-now    # можно вручную, не дожидаясь цикла
-   python tools/verify_state.py
+   python scripts/verify_state.py
    ```
 
    Ожидаемый результат: проезды, пропущенные во время обрыва, появились в базе
@@ -183,7 +183,7 @@ Telegram сообщения копятся в очереди и уходят с�
 Проверка снимков на диске:
 
 ```bash
-python tools/acceptance_check.py --skip-service   # раздел «Фотоархив за …»
+python scripts/acceptance_check.py --skip-service   # раздел «Фотоархив за …»
 ```
 
 Критерий: у всех живых проездов дня снимок существует по пути из базы
@@ -230,8 +230,8 @@ python tools/acceptance_check.py --skip-service   # раздел «Фотоар�
 | Отчёт за день | ушёл в `REPORT_TIME`, отмечен в `reported_days` | ☐ |
 | Дашборд и фотоархив | архивные проезды видны, фото живых проездов открываются | ☐ |
 | Все получатели | событие доставлено каждому чату, `failed = 0` | ☐ |
-| Автоматическая проверка | `python tools/acceptance_check.py` → код 0 | ☐ |
+| Автоматическая проверка | `python scripts/acceptance_check.py` → код 0 | ☐ |
 
 **Решение о приёмке:** все пункты со знаком ☐ и код выхода `0` у
-`tools/acceptance_check.py` → можно в бой. Любой пункт не пройден — работа
+`scripts/acceptance_check.py` → можно в бой. Любой пункт не пройден — работа
 продолжается, причина фиксируется в журнале, пункт проверяется заново.

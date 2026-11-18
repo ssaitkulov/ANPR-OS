@@ -8,8 +8,8 @@
 (одна машина ставит один набор, другая — другой).
 
 Запуск:
-    python tools/check_lock.py            # человекочитаемый отчёт
-    python tools/check_lock.py --json     # отчёт в JSON
+    python scripts/check_lock.py            # человекочитаемый отчёт
+    python scripts/check_lock.py --json     # отчёт в JSON
 
 Код возврата: 0 — расхождений нет, 1 — расхождение найдено.
 """

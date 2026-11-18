@@ -8,9 +8,9 @@
 видеть до эксплуатации.
 
 Запуск:
-    python tools/verify_state.py                    # сверка по умолчанию
-    python tools/verify_state.py --json             # отчёт в JSON
-    python tools/verify_state.py --state X --db Y   # другие файлы
+    python scripts/verify_state.py                    # сверка по умолчанию
+    python scripts/verify_state.py --json             # отчёт в JSON
+    python scripts/verify_state.py --state X --db Y   # другие файлы
 
 Код возврата: 0 — расхождений нет, 1 — расхождения найдены (или данные не
 прочитались).

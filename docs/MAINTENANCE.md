@@ -8,7 +8,7 @@
 
 Приёмка в бой (24 ч работы, обрывы камеры и Telegram, отчёт, доставка всем
 получателям) — отдельный чек-лист: [ACCEPTANCE.md](ACCEPTANCE.md).
-Автоматическая часть проверки: `python tools/acceptance_check.py`.
+Автоматическая часть проверки: `python scripts/acceptance_check.py`.
 
 ---
 
@@ -213,7 +213,7 @@ Get-ChildItem anpr.sqlite3* | Select-Object Name, Length
 миграция идемпотентная, данные не теряются). После обновления проверьте базу:
 
 ```powershell
-python tools/verify_state.py
+python scripts/verify_state.py
 ```
 
 Скрипт сверяет JSON-зеркало (`anpr_state.json`) с SQLite и возвращает код 1, если есть расхождения

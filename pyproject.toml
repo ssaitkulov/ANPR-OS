@@ -41,7 +41,7 @@ dependencies = [
 Documentation = "https://github.com/evrika/anpr-os-fayz#readme"
 
 [project.scripts]
-anpr-service = "service_control:start"
+anpr-service = "app.services.control:start"
 
 [project.optional-dependencies]
 dev = [
@@ -49,20 +49,15 @@ dev = [
 ]
 
 [tool.setuptools]
-py-modules = [
-    "anpr_telegram",
+# Код приложения лежит в пакете `app`; корневые файлы (app.py,
+# control_panel.py, setup_anpr.py, anpr_telegram.py) — совместимые
+# точки входа, они запускаются как скрипты, а не как модули пакета.
+packages = [
     "app",
-    "app_preferences",
-    "control_panel",
-    "dashboard",
-    "event_images",
-    "panel_instance",
-    "passage_photos",
-    "photo_archive",
-    "service_control",
-    "setup_anpr",
-    "storage",
-    "system_events",
+    "app.core",
+    "app.services",
+    "app.storage",
+    "app.ui",
 ]
 
 [tool.setuptools.package-dir]
