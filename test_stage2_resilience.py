@@ -276,7 +276,7 @@ class DatabaseGrowthTests(unittest.TestCase):
 
 class GracefulShutdownTests(unittest.TestCase):
     def test_shutdown_saves_state_and_closes_the_store(self):
-        import app
+        from app.services import http_api as app
         done = {}
 
         class FakeStore:
