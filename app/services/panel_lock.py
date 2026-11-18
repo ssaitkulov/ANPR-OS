@@ -4,6 +4,8 @@ from ctypes import wintypes
 import hashlib
 from pathlib import Path
 
+from app.core.paths import PROJECT_ROOT
+
 kernel = ctypes.WinDLL('kernel32', use_last_error=True)
 kernel.CreateMutexW.argtypes = (wintypes.LPVOID, wintypes.BOOL, wintypes.LPCWSTR)
 kernel.CreateMutexW.restype = wintypes.HANDLE
@@ -22,7 +24,10 @@ WAIT_TIMEOUT = 0x102
 
 class PanelInstance:
     def __init__(self):
-        project = str(Path(__file__).resolve().parent).casefold()
+        # Отпечаток проекта: корень, а не папка модуля. Имя мютекса должно
+        # остаться прежним, иначе ранее запущенная панель перестанет
+        # узнаваться новой.
+        project = str(PROJECT_ROOT).casefold()
         suffix = hashlib.sha256(project.encode('utf-8')).hexdigest()[:24]
         self.mutex = kernel.CreateMutexW(None, False, 'Local\\EvrikaPanelMutex_' + suffix)
         self.event = kernel.CreateEventW(None, False, False, 'Local\\EvrikaPanelReplace_' + suffix)

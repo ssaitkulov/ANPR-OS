@@ -15,6 +15,8 @@ import sys
 import threading
 from pathlib import Path
 
+from app.core.paths import PROJECT_ROOT
+
 DEFAULT_MAX_MB = 10          # размер одного файла журнала, МБ
 DEFAULT_BACKUPS = 3          # сколько старых копий хранить
 STDOUT_NAME = 'service.stdout.log'
@@ -160,7 +162,7 @@ def install(base_dir=None, stdout_name: str = STDOUT_NAME, stderr_name: str = ST
     Возвращает пару путей (stdout, stderr). Повторный вызов ничего не меняет.
     """
     global _installed
-    base = Path(base_dir or Path(__file__).resolve().parent)
+    base = Path(base_dir or PROJECT_ROOT)
     out_path = base / stdout_name
     err_path = base / stderr_name
     if not _installed:
@@ -193,7 +195,7 @@ def uvicorn_log_config(base_dir=None, stdout_name: str = STDOUT_NAME,
     Access-журнал (строки на каждый опрос панели) оставлен на уровне WARNING:
     иначе файл растёт на сотни килобайт в час без единой полезной записи.
     """
-    base = Path(base_dir or Path(__file__).resolve().parent)
+    base = Path(base_dir or PROJECT_ROOT)
     out_path = str(base / stdout_name)
     err_path = str(base / stderr_name)
     return {
@@ -203,9 +205,9 @@ def uvicorn_log_config(base_dir=None, stdout_name: str = STDOUT_NAME,
             'default': {'format': '%(levelname)s: %(message)s'},
         },
         'handlers': {
-            'app_out': {'class': 'service_logs.BridgeHandler', 'filename': out_path,
+            'app_out': {'class': 'app.services.logs.BridgeHandler', 'filename': out_path,
                         'level': 'INFO', 'formatter': 'default'},
-            'app_err': {'class': 'service_logs.BridgeHandler', 'filename': err_path,
+            'app_err': {'class': 'app.services.logs.BridgeHandler', 'filename': err_path,
                         'level': 'INFO', 'formatter': 'default'},
         },
         'root': {'handlers': ['app_out', 'app_err'], 'level': 'INFO'},

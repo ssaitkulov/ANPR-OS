@@ -8,7 +8,7 @@ import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-import service_logs
+from app.services import logs as service_logs
 
 import anpr_telegram as M
 from fastapi import FastAPI, BackgroundTasks, HTTPException

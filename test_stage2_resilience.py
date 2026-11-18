@@ -18,8 +18,8 @@ from unittest.mock import patch
 import requests
 
 import anpr_telegram as bot
-import service_control
-import service_logs
+from app.services import control as service_control
+from app.services import logs as service_logs
 from app.storage import database as storage
 from app.storage.photo_archive import cleanup_old_photos
 
@@ -78,7 +78,7 @@ class LogRotationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             config = service_logs.uvicorn_log_config(tmp)
             handlers = config['handlers']
-            self.assertIn('service_logs.BridgeHandler', handlers['app_out']['class'])
+            self.assertIn('app.services.logs.BridgeHandler', handlers['app_out']['class'])
             self.assertTrue(handlers['app_out']['filename'].endswith('service.stdout.log'))
             self.assertTrue(handlers['app_err']['filename'].endswith('service.stderr.log'))
 

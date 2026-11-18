@@ -8,7 +8,10 @@ import sys
 import time
 import requests
 
-BASE = Path(__file__).resolve().parent
+from app.core.paths import PROJECT_ROOT
+
+#: Корень проекта: журналы, pid-файл и лаунчер сервиса лежат в корне.
+BASE = PROJECT_ROOT
 PORT = 18749
 URL = f'http://127.0.0.1:{PORT}'
 PID_FILE = BASE / 'service.pid'

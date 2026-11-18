@@ -12,7 +12,7 @@ import customtkinter as ctk
 import pystray
 import requests
 from PIL import Image
-import service_control as service
+from app.services import control as service
 from app.core import preferences
 
 ctk.set_appearance_mode('dark')
