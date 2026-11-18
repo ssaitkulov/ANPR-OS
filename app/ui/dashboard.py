@@ -21,6 +21,7 @@ from app.ui.settings import read_settings
 import requests
 
 from app.core.paths import PROJECT_ROOT
+from app.ui.tklife import cancel_pending_scripts
 
 BASE = PROJECT_ROOT
 BG = '#101722'; CARD = '#1a2432'; BORDER = '#303e51'; TEXT = '#f2f5fa'; MUTED = '#a5b1c2'; BLUE = '#377df1'
@@ -711,6 +712,7 @@ class MonitoringSection:
         self.data_changed.set()
         for thread in self.threads:
             thread.join(5)
+        cancel_pending_scripts(self.root)
 
     def set_video_status(self, state):
         text, color = {

@@ -13,6 +13,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from app.core import preferences
 from app.core.paths import PROJECT_ROOT
+from app.ui.tklife import cancel_pending_scripts
 import requests
 from requests.auth import HTTPDigestAuth
 
@@ -469,6 +470,7 @@ class SettingsSection:
             except Exception:
                 pass
         self._after_ids.clear()
+        cancel_pending_scripts(self.root)
 
     def close(self):
         self.shutdown()

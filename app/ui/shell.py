@@ -38,6 +38,7 @@ from app.core import window_state
 from app.core.paths import ASSETS_DIR
 from app.ui import status as ui_status
 from app.ui.header import SystemHeader
+from app.ui.tklife import cancel_pending_scripts
 
 ctk.set_appearance_mode('dark')
 ASSETS = ASSETS_DIR
@@ -494,6 +495,10 @@ class AppShell:
         except Exception:
             pass
         self._stop_sections()
+        # Отложенные вызовы Tk (в том числе внутренние CustomTkinter)
+        # отменяются до уничтожения виджетов — иначе в stderr появляется
+        # «invalid command name …».
+        cancel_pending_scripts(self.root)
         try:
             self.root.destroy()
         except Exception:
