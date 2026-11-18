@@ -1,3 +1,4 @@
+import anpr_testenv  # noqa: F401  — изоляция тестов от боевой БД
 import tempfile
 import unittest
 from datetime import datetime, timezone

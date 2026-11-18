@@ -83,12 +83,39 @@
   Границы обязательны: без них новая версия пакета может сломать проверенную сборку.
 - `requirements-lock.txt` — точные версии проверенного окружения (вместе с транзитивными).
   Установка: `python -m pip install -r requirements-lock.txt`.
-- `pyproject.toml` — метаданные проекта, `requires-python = ">=3.12,<3.15"` и тот же набор зависимостей.
+- `pyproject.toml` — метаданные проекта, `requires-python = ">=3.11,<3.15"` и тот же набор зависимостей.
 - `run.bat` доустанавливает `requirements.txt` сам, если чего-то не хватает.
 
-Для тестов: `python -m pytest -q` (полный набор) или `python -m unittest test_stream_latency test_setup_anpr`
-(быстрая проверка без камеры). CI (.github/workflows/ci.yml) гоняет тесты на Windows
-для Python 3.12, 3.13 и 3.14.
+Для тестов: `python -m unittest discover -v` (полный набор) или `python -m pytest -q`
+(тот же набор другим раннером); быстрая проверка без камеры —
+`python -m unittest test_stream_latency test_setup_anpr`. CI (.github/workflows/ci.yml) гоняет
+`python -m unittest discover -v` на Windows для Python 3.11, 3.12, 3.13 и 3.14, проверяет
+`pip check` и то, что тесты не создали `anpr.sqlite3` / `anpr_state.json` в рабочей папке.
+
+## Тесты и изоляция от боевой базы
+
+Тесты **никогда** не трогают рабочие `anpr.sqlite3`, `anpr_state.json` и `subscribers.json`.
+Изоляция живёт в модуле `anpr_testenv.py`: он перенаправляет пути базы, состояния, фотографий
+и подписчиков во временный каталог и обнуляет токен Telegram. Каждый тестовый файл импортирует
+`anpr_testenv` **первым** — до `import anpr_telegram` (иначе модуль возьмёт боевые пути при импорте).
+
+Проверить руками, что прогон безопасен:
+
+```bash
+python -c "import os,hashlib;print(hashlib.sha256(open('anpr.sqlite3','rb').read()).hexdigest())"
+python -m unittest discover -v
+python -c "import os,hashlib;print(hashlib.sha256(open('anpr.sqlite3','rb').read()).hexdigest())"
+```
+
+Хеши (и время изменения файлов) должны совпасть. Заготовка для новых тестов —
+`anpr_testenv.IsolatedTestCase`: он подставляет временную базу, временное состояние и
+пустой токен Telegram, а заодно проверяет, что предыдущий тест не оставил в модуле подмен.
+
+Локальный запрет коммита при падении тестов — хук `.githooks/pre-commit`. Включается один раз:
+
+```bash
+git config core.hooksPath .githooks
+```
 
 ## Если что-то не работает
 

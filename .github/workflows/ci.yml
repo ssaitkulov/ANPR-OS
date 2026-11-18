@@ -13,7 +13,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.12", "3.13", "3.14"]
+        # Этап 3: поддерживаются 3.11–3.14 (совпадает с requires-python в pyproject.toml).
+        python-version: ["3.11", "3.12", "3.13", "3.14"]
 
     steps:
       - uses: actions/checkout@v4
@@ -35,11 +36,28 @@ jobs:
           python -m pip install -r requirements.txt
           python -m pip install pytest
 
+      # Этап 3: битые зависимости (конфликт версий) — тоже падение сборки.
+      - name: Проверить зависимости (pip check)
+        run: python -m pip check
+
       - name: Проверить, что импорт не создаёт рабочую базу и состояние
         run: |
           python -c "import anpr_telegram"
           if (Test-Path anpr.sqlite3) { throw "Импорт создал anpr.sqlite3 в рабочей папке" }
           if (Test-Path anpr_state.json) { throw "Импорт создал anpr_state.json в рабочей папке" }
 
-      - name: Тесты
+      # Этап 3: основной прогон — unittest discover, он же падает при ошибке.
+      - name: Тесты (unittest discover)
+        run: python -m unittest discover -v
+
+      # Этап 3: тесты не должны трогать рабочую базу, состояние и подписчиков.
+      - name: Проверить, что тесты не тронули рабочие файлы
+        run: |
+          if (Test-Path anpr.sqlite3) { throw "Тесты создали anpr.sqlite3 в рабочей папке" }
+          if (Test-Path anpr.sqlite3-wal) { throw "Тесты создали anpr.sqlite3-wal в рабочей папке" }
+          if (Test-Path anpr_state.json) { throw "Тесты создали anpr_state.json в рабочей папке" }
+          if (Test-Path subscribers.json) { throw "Тесты создали subscribers.json в рабочей папке" }
+
+      # Дополнительный прогон pytest — тот же набор тестов, но другим раннером.
+      - name: Тесты (pytest)
         run: python -m pytest -q

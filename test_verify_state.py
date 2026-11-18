@@ -1,4 +1,6 @@
 """Сверка источников: JSON-зеркало состояния ↔ SQLite (tools/verify_state.py)."""
+import anpr_testenv  # noqa: F401  — изоляция тестов от боевой БД
+
 import importlib.util
 import json
 import tempfile

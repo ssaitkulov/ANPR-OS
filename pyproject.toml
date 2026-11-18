@@ -7,7 +7,7 @@ name = "anpr-os-fayz"
 version = "1.0.0"
 description = "Сбор проездов с Dahua ANPR-камеры в Telegram, локальный сервис и мониторинг"
 readme = "README.md"
-requires-python = ">=3.12,<3.15"
+requires-python = ">=3.11,<3.15"
 license = { file = "LICENSE" }
 authors = [{ name = "ANPR OS Fayz" }]
 keywords = ["anpr", "dahua", "telegram", "traffic"]
@@ -16,6 +16,7 @@ classifiers = [
     "Environment :: Win32 (MS Windows)",
     "Intended Audience :: End Users/Desktop",
     "Natural Language :: Russian",
+    "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
     "Programming Language :: Python :: 3.14",

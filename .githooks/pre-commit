@@ -1,0 +1,9 @@
+#!/bin/sh
+# Локальный запрет коммита при падении тестов (Этап 3).
+#
+# Включается один раз: git config core.hooksPath .githooks
+# Тесты идут во временном каталоге и не трогают рабочую базу anpr.sqlite3.
+set -e
+echo "[pre-commit] прогон тестов (python -m unittest discover)…"
+python -m unittest discover
+echo "[pre-commit] тесты зелёные — коммит разрешён"

@@ -1,3 +1,4 @@
+import anpr_testenv  # noqa: F401  — изоляция тестов от боевой БД
 import io
 import json
 import unittest

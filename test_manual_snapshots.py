@@ -1,3 +1,4 @@
+import anpr_testenv  # noqa: F401  — изоляция тестов от боевой БД
 import unittest
 from unittest.mock import patch
 import anpr_telegram as bot

@@ -1,3 +1,4 @@
+import anpr_testenv  # noqa: F401  — изоляция тестов от боевой БД
 import unittest
 from collections import deque
 from unittest.mock import Mock
