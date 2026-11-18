@@ -494,13 +494,20 @@ class AppShell:
                 height = int(state.get('height') or height)
             except (TypeError, ValueError):
                 width, height = window_state.DEFAULT_SIZE
-        width = max(min_width, min(width, screen_width))
-        height = max(min_height, min(height, screen_height))
-        geometry = window_state.format_geometry(width, height)
+        # Окно должно помещаться на экране целиком: рамка окна съедает
+        # несколько пикселей, поэтому оставляем небольшой запас.
+        margin, frame = 40, 16
+        width = max(min_width, min(width, screen_width - margin))
+        height = max(min_height, min(height, screen_height - margin))
+        x = max(0, (screen_width - width - frame) // 2)
+        y = max(0, (screen_height - height - frame) // 2)
         if state and window_state.within_bounds(state, self._virtual_bounds()):
-            geometry = window_state.format_geometry(width, height, state.get('x'), state.get('y'))
+            # Сохранённое положение тоже удерживаем в пределах экрана.
+            origin_x, origin_y, virtual_width, virtual_height = self._virtual_bounds()
+            x = max(origin_x, min(int(state['x']), origin_x + virtual_width - width - frame))
+            y = max(origin_y, min(int(state['y']), origin_y + virtual_height - height - frame))
         try:
-            self.root.geometry(geometry)
+            self.root.geometry(window_state.format_geometry(width, height, x, y))
             if state and state.get('maximized'):
                 self.root.state('zoomed')
             self._normal_geometry = window_state.format_geometry(width, height)

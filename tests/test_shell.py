@@ -45,6 +45,8 @@ class FakeRoot:
         self.titles = []
         self.withdrawn = False
         self.deiconified = False
+        self.screen_width = 1920
+        self.screen_height = 1080
 
     def geometry(self, value=None):
         if value is None:
@@ -74,10 +76,10 @@ class FakeRoot:
         pass
 
     def winfo_screenwidth(self):
-        return 1920
+        return self.screen_width
 
     def winfo_screenheight(self):
-        return 1080
+        return self.screen_height
 
     def winfo_vrootx(self):
         return 0
@@ -272,6 +274,24 @@ class WindowStateTests(unittest.TestCase):
             with patch.object(window_state, 'STATE_FILE', path):
                 shell._apply_window_state()
             self.assertTrue(shell.root.geometry().startswith('1440x900'))
+
+    def test_window_fits_on_a_narrow_screen(self):
+        """На узком экране окно уменьшается и центрируется, а не уходит за край."""
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / 'ui_window.json'
+            shell = FakeShell()
+            shell.root.screen_width = 1440
+            shell.root.screen_height = 1080
+            with patch.object(window_state, 'STATE_FILE', path):
+                shell._apply_window_state()
+            geometry = shell.root.geometry()
+            width = int(geometry.split('x')[0])
+            height = int(geometry.split('x')[1].split('+')[0])
+            x = int(geometry.split('+')[1])
+            self.assertLessEqual(width, 1440 - 32)
+            self.assertGreaterEqual(x, 0)
+            self.assertGreaterEqual(width, window_state.MIN_SIZE[0])
+            self.assertLessEqual(height, 1080 - 32)
 
 
 class VideoLifecycleTests(unittest.TestCase):
