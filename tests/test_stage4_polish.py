@@ -13,7 +13,7 @@
 Каждый тест работает с настоящим кодом сервиса; база, состояние и файлы
 подписчиков — во временном каталоге (см. `anpr_testenv`).
 """
-import anpr_testenv  # noqa: F401  — изоляция тестов от боевой БД
+from tests import anpr_testenv  # noqa: F401  — изоляция тестов от боевой БД
 
 import unittest
 from datetime import datetime, timedelta

@@ -12,7 +12,7 @@ import unittest
 from datetime import datetime, timedelta
 from pathlib import Path
 
-BASE_DIR = Path(__file__).resolve().parent
+BASE_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(BASE_DIR / 'scripts'))
 
 import acceptance_check  # noqa: E402

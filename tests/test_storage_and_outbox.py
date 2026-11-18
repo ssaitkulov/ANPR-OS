@@ -1,4 +1,4 @@
-import anpr_testenv  # noqa: F401  — изоляция тестов от боевой БД
+from tests import anpr_testenv  # noqa: F401  — изоляция тестов от боевой БД
 import tempfile
 import time
 import unittest

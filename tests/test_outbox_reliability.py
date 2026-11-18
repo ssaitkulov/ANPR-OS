@@ -4,7 +4,7 @@
 Telegram выключен на десять минут → включён: все накопленные сообщения доставлены
 ровно по одному разу; один чат недоступен — его запись докатывается отдельно.
 """
-import anpr_testenv  # noqa: F401  — изоляция тестов от боевой БД
+from tests import anpr_testenv  # noqa: F401  — изоляция тестов от боевой БД
 
 import tempfile
 import threading

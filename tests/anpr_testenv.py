@@ -23,7 +23,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-BASE_DIR = Path(__file__).resolve().parent
+#: Корень проекта: рабочие файлы сервиса лежат в корне, а не рядом с тестами.
+BASE_DIR = Path(__file__).resolve().parents[1]
 
 #: Временный каталог тестового прогона — база, состояние, фото, подписчики.
 ISOLATION_DIR = Path(tempfile.mkdtemp(prefix='anpr-tests-'))

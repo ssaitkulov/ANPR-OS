@@ -129,16 +129,17 @@ requirements-lock.txt` → `pip check` → `python -m unittest discover -v` → 
 
 Для тестов: `python -m unittest discover -v` (полный набор) или `python -m pytest -q`
 (тот же набор другим раннером); быстрая проверка без камеры —
-`python -m unittest test_stream_latency test_setup_anpr`. CI (.github/workflows/ci.yml) гоняет
+`python -m unittest tests.test_stream_latency tests.test_setup_anpr`. CI (.github/workflows/ci.yml) гоняет
 `python -m unittest discover -v` на Windows для Python 3.11, 3.12, 3.13 и 3.14, проверяет
 `pip check` и то, что тесты не создали `anpr.sqlite3` / `anpr_state.json` в рабочей папке.
 
 ## Тесты и изоляция от боевой базы
 
 Тесты **никогда** не трогают рабочие `anpr.sqlite3`, `anpr_state.json` и `subscribers.json`.
-Изоляция живёт в модуле `anpr_testenv.py`: он перенаправляет пути базы, состояния, фотографий
+Изоляция живёт в модуле `tests/anpr_testenv.py`: он перенаправляет пути базы, состояния, фотографий
 и подписчиков во временный каталог и обнуляет токен Telegram. Каждый тестовый файл импортирует
-`anpr_testenv` **первым** — до `import anpr_telegram` (иначе модуль возьмёт боевые пути при импорте).
+`from tests import anpr_testenv` **первым** — до `import anpr_telegram` (иначе модуль возьмёт
+боевые пути при импорте).
 
 Проверить руками, что прогон безопасен:
 
@@ -149,7 +150,7 @@ python -c "import os,hashlib;print(hashlib.sha256(open('anpr.sqlite3','rb').read
 ```
 
 Хеши (и время изменения файлов) должны совпасть. Заготовка для новых тестов —
-`anpr_testenv.IsolatedTestCase`: он подставляет временную базу, временное состояние и
+`tests.anpr_testenv.IsolatedTestCase`: он подставляет временную базу, временное состояние и
 пустой токен Telegram, а заодно проверяет, что предыдущий тест не оставил в модуле подмен.
 
 Локальный запрет коммита при падении тестов — хук `.githooks/pre-commit`. Включается один раз:
@@ -169,7 +170,7 @@ git config core.hooksPath .githooks
 Сервис использует только локальный адрес 127.0.0.1:18749, один процесс Uvicorn.
 Порт 8000 больше не используется. Если порт занят другой программой, запуск отменяется.
 Проверка состояния: http://127.0.0.1:18749/health.
-Проверки без камеры: python -m unittest test_stream_latency test_setup_anpr.
+Проверки без камеры: python -m unittest tests.test_stream_latency tests.test_setup_anpr.
 
 Пошаговые регламенты — в [docs/MAINTENANCE.md](docs/MAINTENANCE.md):
 

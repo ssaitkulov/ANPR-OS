@@ -1,5 +1,5 @@
 """Storage of passages: one row per passage, live and archive alike."""
-import anpr_testenv  # noqa: F401  — изоляция тестов от боевой БД
+from tests import anpr_testenv  # noqa: F401  — изоляция тестов от боевой БД
 
 import sqlite3
 import tempfile

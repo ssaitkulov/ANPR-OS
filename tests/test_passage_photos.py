@@ -1,4 +1,4 @@
-import anpr_testenv  # noqa: F401  — изоляция тестов от боевой БД
+from tests import anpr_testenv  # noqa: F401  — изоляция тестов от боевой БД
 import unittest
 from app.storage.passage_photos import PhotoCache
 from unittest.mock import patch

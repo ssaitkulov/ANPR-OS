@@ -64,7 +64,7 @@ packages = [
 "" = "."
 
 [tool.pytest.ini_options]
-testpaths = ["."]
+testpaths = ["tests"]
 python_files = ["test_*.py"]
 addopts = "-q"
 filterwarnings = ["ignore::DeprecationWarning"]
