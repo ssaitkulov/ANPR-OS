@@ -30,7 +30,7 @@ import sys
 import threading
 import time
 from collections import defaultdict
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -41,7 +41,7 @@ from storage import Store, event_key, passage_key, normalize_plate
 import storage as storage_module
 from system_events import EVENTS
 from passage_photos import PHOTOS
-from photo_archive import save_photo
+from photo_archive import save_photo, cleanup_old_photos
 
 # ---------------------------------------------------------------------------
 # Конфиг (переменные окружения / .env)
@@ -113,6 +113,15 @@ OUTBOX_MAX_ATTEMPTS = max(1, int(cfg('OUTBOX_MAX_ATTEMPTS', '10')))  # попы�
 OUTBOX_RETRY_BASE_SECONDS = max(1, int(cfg('OUTBOX_RETRY_BASE_SECONDS', '30')))  # первая пауза повтора
 OUTBOX_RETRY_MAX_SECONDS = max(OUTBOX_RETRY_BASE_SECONDS,
                                int(cfg('OUTBOX_RETRY_MAX_SECONDS', '3600')))  # потолок паузы повтора
+# Дневной отчёт: отдельный поток-планировщик, а не проверка в цикле камеры.
+REPORT_CHECK_INTERVAL = max(15, int(cfg('REPORT_CHECK_INTERVAL', '60')))   # как часто проверять время отчёта, с
+REPORT_WINDOW_MINUTES = max(0, int(cfg('REPORT_WINDOW_MINUTES', '240')))   # окно, в котором отчёт за день ещё можно отправить
+REPORT_KEEP_DAYS = max(1, int(cfg('REPORT_KEEP_DAYS', '30')))             # сколько дней хранить отметки об отчётах
+# Обслуживание: ротация фотографий и чекпоинт WAL.
+MAINTENANCE_INTERVAL = max(60, int(cfg('MAINTENANCE_INTERVAL', '3600')))   # как часто чистить фотографии, с
+IMAGE_RETENTION_DAYS = max(1, int(cfg('IMAGE_RETENTION_DAYS', '30')))     # сколько дней хранить фотографии
+WAL_CHECKPOINT_INTERVAL = max(60, int(cfg('WAL_CHECKPOINT_INTERVAL', '900')))  # как часто сливать WAL, с
+MAINTENANCE_TICK = 30  # как часто поток обслуживания просыпается, с
 
 # Политика повторов очереди живёт в storage.py — передаём туда значения из .env.
 storage_module.DEFAULT_MAX_ATTEMPTS = OUTBOX_MAX_ATTEMPTS
@@ -146,6 +155,14 @@ class LazyStore:
     def __getattr__(self, name):
         return getattr(self._get(), name)
 
+    def close(self):
+        """Закрыть базу, если она была открыта (при остановке сервиса)."""
+        with self._lock:
+            store = self._store
+            self._store = None
+        if store is not None:
+            store.close()
+
 
 STORE = LazyStore(DB_FILE)
 
@@ -165,7 +182,8 @@ def load_state() -> dict:
             return json.loads(STATE_FILE.read_text(encoding="utf-8"))
         except Exception:
             pass
-    return {"days": {}, "seen": [], "last_report_date": "", "last_event_time": "", "last_rec_no": 0}
+    return {"days": {}, "seen": [], "last_report_date": "", "reported_days": [],
+            "last_event_time": "", "last_rec_no": 0}
 
 
 _state_save_lock = threading.RLock()
@@ -1059,25 +1077,116 @@ def build_report(state: dict, day: str | None = None) -> str:
     return "\n".join(lines)
 
 
-def maybe_send_report(state: dict, dry_run: bool = False) -> bool:
-    """Если сейчас время REPORT_TIME и отчёт сегодня ещё не уходил — отправить."""
-    now = now_local()
-    if now.strftime("%H:%M") != REPORT_TIME:
-        return False
-    day = today_str(now)
-    if state.get("last_report_date") == day:
-        return False
+def report_time_minutes() -> int:
+    """REPORT_TIME (ЧЧ:ММ) — минуты от начала суток."""
+    try:
+        hour, _, minute = str(REPORT_TIME).partition(':')
+        return int(hour) * 60 + int(minute)
+    except (TypeError, ValueError):
+        return 20 * 60
+
+
+def reported_days(state: dict) -> set:
+    """Дни, отчёт по которым уже уходил."""
+    days = state.get('reported_days')
+    if isinstance(days, (list, tuple, set)):
+        found = {str(day) for day in days}
+    else:
+        found = set()
+    last = str(state.get('last_report_date') or '')
+    if last:
+        found.add(last)
+    return found
+
+
+def mark_reported(state: dict, day: str) -> None:
+    """Отметить день как отправленный (отметка живёт в JSON-зеркале)."""
+    days = reported_days(state)
+    days.add(day)
+    state['reported_days'] = sorted(days)[-REPORT_KEEP_DAYS:]
+    state['last_report_date'] = day
+
+
+def has_passages(state: dict, day: str) -> bool:
+    """Были ли проезды за этот день: база — источник истины, зеркало — запасной вариант."""
+    try:
+        if STORE.count_day(day):
+            return True
+    except (sqlite3.Error, AttributeError):
+        pass
+    return bool((state.get('days') or {}).get(day))
+
+
+def due_report_days(state: dict, now: datetime) -> list:
+    """Дни, отчёт по которым пора отправить.
+
+    Сегодня — как только наступило REPORT_TIME, и пока не вышло окно
+    REPORT_WINDOW_MINUTES (отчёт не должен уйти на следующие сутки).
+    Вчера — догоняющий отчёт: если за вчера отчёт не ушёл (сервис был
+    выключен в это время), он уходит сейчас.
+    """
+    done = reported_days(state)
+    minutes = now.hour * 60 + now.minute
+    target = report_time_minutes()
+    days = []
+    yesterday = (now - timedelta(days=1)).strftime('%Y-%m-%d')
+    today = now.strftime('%Y-%m-%d')
+    if yesterday not in done and has_passages(state, yesterday):
+        days.append(yesterday)
+    if today not in done and target <= minutes <= target + REPORT_WINDOW_MINUTES:
+        days.append(today)
+    return days
+
+
+def send_report_for_day(state: dict, day: str, dry_run: bool = False) -> bool:
+    """Отправить отчёт за день и отметить день как отправленный."""
     text = build_report(state, day)
     print(text)
-    if not dry_run:
-        ok = telegram_send(text, kind='report')
-        # Дату отмечаем всегда: неудачная отправка уже легла в очередь и дойдёт
-        # позже. Повтор в ту же минуту набил бы очередь копиями отчёта.
-        state["last_report_date"] = day
-        save_state(state)
-        print("[report] отчёт отправлен в Telegram ✅" if ok else
-              "[report] отчёт не доставлен — ждёт в очереди", file=sys.stderr)
+    if dry_run:
+        return True
+    ok = telegram_send(text, kind='report')
+    # Дату отмечаем всегда: неудачная отправка уже легла в очередь и дойдёт
+    # позже. Повтор набил бы очередь копиями отчёта.
+    mark_reported(state, day)
+    save_state(state)
+    print("[report] отчёт отправлен в Telegram ✅" if ok else
+          "[report] отчёт не доставлен — ждёт в очереди", file=sys.stderr)
     return True
+
+
+def maybe_send_report(state: dict, dry_run: bool = False, handled: set | None = None) -> bool:
+    """Отправить отчёт, если он пора. Вызывает поток-планировщик отчёта.
+
+    handled — дни, о которых отчёт уже отправлен в этом запуске (dry-run:
+    отметки в состоянии нет, отчёт печатается один раз).
+    """
+    now = now_local()
+    sent = False
+    for day in due_report_days(state, now):
+        if handled is not None and day in handled:
+            continue
+        if send_report_for_day(state, day, dry_run=dry_run):
+            sent = True
+        if handled is not None:
+            handled.add(day)
+    return sent
+
+
+def report_worker(state: dict, stop_event: threading.Event, dry_run: bool = False) -> None:
+    """Поток-планировщик дневного отчёта.
+
+    Отчёт не зависит от камеры: время проверяется раз в REPORT_CHECK_INTERVAL
+    секунд, а не «точное совпадение минуты» в цикле камеры. Если сервис был
+    выключен в момент отчёта, отчёт уходит позже — в том числе за вчера.
+    """
+    handled = set()
+    while not stop_event.is_set():
+        try:
+            maybe_send_report(state, dry_run=dry_run, handled=handled)
+        except Exception as error:  # pragma: no cover
+            print(f'[report] отчёт не отправлен: {error}', file=sys.stderr)
+        if stop_event.wait(REPORT_CHECK_INTERVAL):
+            break
 
 
 # ---------------------------------------------------------------------------
@@ -1233,35 +1342,64 @@ def archive_time(timestamp: int) -> datetime:
 
 
 def backfill_once(sess, state: dict, dry_run: bool = False) -> int:
-    """Добор через recordFinder TrafficSnapEventInfo по RecNo (текст, без фото). Возвращает кол-во новых."""
+    """Добор через recordFinder TrafficSnapEventInfo по RecNo (текст, без фото).
+
+    Сетевой запрос идёт без общего замка состояния: живая камера не должна
+    ждать, пока скачивается архив. Запись найденного — уже под замком.
+    Возвращает число новых проездов.
+    """
     with STATE_LOCK:
-        return _backfill_once(sess, state, dry_run=dry_run)
-
-
-def _backfill_once(sess, state: dict, dry_run: bool = False) -> int:
-    start, end = _backfill_range(state)
-    base = f"http://{DAHUA_HOST}:{DAHUA_PORT}/cgi-bin"
-    print(f"[backfill] recordFinder TrafficSnapEventInfo last_rec_no={state.get('last_rec_no', 0)}", file=sys.stderr)
+        last_no = int(state.get("last_rec_no", 0) or 0)
+        start, end = _backfill_range(state)
+    print(f"[backfill] recordFinder TrafficSnapEventInfo last_rec_no={last_no}", file=sys.stderr)
     try:
-        all_recs, begin = [], 0
-        while True:
-            r = sess.get(f"{base}/recordFinder.cgi",
-                         params={"action": "find", "name": "TrafficSnapEventInfo",
-                                 "count": "200", "condition.QueryResultBegin": begin},
-                         timeout=15)
-            r.raise_for_status()
-            found, page = parse_record_kv(r.text)
-            if not page:
-                break
-            all_recs.extend(page)
-            begin += len(page)
-            if found == 0 or len(page) < 200:
-                break
+        all_recs = _fetch_archive_records(sess)
     except Exception as e:
         print(f"[backfill] ошибка recordFinder: {e}", file=sys.stderr)
         return 0
-    last_no = state.get("last_rec_no", 0) or 0
-    max_no = max([int(r.get("RecNo", 0) or 0) for r in all_recs], default=last_no)
+    with STATE_LOCK:
+        missed, changed = _apply_archive_records(state, all_recs, start, end, last_no)
+    if changed:
+        save_state(state)
+    if missed:
+        text = build_backfill_text(missed, start or now_local(), end or now_local())
+        print(text, file=sys.stderr)
+        if not dry_run:
+            # ОДНО сообщение-список на всех подписчиков (фото в архиве нет).
+            # Если отправка не удалась — список уходит в очередь и докачается позже.
+            ok = telegram_send(text, kind='backfill')
+            if not ok:
+                print('[backfill] список не доставлен — сохранён в очереди', file=sys.stderr)
+        print(f"[backfill] добавлено: {len(missed)}", file=sys.stderr)
+    elif changed:
+        print("[backfill] новых въездов нет", file=sys.stderr)
+    else:
+        print("[backfill] пропущенных нет", file=sys.stderr)
+    return len(missed)
+
+
+def _fetch_archive_records(sess) -> list:
+    """Скачать записи архива камеры постранично (сеть — без замка состояния)."""
+    base = f"http://{DAHUA_HOST}:{DAHUA_PORT}/cgi-bin"
+    all_recs, begin = [], 0
+    while True:
+        r = sess.get(f"{base}/recordFinder.cgi",
+                     params={"action": "find", "name": "TrafficSnapEventInfo",
+                             "count": "200", "condition.QueryResultBegin": begin},
+                     timeout=15)
+        r.raise_for_status()
+        found, page = parse_record_kv(r.text)
+        if not page:
+            break
+        all_recs.extend(page)
+        begin += len(page)
+        if found == 0 or len(page) < 200:
+            break
+    return all_recs
+
+
+def _apply_archive_records(state, all_recs, start, end, last_no) -> tuple:
+    """Записать найденные архивные проезды. Возвращает (новые записи, состояние изменилось)."""
     missed = []
     for r in all_recs:
         try:
@@ -1293,23 +1431,8 @@ def _backfill_once(sess, state: dict, dry_run: bool = False) -> int:
         state["last_rec_no"] = rec_no
         if rec:
             missed.append(rec)
-    if missed:
-        save_state(state)
-        text = build_backfill_text(missed, start or now_local(), end or now_local())
-        print(text, file=sys.stderr)
-        if not dry_run:
-            # ОДНО сообщение-список на всех подписчиков (фото в архиве нет).
-            # Если отправка не удалась — список уходит в очередь и докачается позже.
-            ok = telegram_send(text, kind='backfill')
-            if not ok:
-                print('[backfill] список не доставлен — сохранён в очереди', file=sys.stderr)
-        print(f"[backfill] добавлено: {len(missed)}", file=sys.stderr)
-    elif max_no != last_no:
-        save_state(state)
-        print("[backfill] новых въездов нет", file=sys.stderr)
-    else:
-        print("[backfill] пропущенных нет", file=sys.stderr)
-    return len(missed)
+    changed = int(state.get("last_rec_no", 0) or 0) != last_no
+    return missed, changed
 
 
 # ---------------------------------------------------------------------------
@@ -1403,7 +1526,7 @@ def stream_chunks_with_ticks(response, tick_seconds=0.25):
         cancelled.set()
 
 
-def consume_camera_stream(response, state, dry_run=False, image_wait=1.0, no_image_wait=3.0):
+def consume_camera_stream(response, state, dry_run=False, image_wait=1.0, no_image_wait=3.0, stop=None):
     parser = MultipartParser(parse_boundary(response.headers.get('Content-Type', '')))
     pending_events, pending_images = {}, []
     last_activity = time.monotonic()
@@ -1419,6 +1542,8 @@ def consume_camera_stream(response, state, dry_run=False, image_wait=1.0, no_ima
     next_outbox_check = 0.0
     try:
         for chunk in chunks:
+            if stop is not None and stop.is_set():
+                break  # сервис останавливается — дочитывать поток не нужно
             if chunk:
                 last_activity = time.monotonic()
                 RUNTIME['last_camera_data'] = now_local().strftime('%d.%m.%Y %H:%M:%S')
@@ -1443,18 +1568,83 @@ def consume_camera_stream(response, state, dry_run=False, image_wait=1.0, no_ima
                 # Основную доставку ведёт отдельный поток outbox_worker — она не зависит от камеры.
                 next_outbox_check = time.monotonic() + 5
                 flush_missed_messages()
-            maybe_send_report(state, dry_run=dry_run)
+            # Отчёт за день отправляет отдельный поток — здесь только приём событий.
     finally:
         chunks.close()
         flush()  # retain complete events when the camera disconnects
 
 
+# ---------------------------------------------------------------------------
+# Фоновые потоки сервиса
+# ---------------------------------------------------------------------------
+
 _backfill_lock = threading.Lock()
+_stop_event = threading.Event()
+_workers = {}
+_workers_lock = threading.Lock()
+_active_response = None
+_active_response_lock = threading.Lock()
 
 
-def run_backfill(state: dict, dry_run: bool = False) -> int:
-    """Добор пропущенного из архива камеры. Одновременно может идти только один сеанс."""
-    if not _backfill_lock.acquire(blocking=False):
+def stop_event() -> threading.Event:
+    """Общий сигнал остановки для фоновых потоков."""
+    return _stop_event
+
+
+def request_stop() -> None:
+    """Мягкая остановка: потоки заканчивают работу, соединение с камерой закрывается."""
+    _stop_event.set()
+    close_camera_stream()
+
+
+def set_active_response(response) -> None:
+    """Запомнить открытое соединение с камерой, чтобы закрыть его при остановке."""
+    global _active_response
+    with _active_response_lock:
+        _active_response = response
+
+
+def close_camera_stream() -> None:
+    """Закрыть живое соединение с камерой — поток подписки проснётся сразу."""
+    global _active_response
+    with _active_response_lock:
+        response = _active_response
+        _active_response = None
+    if response is None:
+        return
+    try:
+        response.close()
+    except Exception:
+        pass
+
+
+def start_worker(name: str, target, args=(), kwargs=None) -> threading.Thread:
+    """Запустить фоновый поток сервиса. Поток с таким именем создаётся один раз.
+
+    Переподключение камеры не должно плодить потоки: добор архива, доставка
+    очереди, отчёт и обслуживание работают на весь сервис.
+    """
+    with _workers_lock:
+        thread = _workers.get(name)
+        if thread is not None and thread.is_alive():
+            return thread
+        thread = threading.Thread(target=target, args=args, kwargs=kwargs or {},
+                                 name=f'anpr-{name}', daemon=True)
+        _workers[name] = thread
+        thread.start()
+        return thread
+
+
+def run_backfill(state: dict, dry_run: bool = False, wait_seconds: float = 0.0) -> int:
+    """Добор пропущенного из архива камеры. Одновременно может идти только один сеанс.
+
+    wait_seconds > 0 — подождать освобождения замка (ручной добор из окна управления).
+    """
+    if wait_seconds > 0:
+        if not _backfill_lock.acquire(timeout=wait_seconds):
+            print("[backfill] предыдущий добор ещё выполняется — пропускаю", file=sys.stderr)
+            return 0
+    elif not _backfill_lock.acquire(blocking=False):
         print("[backfill] предыдущий добор ещё выполняется — пропускаю", file=sys.stderr)
         return 0
     try:
@@ -1468,34 +1658,88 @@ def run_backfill(state: dict, dry_run: bool = False) -> int:
         _backfill_lock.release()
 
 
-def subscribe_loop(state: dict, dry_run: bool = False) -> None:
-    """Вечный цикл подписки snapManager с переподключением + backfill на (ре)старте."""
-    import threading
+def backfill_worker(state: dict, stop: threading.Event, dry_run: bool = False) -> None:
+    """Единственный поток добора архива: сразу при старте и далее раз в BACKFILL_INTERVAL.
+
+    Добор идёт на ОТДЕЛЬНОЙ сессии — общая ломает live-стрим. Параллельный
+    сеанс невозможен: run_backfill держит _backfill_lock.
+    """
+    while not stop.is_set():
+        run_backfill(state, dry_run=dry_run)
+        # Синхронизируем БД с JSON-зеркалом (страховка от потери записи в БД).
+        try:
+            reconcile_state_with_store(state)
+        except Exception as error:
+            print(f"[backfill] сверка с базой не удалась: {error}", file=sys.stderr)
+        if stop.wait(BACKFILL_INTERVAL):
+            break
+
+
+def cleanup_images() -> int:
+    """Удалить фотографии старше IMAGE_RETENTION_DAYS дней."""
+    folder = IMAGE_DIR if IMAGE_DIR.is_absolute() else BASE_DIR / IMAGE_DIR
+    return cleanup_old_photos(folder, keep_days=IMAGE_RETENTION_DAYS)
+
+
+def maintenance_worker(state: dict, stop: threading.Event, dry_run: bool = False) -> None:
+    """Поток обслуживания: ротация фотографий и чекпоинт WAL.
+
+    Отдельный поток: обслуживание не зависит от камеры и не мешает приёму событий.
+    """
+    next_photos = 0.0
+    next_checkpoint = 0.0
+    while not stop.is_set():
+        moment = time.monotonic()
+        if moment >= next_photos:
+            next_photos = moment + MAINTENANCE_INTERVAL
+            try:
+                removed = cleanup_images()
+                if removed:
+                    print(f"[maintenance] удалено каталогов фотографий: {removed}", file=sys.stderr)
+            except Exception as error:
+                print(f"[maintenance] ротация фотографий не выполнена: {error}", file=sys.stderr)
+        if moment >= next_checkpoint:
+            next_checkpoint = moment + WAL_CHECKPOINT_INTERVAL
+            try:
+                STORE.checkpoint()
+            except Exception as error:
+                print(f"[maintenance] чекпоинт WAL не выполнен: {error}", file=sys.stderr)
+        if stop.wait(MAINTENANCE_TICK):
+            break
+
+
+def subscribe_loop(state: dict, dry_run: bool = False, stop: threading.Event | None = None) -> None:
+    """Вечный цикл подписки snapManager с переподключением.
+
+    Один поток на весь сервис: добор архива, доставка очереди, дневной отчёт и
+    обслуживание живут отдельными потоками и не пересоздаются при переподключении.
+    """
     sess = requests.Session()
     sess.auth = HTTPDigestAuth(DAHUA_USERNAME, DAHUA_PASSWORD)
     url = f"http://{DAHUA_HOST}:{DAHUA_PORT}/cgi-bin/snapManager.cgi"
-    stop = threading.Event()
+    stop = stop if stop is not None else stop_event()
     camera_connected = False
     connection_failed = False
     if BROADCAST_ENABLED and TELEGRAM_BOT_TOKEN and not dry_run:
-        threading.Thread(target=poll_telegram_updates, args=(state, stop), daemon=True).start()
+        start_worker('telegram', poll_telegram_updates, (state, stop))
         print("[telegram] подписчики: /start /stop /report (getUpdates)", file=sys.stderr)
     if not dry_run:
         # Очередь недоставленных развозит отдельный поток: доставка не зависит от камеры.
-        threading.Thread(target=outbox_worker, args=(stop,), daemon=True).start()
+        start_worker('outbox', outbox_worker, (stop,))
         print(f"[outbox] доставка накопленного каждые {OUTBOX_FLUSH_INTERVAL} с", file=sys.stderr)
+        # Обслуживание: ротация фотографий и чекпоинт WAL.
+        start_worker('maintenance', maintenance_worker, (state, stop), {'dry_run': dry_run})
+        print(f"[maintenance] фотографии старше {IMAGE_RETENTION_DAYS} дней и WAL раз в "
+              f"{WAL_CHECKPOINT_INTERVAL} с", file=sys.stderr)
+    # Отчёт за день — отдельный поток: не ждёт событий камеры. В dry-run отчёт
+    # только печатается, отправки в Telegram нет.
+    start_worker('report', report_worker, (state, stop), {'dry_run': dry_run})
+    print(f"[report] отчёт за день в {REPORT_TIME}, проверка раз в {REPORT_CHECK_INTERVAL} с", file=sys.stderr)
     if BACKFILL_ENABLED and not dry_run:
         # Один поток добора на весь сервис: переподключения камеры плодить потоки не должны.
-        def _backfill_worker():
-            while not stop.is_set():
-                # Backfill идёт на ОТДЕЛЬНОЙ сессии — shared Session ломает live-стрим.
-                run_backfill(state, dry_run=dry_run)
-                # Синхронизируем БД с JSON-зеркалом (страховка от потери записи в БД).
-                reconcile_state_with_store(state)
-                if stop.wait(BACKFILL_INTERVAL):
-                    break
-        threading.Thread(target=_backfill_worker, daemon=True).start()
-    while True:
+        start_worker('backfill', backfill_worker, (state, stop), {'dry_run': dry_run})
+        print(f"[backfill] добор архива раз в {BACKFILL_INTERVAL} с", file=sys.stderr)
+    while not stop.is_set():
         try:
             params = {
                 "action": "attachFileProc",
@@ -1512,7 +1756,11 @@ def subscribe_loop(state: dict, dry_run: bool = False) -> None:
                     EVENTS.add('camera_connected', 'Камера подключена', now_local().isoformat())
                 camera_connected = True
                 connection_failed = False
-                consume_camera_stream(r, state, dry_run=dry_run)
+                set_active_response(r)
+                try:
+                    consume_camera_stream(r, state, dry_run=dry_run, stop=stop)
+                finally:
+                    set_active_response(None)
                 RUNTIME['camera_message'] = 'соединение закрыто. Подключаюсь снова.'
                 if not dry_run and camera_connected:
                     EVENTS.add('camera_disconnected', 'Соединение с камерой потеряно', now_local().isoformat())
@@ -1522,13 +1770,16 @@ def subscribe_loop(state: dict, dry_run: bool = False) -> None:
             print("\n[subscribe] остановлено пользователем", file=sys.stderr)
             raise
         except Exception as e:
+            if stop.is_set():
+                break
             RUNTIME['camera_message'] = 'связь прервалась. Программа попробует подключиться снова.'
             if not dry_run and not connection_failed:
                 EVENTS.add('camera_disconnected', 'Соединение с камерой потеряно' if camera_connected else 'Камера недоступна', now_local().isoformat())
             camera_connected = False
             connection_failed = True
             print(f"[subscribe] ошибка: {e}. Переподключение через {RECONNECT_DELAY}с", file=sys.stderr)
-            time.sleep(RECONNECT_DELAY)
+            if stop.wait(RECONNECT_DELAY):
+                break
 
 
 def run_parser_test() -> int:
@@ -1618,7 +1869,18 @@ def main() -> int:
         # Через run_backfill: добор не запустится параллельно фоновому потоку.
         return 0 if run_backfill(state, dry_run=args.dry_run) >= 0 else 1
 
-    subscribe_loop(state, dry_run=args.dry_run)
+    try:
+        subscribe_loop(state, dry_run=args.dry_run)
+    except KeyboardInterrupt:
+        print("\nОстановлено пользователем", file=sys.stderr)
+    finally:
+        # Мягкая остановка: потоки заканчивают работу, состояние пишется на диск.
+        request_stop()
+        try:
+            save_state(state)
+        except Exception as error:
+            print(f'[shutdown] состояние не сохранено: {error}', file=sys.stderr)
+        STORE.close()
     return 0
 
 

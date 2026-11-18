@@ -1,6 +1,8 @@
 from pathlib import Path
+from datetime import datetime, timedelta
 import hashlib
 import os
+import shutil
 import uuid
 
 
@@ -26,3 +28,32 @@ def save_photo(folder, captured_at, plate, image):
     finally:
         temp.unlink(missing_ok=True)
     return str(destination)
+
+
+def cleanup_old_photos(folder, keep_days: int = 30, today=None) -> int:
+    """Удалить каталоги фотографий старше keep_days дней. Возвращает число удалённых.
+
+    Каталоги называются по дате (ГГГГ-ММ-ДД). Всё, что не похоже на дату
+    (например, `diagnostic`), остаётся на месте — это не архив проездов.
+    """
+    folder = Path(folder).expanduser()
+    if not folder.is_dir():
+        return 0
+    cutoff = (today or datetime.now()).date() - timedelta(days=max(1, int(keep_days)))
+    removed = 0
+    try:
+        children = list(folder.iterdir())
+    except OSError:
+        return 0
+    for child in children:
+        if not child.is_dir():
+            continue
+        try:
+            day = datetime.strptime(child.name, '%Y-%m-%d').date()
+        except ValueError:
+            continue
+        if day > cutoff:
+            continue
+        shutil.rmtree(child, ignore_errors=True)
+        removed += 1
+    return removed

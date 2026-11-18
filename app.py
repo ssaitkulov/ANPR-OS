@@ -1,27 +1,60 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Локальный сервис камеры. Запуск и остановка — через run.bat. Порт 18749."""
-import threading
 import os
+import sys
+import threading
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
+
+import service_logs
 
 import anpr_telegram as M
 from fastapi import FastAPI, BackgroundTasks, HTTPException
 from fastapi.responses import Response
 
 try:
-    import sys
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 except Exception:
     pass
 
+HOST = '127.0.0.1'
+PORT = 18749
+
 state = M.load_state()
 started_at = time.time()
 _worker_started = False
 _worker = None
+_server = None   # объект uvicorn — через него выполняется мягкая остановка
+
+
+def shutdown_service() -> None:
+    """Мягкая остановка: потоки, состояние на диск, база.
+
+    Вызывается при завершении lifespan: и при остановке из окна управления,
+    и при остановке самого процесса.
+    """
+    global _worker_started
+    if not _worker_started:
+        return
+    _worker_started = False
+    M.EVENTS.add('stopped', 'Система остановлена', M.now_local().isoformat())
+    print('[shutdown] останавливаю фоновые потоки…', file=sys.stderr)
+    M.request_stop()
+    worker = _worker
+    if worker is not None:
+        worker.join(10)
+    try:
+        M.save_state(state)
+    except Exception as error:
+        print(f'[shutdown] состояние не сохранено: {error}', file=sys.stderr)
+    try:
+        M.STORE.close()
+    except Exception as error:
+        print(f'[shutdown] база не закрыта: {error}', file=sys.stderr)
+    print('[shutdown] остановлено', file=sys.stderr)
 
 
 @asynccontextmanager
@@ -31,11 +64,15 @@ async def lifespan(_app: FastAPI):
         M.EVENTS.add('started', 'Система запущена', M.now_local().isoformat())
         # Проезды, которые остались только в JSON, переносим в БД — источник истины один.
         M.reconcile_state_with_store(state)
-        t = threading.Thread(target=M.subscribe_loop, args=(state,), kwargs={"dry_run": False}, daemon=True)
+        t = threading.Thread(target=M.subscribe_loop, args=(state,), kwargs={"dry_run": False},
+                             name='anpr-camera', daemon=True)
         t.start()
         _worker = t
         _worker_started = True
-    yield
+    try:
+        yield
+    finally:
+        shutdown_service()
 
 
 app = FastAPI(title="ANPR FAYZ", version="1.0", lifespan=lifespan)
@@ -111,12 +148,42 @@ def report_now(background_tasks: BackgroundTasks):
 def backfill_now(background_tasks: BackgroundTasks):
     def _bf():
         # Через run_backfill: ручной добор не пойдёт параллельно фоновому.
-        M.run_backfill(state, dry_run=False)
+        # Если плановый добор как раз идёт — ждём его конца, а не отменяем.
+        M.run_backfill(state, dry_run=False, wait_seconds=30)
 
     background_tasks.add_task(_bf)
     return {"status": "backfill queued"}
 
 
-if __name__ == "__main__":
+@app.post("/shutdown")
+def shutdown():
+    """Мягко остановить сервис.
+
+    Потоки дорабатывают текущую операцию, состояние пишется на диск,
+    база закрывается — после этого процесс завершается сам.
+    """
+    if _server is None:
+        raise HTTPException(status_code=503, detail="Сервис запущен без управляющего сервера")
+    _server.should_exit = True
+    return {"service": "anpr-fayz", "status": "stopping"}
+
+
+def run() -> None:
+    """Запустить HTTP-сервис.
+
+    Сервер запускается из кода (а не через CLI), чтобы мягкая остановка
+    могла попросить uvicorn завершиться штатно.
+    """
+    global _server
     import uvicorn
-    uvicorn.run(app, host="127.0.0.1", port=18749)
+    # Журналы с ротацией — весь вывод сервиса идёт в файлы, а не в консоль.
+    service_logs.install()
+    config = uvicorn.Config(app, host=HOST, port=PORT,
+                            log_config=service_logs.uvicorn_log_config(), access_log=False)
+    server = uvicorn.Server(config)
+    _server = server
+    server.run()
+
+
+if __name__ == "__main__":
+    run()

@@ -90,11 +90,14 @@ CREATE_EVENTS_TABLE = '''
 '''
 
 CREATE_EVENTS_INDEXES = '''
-    CREATE INDEX IF NOT EXISTS events_day_idx ON events(day, captured_at);
+    CREATE INDEX IF NOT EXISTS idx_events_day ON events(day, captured_at);
+    CREATE INDEX IF NOT EXISTS idx_events_captured_at ON events(captured_at, plate);
     CREATE INDEX IF NOT EXISTS events_plate_idx ON events(plate, captured_at);
-    CREATE INDEX IF NOT EXISTS events_capture_idx ON events(captured_at, plate);
     CREATE INDEX IF NOT EXISTS events_source_idx ON events(source_key);
     CREATE INDEX IF NOT EXISTS events_group_idx ON events(group_id, captured_at);
+    -- Индексы прошлой версии: те же самые под другими именами — держим один набор.
+    DROP INDEX IF EXISTS events_day_idx;
+    DROP INDEX IF EXISTS events_capture_idx;
 '''
 
 EVENT_FIELDS = ('id', 'event_key', 'source_key', 'group_id', 'rec_no', 'day', 'captured_at',
@@ -348,6 +351,12 @@ class Store:
             ).fetchall()
         return [dict(zip(EVENT_FIELDS, row)) for row in rows]
 
+    def count_day(self, day) -> int:
+        """Сколько проездов за день (быстрая проверка «были ли проезды»)."""
+        with self.lock:
+            row = self.conn.execute('SELECT COUNT(*) FROM events WHERE day=?', (day,)).fetchone()
+        return int(row[0]) if row else 0
+
     def passage_exists(self, captured_at, plate):
         """True when a passage with the same timestamp and plate is already stored."""
         with self.lock:
@@ -460,8 +469,26 @@ class Store:
             pending = self.conn.execute("SELECT COUNT(*) FROM outbox WHERE status='pending'").fetchone()[0]
             return {'events': events, 'pending_messages': pending}
 
+    def checkpoint(self, mode: str = 'TRUNCATE') -> bool:
+        """Слить WAL в базу — файл -wal не растёт бесконечно.
+
+        Возвращает True, если чекпоинт прошёл. WAL-файл уменьшается до нуля,
+        база остаётся цельной при следующем открытии.
+        """
+        with self.lock:
+            try:
+                row = self.conn.execute(f'PRAGMA wal_checkpoint({mode})').fetchone()
+            except sqlite3.Error as error:
+                print(f'[storage] чекпоинт WAL не выполнен: {error}', file=sys.stderr)
+                return False
+            return bool(row and row[0] == 0)
+
     def close(self):
         with self.lock:
+            try:
+                self.conn.execute('PRAGMA wal_checkpoint(TRUNCATE)')
+            except sqlite3.Error:
+                pass
             self.conn.close()
 
 
