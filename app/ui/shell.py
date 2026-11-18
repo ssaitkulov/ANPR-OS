@@ -165,17 +165,21 @@ class AppShell:
         """Создать раздел при первом обращении и закешировать его."""
         if name in self.sections:
             return self.sections[name]
+        section = self._create_section(name)
+        self.sections[name] = section.root if hasattr(section, 'root') else section
+        self.section_objects[name] = section
+        return self.sections[name]
+
+    def _create_section(self, name):
+        """Создать новый раздел. Точка подмены в тестах."""
         if name == 'monitor':
             from app.ui.dashboard import MonitoringSection
             section = MonitoringSection(self.content, embedded=True, show_back=False,
                                         service_hook=self.toggle_service)
             self.main_button = section.service_button
-        else:
-            from app.ui.settings import SettingsSection
-            section = SettingsSection(self.content, container=self.content)
-        self.sections[name] = section.root if hasattr(section, 'root') else section
-        self.section_objects[name] = section
-        return self.sections[name]
+            return section
+        from app.ui.settings import SettingsSection
+        return SettingsSection(self.content, container=self.content)
 
     def _monitor_section(self):
         """Объект раздела «Мониторинг» (может быть ещё не создан)."""
@@ -507,7 +511,10 @@ class AppShell:
         """Запомнить размер, положение и состояние окна для следующего запуска."""
         try:
             maximized = self.root.state() == 'zoomed'
+            # У максимизированного окна обычная геометрия хранится отдельно.
             text = self._normal_geometry if maximized else self.root.geometry()
+            if not text:
+                text = self.root.geometry()
             state = window_state.state_from_geometry(text, maximized)
             if state:
                 window_state.save_state(state)

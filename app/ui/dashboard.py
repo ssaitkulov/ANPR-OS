@@ -582,7 +582,8 @@ class MonitoringSection:
         """
         self.paused.set()
         self.stream_changed.set()
-        if self.video_enabled.get():
+        switch = getattr(self, 'video_enabled', None)
+        if switch is not None and switch.get():
             self.set_video_status('paused')
 
     def resume_video(self):

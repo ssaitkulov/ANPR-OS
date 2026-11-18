@@ -57,10 +57,11 @@ def state_from_geometry(text, maximized=False):
     return {'width': width, 'height': height, 'x': x, 'y': y, 'maximized': bool(maximized)}
 
 
-def load_state(path=STATE_FILE):
+def load_state(path=None):
     """Прочитать состояние окна. None — файла нет или он повреждён."""
+    path = Path(path or STATE_FILE)
     try:
-        data = json.loads(Path(path).read_text(encoding='utf-8'))
+        data = json.loads(path.read_text(encoding='utf-8'))
     except (OSError, ValueError):
         return None
     if not isinstance(data, dict):
@@ -68,9 +69,9 @@ def load_state(path=STATE_FILE):
     return data
 
 
-def save_state(state, path=STATE_FILE):
+def save_state(state, path=None):
     """Записать состояние окна атомарно (через временный файл)."""
-    path = Path(path)
+    path = Path(path or STATE_FILE)
     temporary = path.with_name(path.name + '.tmp')
     try:
         temporary.write_text(json.dumps(state, ensure_ascii=False) + '\n', encoding='utf-8')
