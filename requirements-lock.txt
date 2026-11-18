@@ -1,0 +1,33 @@
+# Проверенный набор пакетов: Python 3.14.7 (Windows 11 x64), 2026-11-18.
+# Установка: python -m pip install -r requirements-lock.txt
+# Обновление одного пакета: править и requirements.txt, и этот файл.
+requests==2.32.5
+certifi==2026.1.4
+charset-normalizer==3.4.4
+idna==3.11
+urllib3==2.6.3
+Pillow==12.3.0
+tzdata==2026.3
+fastapi==0.116.1
+starlette==0.47.3
+pydantic==2.12.5
+pydantic_core==2.41.5
+pydantic-settings==2.13.1
+annotated-types==0.7.0
+anyio==4.12.1
+sniffio==1.3.1
+uvicorn==0.35.0
+click==8.3.1
+h11==0.16.0
+httptools==0.7.1
+PyYAML==6.0.3
+python-dotenv==1.2.1
+typing_extensions==4.15.0
+typing-inspection==0.4.2
+watchfiles==1.1.1
+websockets==16.0
+customtkinter==5.2.2
+darkdetect==0.8.0
+pystray==0.19.5
+opencv-python-headless==5.0.0.93
+numpy==2.4.6

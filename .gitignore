@@ -1,20 +1,51 @@
+# --- Секреты и локальное состояние ---
 .env
 .env.tmp
 anpr_state.json
 anpr_state.tmp
 subscribers.json
-images/
-__pycache__/
-*.log
+subscribers.tmp
+ui_preferences.json
+ui_preferences.json.tmp
 service.pid
 anpr.sqlite3
 anpr.sqlite3-shm
 anpr.sqlite3-wal
-subscribers.tmp
+
+# --- Фотографии проездов (пишутся на диск, в репозитории не нужны) ---
+images/
+
+# --- Логи и окружение ---
+*.log
+__pycache__/
+*.py[cod]
+.pytest_cache/
 .venv/
-# Local device notes may contain credentials or personal identifiers.
+venv/
+build/
+dist/
+*.egg-info/
+
+# --- Локальные заметки с доступами и персональными данными ---
 PROJECT_CONTEXT.md
 Dahua-API-Python-Integration.SKILL.md
 
-ui_preferences.json
-ui_preferences.json.tmp
+# --- Локальные макеты и снимки экрана (не часть поставки) ---
+*.pdf
+*.html
+evrika-*.png
+*_ANPR_*.jpg
+
+# --- Набор иконок Material Symbols: в репозитории только используемые ---
+# Полный набор (~1050 файлов) нужен только для растеризации новых иконок.
+filled/*
+!filled/LICENSE
+!filled/README.md
+!filled/brand-messenger.svg
+!filled/calendar-month.svg
+!filled/camera.svg
+!filled/send.svg
+!filled/settings.svg
+!filled/video.svg
+!filled/search.svg
+!filled/chart-area-line.svg
