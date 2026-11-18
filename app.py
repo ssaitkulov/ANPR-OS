@@ -100,7 +100,7 @@ def report_now(background_tasks: BackgroundTasks):
     text = M.build_report(state)
 
     def _send():
-        M.telegram_send(text)
+        M.telegram_send(text, kind='report')
 
     background_tasks.add_task(_send)
     return {"text": text}
@@ -108,13 +108,9 @@ def report_now(background_tasks: BackgroundTasks):
 
 @app.post("/backfill-now")
 def backfill_now(background_tasks: BackgroundTasks):
-    import requests
-    from requests.auth import HTTPDigestAuth
-
     def _bf():
-        sess = requests.Session()
-        sess.auth = HTTPDigestAuth(M.DAHUA_USERNAME, M.DAHUA_PASSWORD)
-        M.backfill_once(sess, state, dry_run=False)
+        # Через run_backfill: ручной добор не пойдёт параллельно фоновому.
+        M.run_backfill(state, dry_run=False)
 
     background_tasks.add_task(_bf)
     return {"status": "backfill queued"}

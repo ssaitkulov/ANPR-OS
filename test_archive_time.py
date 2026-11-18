@@ -1,11 +1,24 @@
+import tempfile
 import unittest
 from datetime import datetime, timezone
+from pathlib import Path
 from unittest.mock import patch
 from zoneinfo import ZoneInfo
 import anpr_telegram as bot
+from storage import Store
 
 
 class ArchiveTimeTests(unittest.TestCase):
+    def setUp(self):
+        # Тесты не должны трогать рабочую БД.
+        folder = tempfile.TemporaryDirectory()
+        self.addCleanup(folder.cleanup)
+        store = Store(Path(folder.name) / 'test.sqlite3')
+        self.addCleanup(store.close)
+        patcher = patch.object(bot, 'STORE', store)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def test_old_archive_entry_with_wrong_timezone_does_not_hide_new_passage(self):
         when = datetime.fromisoformat('2026-11-16T21:43:02+05:00')
         state = {'days': {'2026-11-16': [{'plate': '010047MV', 'iso': '2026-11-16T19:43:54+03:00', 'direction': '0', 'backfill': True}]}}

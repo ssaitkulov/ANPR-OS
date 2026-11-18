@@ -43,7 +43,7 @@ class OutboxTests(unittest.TestCase):
             def enqueue_text(self, event_id, chat_id, body, kind): self.rows.append((chat_id, body, kind))
         fake = FakeStore()
         with patch.object(bot, 'STORE', fake), patch.object(bot, 'get_recipients', return_value=['42']), \
-             patch.object(bot, 'telegram_send_media_group', return_value=False), \
+             patch.object(bot, 'telegram_send_media_group_to', return_value=False), \
              patch.object(bot, 'TELEGRAM_BOT_TOKEN', '123:token'):
             bot.send_entry_notification({'plate': 'ABC123', 'iso': '2026-11-16T20:00:00+05:00', 'time': '20:00:00'}, [b'car', b'plate'])
         self.assertEqual(len(fake.rows), 1)

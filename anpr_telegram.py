@@ -92,7 +92,8 @@ STATE_FILE = Path(cfg("STATE_FILE", str(BASE_DIR / "anpr_state.json")))
 DB_FILE = Path(cfg("DB_FILE", str(BASE_DIR / "anpr.sqlite3")))
 IMAGE_DIR = Path(cfg("IMAGE_DIR", str(BASE_DIR / "images")))
 SEND_EACH_ENTRY = cfg("TELEGRAM_SEND_EACH_ENTRY", "true").lower() in ("1", "true", "yes")
-SAVE_PHOTOS = True  # снимки всегда архивируются: мониторинг читает их из диска
+# Снимки на диск: true — архивировать (мониторинг читает их с диска), false — не писать.
+SAVE_PHOTOS = cfg("SAVE_PHOTOS", "true").lower() in ("1", "true", "yes")
 BACKFILL_ENABLED = cfg("BACKFILL_ENABLED", "true").lower() in ("1", "true", "yes")
 BACKFILL_TIMESTAMP_MODE = cfg("BACKFILL_TIMESTAMP_MODE", "utc")
 INCLUDE_MANUAL_SNAPSHOTS = cfg("INCLUDE_MANUAL_SNAPSHOTS", "true").lower() in ("1", "true", "yes")
@@ -106,8 +107,34 @@ RECONNECT_DELAY = int(cfg("RECONNECT_DELAY", "10"))
 HEARTBEAT = cfg("HEARTBEAT", "5")
 DEDUP_WINDOW_SECONDS = max(0.0, float(cfg('DEDUP_WINDOW_SECONDS', '15')))
 STATE_KEEP_DAYS = max(1, int(cfg('STATE_KEEP_DAYS', '30')))  # сколько дней хранить JSON-зеркало
+OUTBOX_FLUSH_INTERVAL = max(5, int(cfg('OUTBOX_FLUSH_INTERVAL', '15')))  # сек между попытками доставки очереди
+BACKFILL_INTERVAL = max(15, int(cfg('BACKFILL_INTERVAL', '60')))  # сек между доборами архива
 RUNTIME = {'camera_message': 'подключаюсь…', 'telegram_message': 'ожидаю первую отправку.', 'last_camera_data': ''}
-STORE = Store(DB_FILE)
+
+
+class LazyStore:
+    """Хранилище SQLite, открываемое при первом обращении.
+
+    Импорт модуля не должен трогать рабочую базу: тесты и утилиты подключаются
+    к модулю, не создавая anpr.sqlite3 и её WAL-файлов.
+    """
+
+    def __init__(self, path: Path):
+        self._path = Path(path)
+        self._store: Store | None = None
+        self._lock = threading.Lock()
+
+    def _get(self) -> Store:
+        with self._lock:
+            if self._store is None:
+                self._store = Store(self._path)
+            return self._store
+
+    def __getattr__(self, name):
+        return getattr(self._get(), name)
+
+
+STORE = LazyStore(DB_FILE)
 
 try:
     TZ = ZoneInfo(TIMEZONE)
@@ -128,7 +155,10 @@ def load_state() -> dict:
     return {"days": {}, "seen": [], "last_report_date": "", "last_event_time": "", "last_rec_no": 0}
 
 
-_state_save_lock = threading.Lock()
+_state_save_lock = threading.RLock()
+# Общее состояние читают и пишут несколько потоков (камера, добор архива,
+# очередь недоставленных) — изменения сериализуются этим замком.
+STATE_LOCK = _state_save_lock
 
 
 def trim_state(state: dict) -> None:
@@ -141,7 +171,7 @@ def trim_state(state: dict) -> None:
 
 
 def save_state(state: dict) -> None:
-    with _state_save_lock:
+    with STATE_LOCK:
         trim_state(state)
         tmp = STATE_FILE.with_suffix(".tmp")
         tmp.write_text(json.dumps(state, ensure_ascii=False, indent=1), encoding="utf-8")
@@ -203,7 +233,12 @@ def telegram_send_to(chat_id: str, text: str) -> bool:
         return False
 
 
-def telegram_send(text: str, photo_path: Path | None = None, caption: str = "") -> bool:
+def telegram_send(text: str, photo_path: Path | None = None, caption: str = "", kind: str = "text") -> bool:
+    """Отправить текст всем получателям.
+
+    Чат, где отправка не удалась, получает этот же текст в очередь — сообщение
+    не пропадает и докачается, когда Telegram снова доступен.
+    """
     if not TELEGRAM_BOT_TOKEN:
         print("[telegram] не задан TELEGRAM_BOT_TOKEN — отправка пропущена", file=sys.stderr)
         return False
@@ -213,27 +248,57 @@ def telegram_send(text: str, photo_path: Path | None = None, caption: str = "") 
         return False
     if photo_path and photo_path.exists():
         data = photo_path.read_bytes()
-        return telegram_send_photo(data, caption)
+        return telegram_send_photo(data, caption, kind=kind)
+    failed = []
     ok = False
     for cid in recs:
-        ok = telegram_send_to(cid, text) or ok
+        if telegram_send_to(cid, text):
+            ok = True
+        else:
+            failed.append(cid)
+    if failed:
+        queue_missed_text(text, kind=kind, chats=failed)
     return ok
 
 
-def queue_missed_text(text: str, kind='text') -> None:
-    for cid in get_recipients():
-        STORE.enqueue_text(None, cid, text, kind)
+def queue_missed_text(text: str, kind: str = 'text', chats: list | None = None) -> None:
+    """Сохранить текст в очереди недоставленных (для chats — по умолчанию для всех получателей)."""
+    targets = list(chats) if chats is not None else get_recipients()
+    for cid in targets:
+        try:
+            STORE.enqueue_text(None, cid, text, kind)
+        except sqlite3.Error as error:
+            print(f'[outbox] сообщение не сохранено: {error}', file=sys.stderr)
+
+
+_outbox_lock = threading.Lock()
+
+
+def _outbox_body(rows: list) -> str:
+    """Текст накопившихся сообщений для одного чата."""
+    kinds = {row[4] for row in rows}
+    if kinds and kinds <= {'entry_without_photo'}:
+        return ('📥 <b>Telegram был недоступен. Накопилось проездов: '
+                f'{len(rows)}</b>\n\n' + '\n'.join(f'• {row[3]}' for row in rows) +
+                '\n\nФотографии этих проездов недоступны: в момент сбоя они не сохранялись.')
+    parts = [f'📥 <b>Telegram был недоступен. Накопилось сообщений: {len(rows)}</b>']
+    parts.extend(row[3] for row in rows)
+    return '\n\n'.join(parts)
 
 
 def flush_missed_messages() -> bool:
+    """Доставить накопленные сообщения. Замок не даёт двум потокам отправить одно и то же."""
+    with _outbox_lock:
+        return _flush_missed_messages()
+
+
+def _flush_missed_messages() -> bool:
     grouped = STORE.pending_grouped()
     if not grouped or not TELEGRAM_BOT_TOKEN:
         return False
     delivered = False
     for chat_id, rows in grouped.items():
-        body = ('📥 <b>Telegram был недоступен. Накопилось проездов: '
-                f'{len(rows)}</b>\n\n' + '\n'.join(f'• {row[3]}' for row in rows) +
-                '\n\nФотографии этих проездов недоступны: в момент сбоя они не сохранялись.')
+        body = _outbox_body(rows)
         if telegram_send_to(chat_id, body):
             for row in rows:
                 STORE.mark_sent(row[0])
@@ -244,27 +309,57 @@ def flush_missed_messages() -> bool:
     return delivered
 
 
-def telegram_send_media_group(items: list) -> bool:
-    """items: [(image_bytes, caption), ...] — одним sendMediaGroup в каждый чат (макс 10 фото)."""
+def outbox_worker(stop_event: threading.Event) -> None:
+    """Отдельный поток доставки очереди.
+
+    Работает независимо от камеры: камера может быть недоступна часами,
+    а накопленные сообщения всё равно уходят, как только Telegram доступен.
+    """
+    while not stop_event.is_set():
+        try:
+            flush_missed_messages()
+        except Exception as error:  # pragma: no cover
+            print(f'[outbox] ошибка доставки: {error}', file=sys.stderr)
+        stop_event.wait(OUTBOX_FLUSH_INTERVAL)
+
+
+def telegram_send_media_group_to(chat_id: str, items: list) -> bool:
+    """Один sendMediaGroup в конкретный чат."""
+    try:
+        files, data = [], []
+        for idx, (img, cap) in enumerate(items):
+            files.append((str(idx), (f"{idx}.jpg", io.BytesIO(img), "image/jpeg")))
+            first = {"caption": cap[:1024], "parse_mode": "HTML"} if idx == 0 else {}
+            data.append({"type": "photo", "media": f"attach://{idx}", **first})
+        r = requests.post(f"{_tg_base()}/sendMediaGroup",
+                          data={"chat_id": chat_id, "media": json.dumps(data)}, files=files, timeout=60)
+        return r.status_code == 200
+    except Exception as e:  # pragma: no cover
+        print(f"[telegram] mediaGroup {chat_id}: {e}", file=sys.stderr)
+        return False
+
+
+def telegram_send_media_group(items: list, kind: str = 'entry_without_photo') -> bool:
+    """items: [(image_bytes, caption), ...] — одним sendMediaGroup в каждый чат (макс 10 фото).
+
+    Чату, где альбом не доставился, текст уходит в очередь: сообщение докачается позже.
+    """
     if not TELEGRAM_BOT_TOKEN or not items:
         return False
     items = items[:10]
     recs = get_recipients()
     if not recs:
         return False
+    caption = items[0][1] if items else ''
+    failed = []
     ok = False
     for cid in recs:
-        try:
-            files, data = [], []
-            for idx, (img, cap) in enumerate(items):
-                files.append((str(idx), (f"{idx}.jpg", io.BytesIO(img), "image/jpeg")))
-                first = {"caption": cap[:1024], "parse_mode": "HTML"} if idx == 0 else {}
-                data.append({"type": "photo", "media": f"attach://{idx}", **first})
-            r = requests.post(f"{_tg_base()}/sendMediaGroup",
-                              data={"chat_id": cid, "media": json.dumps(data)}, files=files, timeout=60)
-            ok = (r.status_code == 200) or ok
-        except Exception as e:  # pragma: no cover
-            print(f"[telegram] mediaGroup {cid}: {e}", file=sys.stderr)
+        if telegram_send_media_group_to(cid, items):
+            ok = True
+        else:
+            failed.append(cid)
+    if failed:
+        queue_missed_text(caption, kind=kind, chats=failed)
     return ok
 
 
@@ -312,7 +407,28 @@ def build_entry_caption(rec: dict) -> str:
     return "\n".join(lines)
 
 
-def telegram_send_photo(image_bytes: bytes | None, caption: str) -> bool:
+def telegram_send_photo_to(chat_id: str, image_bytes: bytes | None, caption: str) -> bool:
+    """Одно фото (или текст, если снимка нет) в конкретный чат."""
+    try:
+        if image_bytes:
+            r = requests.post(
+                f"{_tg_base()}/sendPhoto",
+                data={"chat_id": chat_id, "caption": caption[:1024], "parse_mode": "HTML"},
+                files={"photo": ("event.jpg", io.BytesIO(image_bytes), "image/jpeg")},
+                timeout=30)
+        else:
+            r = requests.post(
+                f"{_tg_base()}/sendMessage",
+                json={"chat_id": chat_id, "text": caption, "parse_mode": "HTML",
+                      "disable_web_page_preview": True}, timeout=30)
+        return r.status_code == 200
+    except Exception as e:  # pragma: no cover
+        print(f"[telegram] фото {chat_id}: {e}", file=sys.stderr)
+        return False
+
+
+def telegram_send_photo(image_bytes: bytes | None, caption: str, kind: str = 'entry_without_photo') -> bool:
+    """Отправить снимок всем получателям; недоставленным чатам текст уходит в очередь."""
     if not TELEGRAM_BOT_TOKEN:
         print("[telegram] не задан TELEGRAM_BOT_TOKEN — отправка пропущена", file=sys.stderr)
         return False
@@ -320,23 +436,15 @@ def telegram_send_photo(image_bytes: bytes | None, caption: str) -> bool:
     if not recs:
         print("[telegram] нет получателей", file=sys.stderr)
         return False
+    failed = []
     ok = False
     for cid in recs:
-        try:
-            if image_bytes:
-                r = requests.post(
-                    f"{_tg_base()}/sendPhoto",
-                    data={"chat_id": cid, "caption": caption[:1024], "parse_mode": "HTML"},
-                    files={"photo": ("event.jpg", io.BytesIO(image_bytes), "image/jpeg")},
-                    timeout=30)
-            else:
-                r = requests.post(
-                    f"{_tg_base()}/sendMessage",
-                    json={"chat_id": cid, "text": caption, "parse_mode": "HTML",
-                          "disable_web_page_preview": True}, timeout=30)
-            ok = (r.status_code == 200) or ok
-        except Exception as e:  # pragma: no cover
-            print(f"[telegram] фото {cid}: {e}", file=sys.stderr)
+        if telegram_send_photo_to(cid, image_bytes, caption):
+            ok = True
+        else:
+            failed.append(cid)
+    if failed:
+        queue_missed_text(caption, kind=kind, chats=failed)
     return ok
 
 
@@ -361,18 +469,17 @@ def send_entry_notification(rec: dict, images, dry_run: bool = False) -> None:
     elif len(image_list) == 1:
         ok = telegram_send_photo(image_list[0], caption)
     else:
-        ok = telegram_send(caption)
+        ok = telegram_send(caption, kind='entry_without_photo')
     delivered_at = now_local().isoformat()
     RUNTIME['telegram_delivery'] = {'ok': ok, 'at': delivered_at}
     EVENTS.add('telegram_ok' if ok else 'telegram_error',
                'Сообщение отправлено' if ok else 'Ошибка отправки Telegram', delivered_at)
-    RUNTIME['telegram_message'] = ('последнее уведомление доставлено хотя бы в один разрешённый чат.' if ok else 'не удалось доставить уведомление. Проверьте интернет, токен и ID чата.')
+    RUNTIME['telegram_message'] = ('последнее уведомление доставлено хотя бы в один разрешённый чат.' if ok else 'не удалось доставить уведомление (в очередь). Проверьте интернет, токен и ID чата.')
     elapsed = time.monotonic() - send_started
     RUNTIME['telegram_message'] += f' Отправка заняла {elapsed:.1f} с.'
     print(f'[delivery] started={rec.get("iso", "")} duration_seconds={elapsed:.3f} success={ok}', file=sys.stderr)
     print(f"[telegram] въезд отправлен: {ok}", file=sys.stderr)
-    if not ok:
-        queue_missed_text(caption, kind='entry_without_photo')
+    # Недоставленные чаты уже получили текст в очередь внутри telegram_send_* — здесь дублировать нельзя.
 
 
 # ---------------------------------------------------------------------------
@@ -675,6 +782,11 @@ def record_from_row(row: dict) -> dict:
 
 def reconcile_state_with_store(state: dict) -> int:
     """Перенести в SQLite проезды, которые пока есть только в JSON-состоянии."""
+    with STATE_LOCK:
+        return _reconcile_state_with_store(state)
+
+
+def _reconcile_state_with_store(state: dict) -> int:
     items = []
     for records in (state.get('days') or {}).values():
         for rec in records:
@@ -700,6 +812,12 @@ def reconcile_state_with_store(state: dict) -> int:
 
 
 def record_event(state: dict, ev: dict, image: bytes | None) -> dict | None:
+    """Добавить событие в состояние (сериализовано: состояние общее для потоков)."""
+    with STATE_LOCK:
+        return _record_event(state, ev, image)
+
+
+def _record_event(state: dict, ev: dict, image: bytes | None) -> dict | None:
     """Добавить событие в состояние. Возвращает запись или None (дубль/не въезд)."""
     countable, source_key = is_countable(ev)
     if not countable:
@@ -800,7 +918,7 @@ def maybe_send_report(state: dict, dry_run: bool = False) -> bool:
     text = build_report(state, day)
     print(text)
     if not dry_run:
-        ok = telegram_send(text)
+        ok = telegram_send(text, kind='report')
         if ok:
             state["last_report_date"] = day
             save_state(state)
@@ -880,6 +998,15 @@ def is_duplicate_backfill(state: dict, plate: str, when: datetime, direction: st
 def record_backfill_event(state: dict, plate: str, when: datetime, speed: str = "", image: bytes | None = None,
                         lane: str = "", direction: str = "", color: str = "", category: str = "",
                         rec_no=None) -> dict | None:
+    """Добавить проезд из архива камеры (сериализовано: состояние общее для потоков)."""
+    with STATE_LOCK:
+        return _record_backfill_event(state, plate, when, speed, image, lane, direction, color,
+                                      category, rec_no)
+
+
+def _record_backfill_event(state: dict, plate: str, when: datetime, speed: str = "", image: bytes | None = None,
+                            lane: str = "", direction: str = "", color: str = "", category: str = "",
+                            rec_no=None) -> dict | None:
     if is_duplicate_backfill(state, plate, when, direction):
         return None
     rec = {"plate": plate or "—", "time": when.strftime("%H:%M:%S"), "iso": when.isoformat(),
@@ -950,6 +1077,11 @@ def archive_time(timestamp: int) -> datetime:
 
 def backfill_once(sess, state: dict, dry_run: bool = False) -> int:
     """Добор через recordFinder TrafficSnapEventInfo по RecNo (текст, без фото). Возвращает кол-во новых."""
+    with STATE_LOCK:
+        return _backfill_once(sess, state, dry_run=dry_run)
+
+
+def _backfill_once(sess, state: dict, dry_run: bool = False) -> int:
     start, end = _backfill_range(state)
     base = f"http://{DAHUA_HOST}:{DAHUA_PORT}/cgi-bin"
     print(f"[backfill] recordFinder TrafficSnapEventInfo last_rec_no={state.get('last_rec_no', 0)}", file=sys.stderr)
@@ -1009,7 +1141,11 @@ def backfill_once(sess, state: dict, dry_run: bool = False) -> int:
         text = build_backfill_text(missed, start or now_local(), end or now_local())
         print(text, file=sys.stderr)
         if not dry_run:
-            telegram_send(text)  # ОДНО сообщение-список на всех подписчиков (фото в архиве нет)
+            # ОДНО сообщение-список на всех подписчиков (фото в архиве нет).
+            # Если отправка не удалась — список уходит в очередь и докачается позже.
+            ok = telegram_send(text, kind='backfill')
+            if not ok:
+                print('[backfill] список не доставлен — сохранён в очереди', file=sys.stderr)
         print(f"[backfill] добавлено: {len(missed)}", file=sys.stderr)
     elif max_no != last_no:
         save_state(state)
@@ -1053,13 +1189,16 @@ def flush_pending_events(state: dict, events: dict, images: list, dry_run: bool 
             prepared = prepare_event_images(ev, images)
             if prepared and not dry_run:
                 PHOTOS.put(rec.get('iso'), rec.get('plate'), prepared[0])
-                try:
-                    folder = IMAGE_DIR if IMAGE_DIR.is_absolute() else BASE_DIR / IMAGE_DIR
-                    path = save_photo(folder, rec.get('iso'), rec.get('plate'), prepared[0])
-                    if path:
-                        STORE.set_photo_path(rec['iso'], rec['plate'], path)
-                except (OSError, ValueError, sqlite3.Error) as error:
-                    print(f'[photo] Не удалось сохранить снимок: {error}', file=sys.stderr)
+                if SAVE_PHOTOS:
+                    try:
+                        folder = IMAGE_DIR if IMAGE_DIR.is_absolute() else BASE_DIR / IMAGE_DIR
+                        path = save_photo(folder, rec.get('iso'), rec.get('plate'), prepared[0])
+                        if path:
+                            STORE.set_photo_path(rec['iso'], rec['plate'], path)
+                    except (OSError, ValueError, sqlite3.Error) as error:
+                        print(f'[photo] Не удалось сохранить снимок: {error}', file=sys.stderr)
+                else:
+                    print('[photo] Снимок на диск не сохраняется (SAVE_PHOTOS=false)', file=sys.stderr)
             if len(prepared) < 2:
                 print('[images] Вырезка номера недоступна: камера не передала подходящие координаты или второе фото.', file=sys.stderr)
             send_entry_notification(rec, prepared, dry_run=dry_run)
@@ -1144,6 +1283,7 @@ def consume_camera_stream(response, state, dry_run=False, image_wait=1.0, no_ima
                 flush()
             if not dry_run and time.monotonic() >= next_outbox_check:
                 # Очередь недоставленных проверяем не чаще раза в 5 с, а не в каждом чанке.
+                # Основную доставку ведёт отдельный поток outbox_worker — она не зависит от камеры.
                 next_outbox_check = time.monotonic() + 5
                 flush_missed_messages()
             maybe_send_report(state, dry_run=dry_run)
@@ -1183,23 +1323,23 @@ def subscribe_loop(state: dict, dry_run: bool = False) -> None:
     if BROADCAST_ENABLED and TELEGRAM_BOT_TOKEN and not dry_run:
         threading.Thread(target=poll_telegram_updates, args=(state, stop), daemon=True).start()
         print("[telegram] подписчики: /start /stop /report (getUpdates)", file=sys.stderr)
+    if not dry_run:
+        # Очередь недоставленных развозит отдельный поток: доставка не зависит от камеры.
+        threading.Thread(target=outbox_worker, args=(stop,), daemon=True).start()
+        print(f"[outbox] доставка накопленного каждые {OUTBOX_FLUSH_INTERVAL} с", file=sys.stderr)
     if BACKFILL_ENABLED and not dry_run:
-        # Страховка: даже если live-молчит (прошивка шлёт heartbeat редко), добор каждые 60с.
-        def _periodic_backfill():
+        # Один поток добора на весь сервис: переподключения камеры плодить потоки не должны.
+        def _backfill_worker():
             while not stop.is_set():
-                stop.wait(60)
-                if stop.is_set():
-                    break
+                # Backfill идёт на ОТДЕЛЬНОЙ сессии — shared Session ломает live-стрим.
                 run_backfill(state, dry_run=dry_run)
                 # Синхронизируем БД с JSON-зеркалом (страховка от потери записи в БД).
                 reconcile_state_with_store(state)
-        threading.Thread(target=_periodic_backfill, daemon=True).start()
+                if stop.wait(BACKFILL_INTERVAL):
+                    break
+        threading.Thread(target=_backfill_worker, daemon=True).start()
     while True:
         try:
-            if BACKFILL_ENABLED:
-                # Backfill в фоне на ОТДЕЛЬНОЙ сессии — shared Session ломает live-стрим.
-                threading.Thread(target=run_backfill, args=(state,), kwargs={"dry_run": dry_run}, daemon=True).start()
-                print("[backfill] добор пропущенного в фоне, live стартует сразу", file=sys.stderr)
             params = {
                 "action": "attachFileProc",
                 "channel": DAHUA_CHANNEL,
@@ -1314,13 +1454,12 @@ def main() -> int:
         text = build_report(state)
         print(text)
         if not args.dry_run:
-            telegram_send(text)
+            telegram_send(text, kind='report')
         return 0
 
     if args.backfill_now:
-        sess = requests.Session()
-        sess.auth = HTTPDigestAuth(DAHUA_USERNAME, DAHUA_PASSWORD)
-        return 0 if backfill_once(sess, state, dry_run=args.dry_run) >= 0 else 1
+        # Через run_backfill: добор не запустится параллельно фоновому потоку.
+        return 0 if run_backfill(state, dry_run=args.dry_run) >= 0 else 1
 
     subscribe_loop(state, dry_run=args.dry_run)
     return 0
