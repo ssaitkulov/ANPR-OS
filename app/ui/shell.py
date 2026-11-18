@@ -1,18 +1,27 @@
 """Единое окно приложения «Эврика».
 
 Панель управления и Мониторинг объединены в один `CTk`-каркас с постоянными
-Header, Content и StatusBar и одним `mainloop()`. Разделы создаются один раз
-и переключаются через `grid`/`grid_remove` — видеопоток и фоновые задачи при
+Header и Content и одним `mainloop()`. Разделы создаются один раз и
+переключаются через `grid`/`grid_remove` — видеопоток и фоновые задачи при
 навигации не пересоздаются.
+
+Header (`app/ui/header.py`) — единственное место управления ANPR-сервисом:
+запуск, остановка, перезапуск и три индикатора состояния (сервис, камера,
+Telegram). Дублирующего StatusBar и кнопок управления в разделах нет.
 
 Класс `AppShell` — преемник прежней `Panel`: имя `Panel` сохранено в
 `app/ui/panel.py` как алиас, поэтому `import control_panel`, подмены в
 тестах и точки входа работают как раньше.
+
+Жизненный цикл: все отложенные вызовы Tk планируются через `schedule()`
+с учётом их идентификаторов и отменяются при закрытии окна. Это убирает
+ошибку `invalid command name … poll` при завершении приложения.
 """
 import queue
 import subprocess
 import sys
 import threading
+import time
 from collections import deque
 from datetime import datetime
 import tkinter as tk
@@ -20,18 +29,27 @@ from tkinter import messagebox
 
 import customtkinter as ctk
 import pystray
+import requests
 from PIL import Image
 
 from app.services import control as service
 from app.core import preferences
 from app.core import window_state
 from app.core.paths import ASSETS_DIR
+from app.ui import status as ui_status
+from app.ui.header import SystemHeader
 
 ctk.set_appearance_mode('dark')
 ASSETS = ASSETS_DIR
 
 #: Заголовки разделов: ключ → название.
 SECTION_TITLES = {'monitor': 'Мониторинг', 'settings': 'Настройки'}
+
+#: Как часто обновляются данные о состоянии системы, мс.
+HEALTH_INTERVAL = 3000
+
+#: Как часто читается файл настроек для проверки готовности Telegram, с.
+SETTINGS_TTL = 10.0
 
 
 class AppShell:
@@ -43,6 +61,10 @@ class AppShell:
     def __init__(self, root):
         self.root, self.queue, self.busy = root, queue.Queue(), False
         self.running = False
+        self.operation = None      # текущая операция управления: start / stop / restart
+        self.phase = None          # фаза перезапуска: stop / start
+        self.closing = False       # началось завершение приложения
+        self.closed = False        # окно уже уничтожено
         self.previous = None
         # Журнал проездов больше не отображается в оболочке: список живёт
         # в разделе «Мониторинг». Модель данных сохранена для совместимости.
@@ -51,14 +73,15 @@ class AppShell:
         self.section_objects = {}
         self.current_section = None
         self._normal_geometry = None
-        self._message_after = None
+        self._after_ids = set()
+        self._health = None
+        self._health_error = ''
+        self._last_check = None
+        self._last_error = ''
+        self._states = {}
+        self._settings_cache = (0.0, {})
 
-        self.status = tk.StringVar(value='Проверяю…')
-        self.hint = tk.StringVar(value='')
         self.message = tk.StringVar(value='')
-        self.camera = (tk.StringVar(value='Проверяю…'), tk.StringVar(value=''))
-        self.telegram = (tk.StringVar(value='Проверяю…'), tk.StringVar(value=''))
-        self.service_state = tk.StringVar(value='Проверяю…')
 
         root.title('Эврика')
         root.configure(fg_color=self.BG)
@@ -68,80 +91,35 @@ class AppShell:
         root.bind('<Configure>', self._remember_geometry)
         root.minsize(*window_state.MIN_SIZE)
 
-        self._build_header()
+        self.header = SystemHeader(root, root, self)
+        self.nav_buttons = self.header.nav_buttons
         self._build_content()
-        self._build_statusbar()
         self._apply_window_state()
         self._start_tray()
 
         # Мониторинг открывается по умолчанию; раздел создаётся один раз.
         self.show_section('monitor')
 
-        root.after(100, self.process)
-        self.work(service.start)
-        root.after(1000, self.refresh)
+        self.schedule(100, self.process)
+        self.work(service.start, 'start')
+        self.schedule(1000, self.refresh)
 
     # ------------------------------------------------------------------
     # Каркас окна
     # ------------------------------------------------------------------
-    def _build_header(self):
-        header = ctk.CTkFrame(self.root, fg_color='transparent')
-        header.pack(fill='x', padx=24, pady=(18, 8))
-        self.logo = ctk.CTkImage(light_image=Image.open(ASSETS / 'evrika-logo-ru.png'), size=(145, 30))
-        ctk.CTkLabel(header, text='', image=self.logo, anchor='w').pack(side='left')
-        self.nav_buttons = {}
-        for key in ('monitor', 'settings'):
-            button = ctk.CTkButton(header, text=SECTION_TITLES[key], width=120, height=34,
-                                    fg_color=self.CARD, hover_color='#34455a', border_color=self.BORDER,
-                                    border_width=1, font=('Segoe UI', 12),
-                                    command=lambda key=key: self.show_section(key))
-            button.pack(side='left', padx=(10, 0))
-            self.nav_buttons[key] = button
-        self.more = ctk.CTkOptionMenu(header, values=['Ещё', 'Перезапустить систему',
-                                                      'Запустить или остановить мониторинг', 'Открыть журнал'],
-                                      command=self._more, fg_color=self.CARD, button_color=self.CARD,
-                                      button_hover_color='#34455a', width=120, height=32)
-        self.more.pack(side='right')
-        self.state_frame = ctk.CTkFrame(header, fg_color='transparent')
-        self.state_frame.pack(side='right', padx=(16, 0))
-        self.state_label = ctk.CTkLabel(self.state_frame, textvariable=self.status,
-                                         text_color=self.TEXT, font=('Segoe UI', 12, 'bold'))
-        self.state_label.pack(side='left')
-        self.state_dot = ctk.CTkFrame(self.state_frame, width=10, height=10, corner_radius=5, fg_color=self.MUTED)
-        self.state_dot.pack(side='left', padx=(0, 8), pady=(0, 2))
-        self.hint_label = ctk.CTkLabel(self.state_frame, textvariable=self.hint,
-                                       text_color=self.MUTED, font=('Segoe UI', 11))
-        self.hint_label.pack(side='left', padx=(12, 0))
-        self.message_label = ctk.CTkLabel(header, textvariable=self.message, text_color='#ff9ca5',
-                                          font=('Segoe UI', 11), width=240, anchor='w')
-        self.message_label.pack(side='left', padx=(18, 0))
-
     def _build_content(self):
         self.content = ctk.CTkFrame(self.root, fg_color='transparent')
-        self.content.pack(fill='both', expand=True, padx=24, pady=(0, 8))
+        self.content.pack(fill='both', expand=True, padx=24, pady=(0, 16))
         self.content.grid_columnconfigure(0, weight=1)
         self.content.grid_rowconfigure(0, weight=1)
 
-    def _build_statusbar(self):
-        bar = ctk.CTkFrame(self.root, fg_color=self.CARD, corner_radius=10)
-        bar.pack(side='bottom', fill='x', padx=24, pady=(0, 16))
-        inner = ctk.CTkFrame(bar, fg_color='transparent')
-        inner.pack(fill='x', padx=18, pady=10)
-        self._connection_labels = {}
-        self._connection_labels['camera'] = self._status_group(inner, 'Камера', self.camera)
-        self._connection_labels['telegram'] = self._status_group(inner, 'Telegram', self.telegram)
-        self._status_group(inner, 'Сервис', (self.service_state, tk.StringVar(value='')))
+    def logo_image(self):
+        """Логотип ЭВРИКА для верхней панели."""
+        return Image.open(ASSETS / 'evrika-logo-ru.png')
 
-    def _status_group(self, parent, caption, variables):
-        box = ctk.CTkFrame(parent, fg_color='transparent')
-        box.pack(side='left', padx=(0, 30))
-        ctk.CTkLabel(box, text=caption.upper(), text_color=self.MUTED, font=('Segoe UI', 10)).pack(anchor='w')
-        state_label = ctk.CTkLabel(box, textvariable=variables[0], text_color=self.TEXT,
-                                   font=('Segoe UI', 12, 'bold'))
-        state_label.pack(anchor='w')
-        hint_label = ctk.CTkLabel(box, textvariable=variables[1], text_color=self.MUTED, font=('Segoe UI', 11))
-        hint_label.pack(anchor='w')
-        return state_label, hint_label
+    @property
+    def section_titles(self):
+        return SECTION_TITLES
 
     # ------------------------------------------------------------------
     # Разделы
@@ -154,6 +132,9 @@ class AppShell:
                 widget.grid_remove()
         section.grid(row=0, column=0, sticky='nsew')
         self.current_section = name
+        header = getattr(self, 'header', None)
+        if header is not None:
+            header.close_details()
         for key, button in self.nav_buttons.items():
             active = key == name
             button.configure(fg_color=self.BLUE if active else self.CARD,
@@ -174,10 +155,7 @@ class AppShell:
         """Создать новый раздел. Точка подмены в тестах."""
         if name == 'monitor':
             from app.ui.dashboard import MonitoringSection
-            section = MonitoringSection(self.content, embedded=True, show_back=False,
-                                        service_hook=self.toggle_service)
-            self.main_button = section.service_button
-            return section
+            return MonitoringSection(self.content, embedded=True, show_back=False)
         from app.ui.settings import SettingsSection
         return SettingsSection(self.content, container=self.content)
 
@@ -189,59 +167,99 @@ class AppShell:
     # Состояние системы
     # ------------------------------------------------------------------
     def refresh(self):
-        def worker():
-            try:
-                self.queue.put(('health', service.health()))
-            except Exception:
-                self.queue.put(('offline', None))
-        threading.Thread(target=worker, daemon=True).start()
-        self.root.after(3000, self.refresh)
+        """Периодическая проверка состояния сервиса (в фоновом потоке)."""
+        if self.closing:
+            return
+        threading.Thread(target=self._health_worker, daemon=True).start()
+        self.schedule(HEALTH_INTERVAL, self.refresh)
 
-    def update_status(self, data):
+    def refresh_now(self):
+        """Проверить состояние немедленно, не дожидаясь очередного цикла."""
+        if self.closing:
+            return
+        threading.Thread(target=self._health_worker, daemon=True).start()
+
+    def _health_worker(self):
+        try:
+            data = service.health()
+        except requests.ConnectionError:
+            self.queue.put(('offline', None))
+        except Exception as error:
+            detail = str(error) if isinstance(error, (RuntimeError, ValueError)) else 'Не удалось проверить состояние сервиса.'
+            self.queue.put(('health_error', detail))
+        else:
+            self.queue.put(('health', data))
+
+    def update_status(self, data=None, error=''):
+        """Обновить индикаторы состояния по данным `/health`."""
+        self._health = data
+        if data is not None:
+            self._last_check = datetime.now()
+            self._health_error = ''
+        elif error:
+            self._health_error = error
         running = bool(data and data.get('status') == 'ok')
-        camera_message = data.get('camera_message', '').lower() if data else ''
-        telegram_message = data.get('telegram_message', '').lower() if data else ''
-        if not running:
-            camera_state, telegram_state = 'Неактивна', 'Неактивен'
-        else:
-            camera_state = ('Подключена' if camera_message.startswith('подключена') else
-                            'Нет соединения' if 'прервалась' in camera_message or 'закрыто' in camera_message else 'Подключение…')
-            telegram_state = ('Отправлено' if 'доставлено' in telegram_message else
-                              'Ошибка отправки' if 'не удалось' in telegram_message else 'Ожидание отправки')
-        delivery = data.get('telegram_delivery') if data else None
-        if running and delivery is not None:
-            # Счётчики пустые — отправки ещё не было: это не ошибка.
-            attempted = bool(delivery.get('at')) or bool(delivery.get('delivered')) or bool(delivery.get('failed'))
-            if attempted:
-                telegram_state = 'Отправлено' if delivery.get('ok') else 'Ошибка отправки'
-        delivery_at = delivery.get('at') if delivery else None
-        started_at = data.get('started_at') if data else None
-        current = (running, camera_state, telegram_state, delivery_at, data.get('pid') if data else None)
-        self.previous = current
         self.running = running
-        self.status.set('Система активна' if running else 'Система остановлена')
-        if running:
-            started = datetime.fromtimestamp(started_at).astimezone().strftime('%H:%M') if isinstance(started_at, (int, float)) else None
-            self.hint.set('Мониторинг запущен' + (f'  ·  Работает с {started}' if started else ''))
-        else:
-            self.hint.set('Мониторинг не выполняется')
-        main_button = getattr(self, 'main_button', None)
-        if main_button is not None:
-            main_button.configure(text='Остановить' if running else 'Запустить',
-                                  fg_color='#45303a' if running else self.BLUE,
-                                  hover_color='#603844' if running else self.BLUE_HOVER, text_color=self.TEXT)
-        self.camera[0].set(camera_state)
-        self.camera[1].set('Данные поступают' if running and camera_message == 'подключена, получаю данные.' and data.get('last_camera_data') else '')
-        delivery_time = self.event_time(delivery_at)
-        self.telegram[0].set(telegram_state)
-        self.telegram[1].set(f'Последняя отправка: {delivery_time:%H:%M}' if telegram_state == 'Отправлено' and delivery_time else '')
-        service_state = getattr(self, 'service_state', None)
-        if service_state is not None:
-            service_state.set('Работает' if running else 'Остановлен')
-        self._state_color(running)
-        self._connection_color('camera', camera_state == 'Подключена')
-        self._connection_color('telegram', telegram_state == 'Отправлено')
+        self.previous = (running, data.get('pid') if data else None)
+        service_state = ui_status.service_view(data, self.busy, self.operation, self.phase,
+                                                self._health_error)
+        camera_state = ui_status.camera_view(data, running)
+        telegram_state = ui_status.telegram_view(data, running, self._telegram_configured())
+        self._states = {'service': service_state, 'camera': camera_state, 'telegram': telegram_state}
+        header = getattr(self, 'header', None)
+        if header is not None:
+            header.set_state('service', service_state)
+            header.set_state('camera', camera_state)
+            header.set_state('telegram', telegram_state)
+            header.set_running(running)
 
+    def _telegram_configured(self):
+        """Настроен ли Telegram (токен бота и разрешённые чаты в .env)."""
+        stamp = time.monotonic()
+        cached_stamp, cached = self._settings_cache
+        if stamp - cached_stamp > SETTINGS_TTL:
+            try:
+                from app.ui.settings import read_settings
+                cached = read_settings()
+            except OSError:
+                cached = {}
+            self._settings_cache = (stamp, cached)
+        return ui_status.telegram_configured(cached)
+
+    # ------------------------------------------------------------------
+    # Диагностика: панель подробностей
+    # ------------------------------------------------------------------
+    def details_data(self, key):
+        """Строки панели подробностей для выбранного индикатора."""
+        state = self._states.get(key, {})
+        data = self._health or {}
+        rows = [('Состояние', state.get('label', '—')),
+                ('Последняя проверка', self._last_check.strftime('%H:%M:%S') if self._last_check else '—')]
+        if key == 'service':
+            started = data.get('started_at')
+            rows.append(('Запущено с', ui_status.format_time(started)))
+            if started and isinstance(started, (int, float)):
+                rows.append(('Время работы', ui_status.format_duration(time.time() - started)))
+            rows.append(('PID', str(data.get('pid') or '—')))
+            rows.append(('Адрес сервиса', service.URL))
+        elif key == 'camera':
+            rows.append(('Последние данные', str(data.get('last_camera_data') or '—')))
+            rows.append(('Сообщение сервиса', str(data.get('camera_message') or '—')))
+        elif key == 'telegram':
+            delivery = data.get('telegram_delivery') or {}
+            rows.append(('Последняя доставка', ui_status.format_time(delivery.get('at')) or '—'))
+            rows.append(('Доставлено / ошибок',
+                         f"{delivery.get('delivered', 0)} / {delivery.get('failed', 0)}"))
+            rows.append(('Сообщение сервиса', str(data.get('telegram_message') or '—')))
+        rows.append(('Последняя ошибка', self._last_error or '—'))
+        if state.get('detail'):
+            rows.append(('Пояснение', state['detail']))
+        title = {'service': 'СЕРВИС', 'camera': 'КАМЕРА', 'telegram': 'TELEGRAM'}.get(key, '')
+        return title, rows
+
+    # ------------------------------------------------------------------
+    # Журнал проездов в оболочке
+    # ------------------------------------------------------------------
     def merge_events(self, data):
         """Список проездов (данные). Отображение — в разделе «Мониторинг»."""
         lines = []
@@ -275,6 +293,9 @@ class AppShell:
         except (TypeError, ValueError):
             return None
 
+    # ------------------------------------------------------------------
+    # Очередь фоновых событий
+    # ------------------------------------------------------------------
     def process(self):
         try:
             while True:
@@ -284,85 +305,115 @@ class AppShell:
                 elif kind == 'exit_complete': self._quit(); return
                 elif kind == 'exit_error':
                     self.busy = False
-                    self._enable_main_button()
+                    self.operation = None
+                    self._set_busy(False)
                     self.show_message(data)
                     messagebox.showerror('Не удалось остановить систему', data, parent=self.root)
-                elif kind == 'stopped': pass
-                elif kind == 'message': self.show_message(data); self.busy = False; self._enable_main_button()
+                elif kind == 'operation_done': self._finish_operation(data)
+                elif kind == 'phase': self.phase = data
+                elif kind == 'message': self.show_message(data)
                 elif kind == 'offline':
                     if not self.busy: self.update_status(None)
                 elif kind == 'health':
                     if not self.busy: self.update_status(data)
+                elif kind == 'health_error':
+                    if not self.busy: self.update_status(None, error=data)
         except queue.Empty:
             pass
-        self.root.after(100, self.process)
+        self.schedule(100, self.process)
 
-    def _enable_main_button(self):
-        main_button = getattr(self, 'main_button', None)
-        if main_button is not None:
-            main_button.configure(state='normal')
-
-    def _state_color(self, running):
-        if self.state_dot is not None:
-            self.state_dot.configure(fg_color=self.GREEN if running else self.MUTED)
-
-    def _connection_color(self, key, confirmed):
-        labels = getattr(self, '_connection_labels', {}).get(key)
-        if labels is None:
-            return
-        labels[0].configure(text_color=self.GREEN if confirmed else self.TEXT)
-
-    def animate_status(self):
-        if not self.busy:
-            return
-        self.animation_phase = (getattr(self, 'animation_phase', 0) + 1) % 4
-        self.status.set('Подождите' + '.' * self.animation_phase)
-        self.root.after(400, self.animate_status)
+    def show_message(self, text):
+        """Короткое сообщение в шапке: длинный текст здесь неуместен."""
+        value = (text or '').strip()
+        if len(value) > 70:
+            value = value[:67] + '…'
+        self.message.set(value)
+        header = getattr(self, 'header', None)
+        if header is not None:
+            header.sync_message()
 
     # ------------------------------------------------------------------
     # Управление сервисом
     # ------------------------------------------------------------------
     def toggle_service(self):
-        self.work(service.stop if self.running else service.start)
+        """Запустить или остановить ANPR-сервис (одна кнопка в Header)."""
+        if self.busy or self.closing:
+            return
+        if self.running:
+            if not self._confirm('Остановить систему',
+                                'Остановить ANPR-мониторинг?\nПроезды перестанут фиксироваться.'):
+                return
+            self.work(service.stop, 'stop')
+        else:
+            self.work(service.start, 'start')
 
-    def work(self, action):
-        if self.busy:
+    def restart_service(self):
+        """Перезапустить ANPR-сервис."""
+        if self.busy or self.closing:
+            return
+        if not self._confirm('Перезапустить систему',
+                            'Перезапустить ANPR-мониторинг?\nСбор данных прервётся на несколько секунд.'):
+            return
+        self.work(self._restart_sequence, 'restart')
+
+    def _confirm(self, title, text):
+        try:
+            return bool(messagebox.askyesno(title, text, parent=self.root, default=messagebox.NO))
+        except tk.TclError:
+            return False
+
+    def _restart_sequence(self):
+        """Остановить и снова запустить сервис (в фоновом потоке)."""
+        self.queue.put(('phase', 'stop'))
+        service.stop()
+        self.queue.put(('phase', 'start'))
+        return service.start()
+
+    def work(self, action, operation='start'):
+        """Выполнить операцию управления сервисом в фоновом потоке."""
+        if self.busy or self.closing:
             return
         self.busy = True
+        self.operation = operation
+        self.phase = None
+        self._last_error = ''
         self.show_message('')
-        main_button = getattr(self, 'main_button', None)
-        if main_button is not None:
-            main_button.configure(state='disabled')
-        self.status.set('Подождите')
-        self.hint.set('Меняем состояние системы…')
-        self.animate_status()
-        stopping = action == service.stop
+        self._set_busy(True)
 
         def worker():
             try:
                 action()
-                if stopping: self.queue.put(('stopped', None))
-                self.queue.put(('message', ''))
             except Exception as error:
                 detail = str(error) if isinstance(error, (RuntimeError, ValueError)) else 'Не удалось выполнить действие.'
-                self.queue.put(('message', detail))
+                self.queue.put(('operation_done', {'ok': False, 'error': detail}))
+            else:
+                self.queue.put(('operation_done', {'ok': True, 'error': ''}))
         threading.Thread(target=worker, daemon=True).start()
 
-    def restart(self):
-        self.work(self._restart)
+    def _finish_operation(self, result):
+        """Операция завершена: снимаем блокировку и обновляем индикаторы."""
+        self.busy = False
+        self.operation = None
+        self.phase = None
+        self._set_busy(False)
+        error = (result or {}).get('error') or ''
+        if error:
+            self._last_error = error
+            self.show_message(error)
+        else:
+            self.show_message('')
+        self.refresh_now()
 
-    def _restart(self):
-        service.stop()
-        self.queue.put(('stopped', None))
-        return service.start()
+    def _set_busy(self, busy):
+        header = getattr(self, 'header', None)
+        if header is not None:
+            header.set_busy(busy)
 
-    def _more(self, choice):
-        self.more.set('Ещё')
-        if choice == 'Перезапустить систему': self.restart()
-        elif choice == 'Запустить или остановить мониторинг': self.toggle_service()
-        elif choice == 'Открыть журнал': self.open_log()
-
+    # ------------------------------------------------------------------
+    # Журнал сервиса
+    # ------------------------------------------------------------------
     def open_log(self):
+        """Открыть системный журнал сервиса."""
         subprocess.Popen(['notepad.exe', str(service.BASE / 'service.stderr.log')])
 
     # ------------------------------------------------------------------
@@ -377,11 +428,14 @@ class AppShell:
 
     def _on_unmap(self, event):
         if event.widget is self.root and self.root.state() == 'iconic' and preferences.get_minimize_to_tray():
-            self.root.after_idle(self.root.withdraw)
+            self.schedule_idle(self.root.withdraw)
 
     def hide(self):
-        """Закрыть окно — свернуть в трей. Видео приостанавливается."""
+        """Свернуть окно в трей. Видео приостанавливается, сервис работает."""
         self.save_window_state()
+        header = getattr(self, 'header', None)
+        if header is not None:
+            header.close_details()
         self.root.withdraw()
         self._set_video_paused(True)
 
@@ -402,6 +456,7 @@ class AppShell:
             pass
 
     def confirm_stop_and_exit(self):
+        """Остановить сервис и закрыть приложение (пункт трея)."""
         self.root.deiconify()
         self.root.lift()
         if self.busy:
@@ -412,12 +467,9 @@ class AppShell:
                                    parent=self.root, default=messagebox.NO):
             return
         self.busy = True
-        main_button = getattr(self, 'main_button', None)
-        if main_button is not None:
-            main_button.configure(state='disabled')
+        self.operation = 'stop'
+        self._set_busy(True)
         self.show_message('')
-        self.status.set('Останавливаем систему…')
-        self.hint.set('Пожалуйста, подождите.')
 
         def worker():
             try:
@@ -430,10 +482,22 @@ class AppShell:
         threading.Thread(target=worker, daemon=True).start()
 
     def _quit(self):
+        """Закрыть приложение. Повторный вызов безопасен."""
+        if self.closed:
+            return
+        self.closed = True
+        self.closing = True
         self.save_window_state()
-        self.tray.stop()
+        self._cancel_all()
+        try:
+            self.tray.stop()
+        except Exception:
+            pass
         self._stop_sections()
-        self.root.destroy()
+        try:
+            self.root.destroy()
+        except Exception:
+            pass
 
     def _stop_sections(self):
         for section in getattr(self, 'section_objects', {}).values():
@@ -446,26 +510,73 @@ class AppShell:
                 pass
 
     # ------------------------------------------------------------------
-    # Сообщения
+    # Отложенные вызовы Tk
     # ------------------------------------------------------------------
-    def show_message(self, text):
-        """Короткое сообщение в шапке: длинный текст здесь неуместен."""
-        if self._message_after is not None:
+    def schedule(self, delay, callback):
+        """Запланировать отложенный вызов Tk с учётом его идентификатора.
+
+        Идентификатор запоминается, чтобы при закрытии окна все отложенные
+        вызовы были отменены до уничтожения виджетов. Повторное планирование
+        после начала закрытия запрещено.
+        """
+        if self.closing:
+            return None
+        holder = {}
+
+        def run():
+            identifier = holder.get('id')
+            if identifier is not None:
+                self._after_ids.discard(identifier)
+            if self.closing:
+                return
+            callback()
+        try:
+            identifier = self.root.after(delay, run)
+        except tk.TclError:
+            return None
+        holder['id'] = identifier
+        self._after_ids.add(identifier)
+        return identifier
+
+    def schedule_idle(self, callback):
+        """То же, что `schedule`, но вызов сразу после обработки событий."""
+        if self.closing:
+            return None
+        holder = {}
+
+        def run():
+            identifier = holder.get('id')
+            if identifier is not None:
+                self._after_ids.discard(identifier)
+            if self.closing:
+                return
+            callback()
+        try:
+            identifier = self.root.after_idle(run)
+        except tk.TclError:
+            return None
+        holder['id'] = identifier
+        self._after_ids.add(identifier)
+        return identifier
+
+    def cancel_after(self, identifier):
+        """Отменить один отложенный вызов."""
+        if identifier is None:
+            return
+        self._after_ids.discard(identifier)
+        try:
+            self.root.after_cancel(identifier)
+        except Exception:
+            pass
+
+    def _cancel_all(self):
+        """Отменить все отложенные вызовы окна."""
+        for identifier in list(self._after_ids):
             try:
-                self.root.after_cancel(self._message_after)
+                self.root.after_cancel(identifier)
             except Exception:
                 pass
-            self._message_after = None
-        value = (text or '').strip()
-        if len(value) > 70:
-            value = value[:67] + '…'
-        self.message.set(value)
-        if value:
-            self._message_after = self.root.after(8000, self._clear_message)
-
-    def _clear_message(self):
-        self._message_after = None
-        self.message.set('')
+        self._after_ids.clear()
 
     # ------------------------------------------------------------------
     # Геометрия окна
@@ -549,8 +660,8 @@ def main() -> None:
                 if instance.replacement_requested():
                     shell._quit()
                 else:
-                    root.after(200, check_replacement)
-            root.after(200, check_replacement)
+                    shell.schedule(200, check_replacement)
+            shell.schedule(200, check_replacement)
             root.mainloop()
     finally:
         instance.close()
