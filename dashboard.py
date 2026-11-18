@@ -8,6 +8,7 @@ import sys
 import threading
 import time
 import calendar
+import tkinter as tk
 from datetime import date, datetime
 from contextlib import closing
 from pathlib import Path
@@ -32,12 +33,30 @@ def direction(value):
     return 'Неизвестно'
 
 
-def load_dashboard(path, day, end_day=None):
+def normalize_plate(value):
+    """Match a plate without being sensitive to case or separators."""
+    return ''.join(char for char in str(value or '').upper() if char.isalnum())
+
+
+def open_database(path):
+    """Открыть базу только для чтения; при неудаче — обычным соединением.
+
+    Режим mode=ro не может восстановить WAL, если служебные файлы недоступны,
+    поэтому мониторинг не должен отказывать из-за служебной ошибки SQLite.
+    """
+    resolved = Path(path).resolve()
+    uri = resolved.as_uri() + '?mode=ro'
+    try:
+        return sqlite3.connect(uri, uri=True, timeout=2)
+    except sqlite3.Error:
+        return sqlite3.connect(str(resolved), timeout=2)
+
+
+def load_dashboard(path, day, end_day=None, plate_query=''):
     end_day = end_day or day
     if end_day < day:
         raise ValueError('Invalid date range')
-    uri = Path(path).resolve().as_uri() + '?mode=ro'
-    with closing(sqlite3.connect(uri, uri=True, timeout=2)) as conn:
+    with closing(open_database(path)) as conn:
         rows = conn.execute('SELECT id, captured_at, plate, direction, backfill FROM events WHERE day BETWEEN ? AND ? ORDER BY captured_at DESC, id DESC', (day, end_day)).fetchall()
     hours = [0] * 24
     counts = {'Въезд': 0, 'Выезд': 0, 'Неизвестно': 0}
@@ -47,7 +66,9 @@ def load_dashboard(path, day, end_day=None):
         except (ValueError, TypeError): pass
         counts[direction(direct)] += 1
         if plate and plate not in ('—', 'UNKNOWN', 'unknown'): unique.add(plate)
-    return {'total': len(rows), 'unique': len(unique), 'hours': hours, 'directions': counts, 'recent': rows}
+    query = normalize_plate(plate_query)
+    recent = [row for row in rows if query in normalize_plate(row[2])] if query else rows
+    return {'total': len(rows), 'unique': len(unique), 'hours': hours, 'directions': counts, 'recent': recent}
 
 
 def aggregate_hours(hours, interval, current_hour):
@@ -65,9 +86,8 @@ def chart_last_hour(selected_day, now, end_day=None):
 
 def archived_photo(path, event_id):
     """Read a locally archived photo without requiring the service to be running."""
-    uri = Path(path).resolve().as_uri() + '?mode=ro'
     try:
-        with closing(sqlite3.connect(uri, uri=True, timeout=2)) as conn:
+        with closing(open_database(path)) as conn:
             row = conn.execute('''SELECT p.path FROM events e
                                   JOIN passage_photo_paths p ON p.captured_at=e.captured_at AND p.plate=e.plate
                                   WHERE e.id=?''', (event_id,)).fetchone()
@@ -84,6 +104,8 @@ class MonitorWindow:
         self.stop = threading.Event(); self.frames = queue.Queue(maxsize=1); self.results = queue.Queue(maxsize=1)
         # None tracks the current day, including the rollover at midnight.
         self.period_selection = (0, None)
+        self.search_selection = (0, '')
+        self.search_after = None
         self.display_period = None
         self.data_changed = threading.Event()
         self.visible_count = 30
@@ -150,28 +172,55 @@ class MonitorWindow:
         right.grid(row=0, column=1, rowspan=2, sticky='nsew', padx=(7, 0))
         right.grid_columnconfigure((0, 1), weight=1, uniform='metric')
         right.grid_rowconfigure(2, weight=1)
-        self.entry_metric = self.metric(right, 'ВЪЕЗД', '↘', 0, 0)
-        self.exit_metric = self.metric(right, 'ВЫЕЗД', '↗', 0, 1)
-        self.total = self.metric(right, 'ВСЕ ПРОЕЗДЫ', '●', 1, 0)
-        self.unique = self.metric(right, 'УНИКАЛЬНЫЕ НОМЕРА', '№', 1, 1)
+        # PNGs are rasterized from the matching local filled SVG icons.
+        self.metric_icons = {}
+        for name in ('entry', 'exit', 'passages', 'plates'):
+            with Image.open(BASE / 'assets' / f'metric-{name}.png') as source:
+                self.metric_icons[name] = ctk.CTkImage(light_image=source.copy(), size=(20, 20))
+        self.entry_metric = self.metric(right, 'Въезд', 'entry', 0, 0)
+        self.exit_metric = self.metric(right, 'Выезд', 'exit', 0, 1)
+        self.total = self.metric(right, 'Всего проездов', 'passages', 1, 0)
+        self.unique = self.metric(right, 'Уникальные номера', 'plates', 1, 1)
         feed = ctk.CTkFrame(right, fg_color=CARD, border_color=BORDER, border_width=1, corner_radius=10)
         feed.grid(row=2, column=0, columnspan=2, sticky='nsew', pady=(4, 0))
-        ctk.CTkLabel(feed, text='Последние проезды', font=('Segoe UI', 14, 'bold'), text_color=TEXT, anchor='w').pack(fill='x', padx=14, pady=(10, 4))
+        feed_header = ctk.CTkFrame(feed, fg_color='transparent')
+        feed_header.pack(fill='x', padx=12, pady=(12, 8))
+        ctk.CTkLabel(feed_header, text='', image=self.metric_icons['passages'], width=36, height=36,
+                     corner_radius=9, fg_color='#263b57').pack(side='left', padx=(0, 10))
+        ctk.CTkLabel(feed_header, text='Последние проезды', font=('Segoe UI', 14, 'bold'),
+                     text_color=TEXT, anchor='w').pack(side='left', fill='x', expand=True)
+        search_row = ctk.CTkFrame(feed, fg_color='#111b29', border_width=1,
+                                  border_color='#34455a', corner_radius=8)
+        search_row.pack(fill='x', padx=12, pady=(0, 6))
+        # Rasterized from the local filled/search.svg.
+        with Image.open(BASE / 'assets' / 'search-filled.png') as source:
+            self.search_icon = ctk.CTkImage(light_image=source.copy(), size=(16, 16))
+        ctk.CTkLabel(search_row, text='', image=self.search_icon, width=18, height=32).pack(side='left', padx=(10, 5))
+        self.search_entry = ctk.CTkEntry(search_row, placeholder_text='Поиск по номеру',
+                                         fg_color='#111b29', border_width=0, height=32,
+                                         text_color=TEXT, placeholder_text_color=MUTED, font=('Segoe UI', 11))
+        ctk.CTkButton(search_row, text='✕', width=30, height=28, fg_color='transparent',
+                      hover_color='#263b57', text_color=MUTED, font=('Segoe UI', 13),
+                      command=self.clear_search).pack(side='right', padx=(0, 5))
+        self.search_entry.pack(side='left', fill='x', expand=True)
+        self.search_entry.bind('<KeyRelease>', self.schedule_search)
+        self.search_entry.bind('<<Paste>>', lambda _event: self.root.after_idle(self.schedule_search))
+        self.search_entry.bind('<<Cut>>', lambda _event: self.root.after_idle(self.schedule_search))
+        self.search_entry.bind('<Escape>', lambda _event: self.clear_search())
         self.feed = ctk.CTkScrollableFrame(feed, fg_color='transparent')
         self.feed.pack(fill='both', expand=True, padx=4, pady=(0, 8))
         self.feed.grid_columnconfigure(0, weight=1)
         graph = self.card(layout, 1, 0, padx=(0, 7), pady=(7, 0))
         graph.pack_propagate(False)
-        import tkinter as tk
         self.hours = [0] * 24
         self.chart_interval = tk.StringVar(value='1 ч')
         graph_header = ctk.CTkFrame(graph, fg_color='transparent')
-        graph_header.pack(fill='x', padx=14, pady=(10, 0))
-        icon = tk.Canvas(graph_header, width=27, height=27, bg=BLUE, highlightthickness=0)
-        icon.create_rectangle(6, 15, 9, 21, fill='white', outline='')
-        icon.create_rectangle(12, 11, 15, 21, fill='white', outline='')
-        icon.create_rectangle(18, 6, 21, 21, fill='white', outline='')
-        icon.pack(side='left', padx=(0, 8))
+        graph_header.pack(fill='x', padx=12, pady=(12, 4))
+        # Rasterized from the local filled/chart-area-line.svg.
+        with Image.open(BASE / 'assets' / 'chart-statistics.png') as source:
+            self.chart_icon = ctk.CTkImage(light_image=source.copy(), size=(20, 20))
+        ctk.CTkLabel(graph_header, text='', image=self.chart_icon, width=36, height=36,
+                     corner_radius=9, fg_color='#263b57').pack(side='left', padx=(0, 10))
         ctk.CTkLabel(graph_header, text='Статистика транспортных средств', text_color=TEXT,
                      font=('Segoe UI', 14, 'bold'), anchor='w').pack(side='left', fill='x', expand=True)
         ctk.CTkOptionMenu(graph_header, variable=self.chart_interval, values=['1 ч', '3 ч', '6 ч'],
@@ -181,7 +230,9 @@ class MonitorWindow:
         self.chart_note = ctk.CTkLabel(graph, text='По часам за весь период', text_color=MUTED,
                                        font=('Segoe UI', 10), anchor='w', height=18)
         self.graph = tk.Canvas(graph, bg=CARD, highlightthickness=0)
-        self.graph.pack(fill='both', expand=True, padx=14, pady=10)
+        self.graph.pack(fill='both', expand=True, padx=12, pady=(4, 12))
+        from tkinter import font as tkfont
+        self.chart_axis_font = tkfont.Font(root=self.graph, family='Segoe UI', size=9)
         self.graph.bind('<Configure>', lambda _: self.draw_chart())
         self._feed_content = None
         threading.Thread(target=self.data_worker, daemon=True).start()
@@ -212,7 +263,7 @@ class MonitorWindow:
         if start == end:
             self.chart_note.pack_forget()
         else:
-            self.chart_note.pack(fill='x', padx=14, before=self.graph)
+            self.chart_note.pack(fill='x', padx=(58, 12), before=self.graph)
         for metric in (self.total, self.unique, self.entry_metric, self.exit_metric):
             metric.configure(text='—')
         self.hours = [0] * 24
@@ -314,16 +365,46 @@ class MonitorWindow:
         self.calendar_year, self.calendar_month = year, month + 1
         self.draw_calendar()
 
-    def metric(self, parent, title, symbol, row, column):
+    def metric(self, parent, title, icon, row, column):
         frame = ctk.CTkFrame(parent, fg_color=CARD, border_color=BORDER, border_width=1, corner_radius=10)
-        frame.grid(row=row, column=column, sticky='ew', padx=(0, 5) if column == 0 else (5, 0), pady=(0, 8))
-        ctk.CTkLabel(frame, text=symbol, width=32, height=32, corner_radius=7, fg_color='#263f64',
-                     text_color='#78acff', font=('Segoe UI', 17, 'bold')).pack(side='left', padx=(10, 8), pady=10)
-        box = ctk.CTkFrame(frame, fg_color='transparent'); box.pack(side='left', fill='x', expand=True, pady=6)
-        ctk.CTkLabel(box, text=title, text_color=MUTED, font=('Segoe UI', 9, 'bold'), anchor='w').pack(fill='x')
-        label = ctk.CTkLabel(box, text='—', text_color=TEXT, font=('Segoe UI', 22, 'bold'), anchor='w')
+        frame.grid(row=row, column=column, sticky='nsew', padx=(0, 5) if column == 0 else (5, 0), pady=(0, 8))
+        ctk.CTkLabel(frame, text='', image=self.metric_icons[icon], width=38, height=38,
+                     corner_radius=9, fg_color='#263b57').pack(side='left', padx=(12, 10), pady=10)
+        box = ctk.CTkFrame(frame, fg_color='transparent'); box.pack(side='left', fill='x', expand=True, padx=(0, 8), pady=8)
+        caption = ctk.CTkLabel(box, text=title, text_color='#b5c2d4', font=('Segoe UI', 11),
+                               anchor='w', justify='left', height=18)
+        caption.pack(fill='x')
+        def fit_caption(event):
+            width = max(30, event.width - 2)
+            if caption.cget('wraplength') != width:
+                caption.configure(wraplength=width)
+        box.bind('<Configure>', fit_caption)
+        label = ctk.CTkLabel(box, text='—', text_color=TEXT, font=('Segoe UI', 23, 'bold'), anchor='w', height=28)
         label.pack(fill='x')
         return label
+
+    def schedule_search(self, _event=None):
+        if self.search_after is not None:
+            self.root.after_cancel(self.search_after)
+        self.search_after = self.root.after(250, self.apply_search)
+
+    def clear_search(self):
+        self.search_entry.delete(0, tk.END)
+        self.schedule_search()
+
+    def apply_search(self):
+        self.search_after = None
+        generation, previous = self.search_selection
+        query = normalize_plate(self.search_entry.get())
+        if query == previous:
+            return
+        self.search_selection = (generation + 1, query)
+        self.visible_count = 30
+        self.reset_feed_scroll = True
+        self._feed_content = None
+        self.photo_bytes = {}
+        self.render_passages(None)
+        self.data_changed.set()
 
     def render_passages(self, rows, error=False):
         for child in self.feed.winfo_children(): child.destroy()
@@ -353,7 +434,8 @@ class MonitorWindow:
                          font=('Segoe UI', 11)).pack(fill='x')
             if event_id in self.photo_bytes: self.set_photo(event_id, self.photo_bytes[event_id])
         if not rows:
-            ctk.CTkLabel(self.feed, text='Проездов за выбранную дату нет', text_color=MUTED).grid(row=0, column=0, pady=12)
+            message = 'По номеру ничего не найдено' if self.search_selection[1] else 'Проездов за выбранный период нет'
+            ctk.CTkLabel(self.feed, text=message, text_color=MUTED).grid(row=0, column=0, pady=12)
         elif len(rows) > self.visible_count:
             ctk.CTkButton(self.feed, text='Показать ещё', height=30, fg_color='#263b57',
                           command=self.show_more_passages).grid(row=self.visible_count, column=0, sticky='ew', padx=4, pady=8)
@@ -404,22 +486,24 @@ class MonitorWindow:
             while not self.stop.is_set():
                 self.data_changed.clear()
                 generation, selected = self.period_selection
+                search_generation, query = self.search_selection
                 today = datetime.now(self.tz).date()
                 start, end = selected or (today, today)
-                if checked_generation != generation:
+                if checked_generation != (generation, search_generation):
                     checked_at = {}
-                    checked_generation = generation
+                    checked_generation = (generation, search_generation)
                 try:
-                    data = load_dashboard(BASE / 'anpr.sqlite3', start.isoformat(), end.isoformat())
+                    data = load_dashboard(BASE / 'anpr.sqlite3', start.isoformat(), end.isoformat(), query)
                     try: self.results.get_nowait()
                     except queue.Empty: pass
-                    self.results.put_nowait((generation, (start, end), 'data', data))
+                    self.results.put_nowait((generation, search_generation, (start, end), 'data', data))
                     now = time.monotonic()
                     current_ids = [row[0] for row in data['recent'][:self.visible_count]]
                     current_id_set = set(current_ids)
                     checked_at = {key: value for key, value in checked_at.items() if key in current_id_set}
                     for event_id in current_ids:
-                        if self.stop.is_set() or generation != self.period_selection[0]: break
+                        if (self.stop.is_set() or generation != self.period_selection[0]
+                                or search_generation != self.search_selection[0]): break
                         if event_id in self.photo_bytes or now - checked_at.get(event_id, -100) < 5: continue
                         checked_at[event_id] = now
                         try:
@@ -429,13 +513,13 @@ class MonitorWindow:
                                 if response.ok and response.headers.get('Content-Type', '').startswith('image/'):
                                     photo = response.content
                             if photo:
-                                self.photo_results.put_nowait((generation, event_id, photo))
+                                self.photo_results.put_nowait((generation, search_generation, event_id, photo))
                         except (requests.RequestException, queue.Full): pass
                 except (OSError, sqlite3.Error):
                     try:
                         try: self.results.get_nowait()
                         except queue.Empty: pass
-                        self.results.put_nowait((generation, (start, end), 'error', None))
+                        self.results.put_nowait((generation, search_generation, (start, end), 'error', None))
                     except queue.Full: pass
                 self.data_changed.wait(2)
 
@@ -565,19 +649,20 @@ class MonitorWindow:
         peak = max((count for _, count in bins), default=0)
         step = max(1, math.ceil(peak / 4))
         ceiling = step * 4
-        left, right, top, bottom = 30, w - 14, 12, h - 26
+        left = max(30, self.chart_axis_font.measure(str(ceiling)) + 12)
+        right, top, bottom = w - 16, 12, h - 26
         chart_w, chart_h = right - left, bottom - top
         for level in range(5):
             value = level * step
             y = bottom - chart_h * value / ceiling
             canvas.create_line(left, y, right, y, fill=BORDER)
             canvas.create_text(left - 7, y, text=str(value), fill=MUTED,
-                               font=('Segoe UI', 9), anchor='e')
+                               font=self.chart_axis_font, anchor='e')
         # Today's line ends at the current interval; historical days span 24 hours.
         for hour in range(0, 25, 3):
             x = left + chart_w * hour / 24
             canvas.create_text(x, bottom + 12, text=f'{hour:02}', fill=MUTED,
-                               font=('Segoe UI', 9))
+                               font=self.chart_axis_font)
         points = [(left + chart_w * hour / 24, bottom - chart_h * value / ceiling)
                   for hour, value in bins]
         if len(points) > 1:
@@ -622,9 +707,10 @@ class MonitorWindow:
                 self.show_video_message(value)
         except queue.Empty: pass
         try:
-            generation, period, kind, data=self.results.get_nowait()
+            generation, search_generation, period, kind, data=self.results.get_nowait()
             today = self.today()
-            if generation != self.period_selection[0] or period != (self.period_selection[1] or (today, today)):
+            if (generation != self.period_selection[0] or search_generation != self.search_selection[0]
+                    or period != (self.period_selection[1] or (today, today))):
                 pass
             elif kind == 'error':
                 self.total.configure(text='—'); self.unique.configure(text='—')
@@ -649,8 +735,9 @@ class MonitorWindow:
         except queue.Empty: pass
         try:
             while True:
-                generation, event_id, photo = self.photo_results.get_nowait()
-                if generation == self.period_selection[0] and event_id in self.photo_buttons:
+                generation, search_generation, event_id, photo = self.photo_results.get_nowait()
+                if (generation == self.period_selection[0] and search_generation == self.search_selection[0]
+                        and event_id in self.photo_buttons):
                     self.photo_bytes[event_id] = photo
                     self.set_photo(event_id, photo)
         except queue.Empty: pass

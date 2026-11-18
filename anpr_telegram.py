@@ -37,7 +37,7 @@ from zoneinfo import ZoneInfo
 import requests
 from requests.auth import HTTPDigestAuth
 from event_images import prepare_event_images
-from storage import Store
+from storage import Store, passage_key, backfill_key
 from system_events import EVENTS
 from passage_photos import PHOTOS
 from photo_archive import save_photo
@@ -92,7 +92,7 @@ STATE_FILE = Path(cfg("STATE_FILE", str(BASE_DIR / "anpr_state.json")))
 DB_FILE = Path(cfg("DB_FILE", str(BASE_DIR / "anpr.sqlite3")))
 IMAGE_DIR = Path(cfg("IMAGE_DIR", str(BASE_DIR / "images")))
 SEND_EACH_ENTRY = cfg("TELEGRAM_SEND_EACH_ENTRY", "true").lower() in ("1", "true", "yes")
-SAVE_PHOTOS = cfg("SAVE_PHOTOS", "false").lower() in ("1", "true", "yes")  # legacy configuration compatibility
+SAVE_PHOTOS = True  # снимки всегда архивируются: мониторинг читает их из диска
 BACKFILL_ENABLED = cfg("BACKFILL_ENABLED", "true").lower() in ("1", "true", "yes")
 BACKFILL_TIMESTAMP_MODE = cfg("BACKFILL_TIMESTAMP_MODE", "utc")
 INCLUDE_MANUAL_SNAPSHOTS = cfg("INCLUDE_MANUAL_SNAPSHOTS", "true").lower() in ("1", "true", "yes")
@@ -105,6 +105,7 @@ ALLOWED_CHAT_IDS = cfg("ALLOWED_CHAT_IDS", "")  # пусто = доступ за
 RECONNECT_DELAY = int(cfg("RECONNECT_DELAY", "10"))
 HEARTBEAT = cfg("HEARTBEAT", "5")
 DEDUP_WINDOW_SECONDS = max(0.0, float(cfg('DEDUP_WINDOW_SECONDS', '15')))
+STATE_KEEP_DAYS = max(1, int(cfg('STATE_KEEP_DAYS', '30')))  # сколько дней хранить JSON-зеркало
 RUNTIME = {'camera_message': 'подключаюсь…', 'telegram_message': 'ожидаю первую отправку.', 'last_camera_data': ''}
 STORE = Store(DB_FILE)
 
@@ -130,8 +131,18 @@ def load_state() -> dict:
 _state_save_lock = threading.Lock()
 
 
+def trim_state(state: dict) -> None:
+    """Ограничить JSON-зеркало последними днями: постоянный архив лежит в SQLite."""
+    days = state.get('days')
+    if not isinstance(days, dict) or len(days) <= STATE_KEEP_DAYS:
+        return
+    keep = sorted(days)[-STATE_KEEP_DAYS:]
+    state['days'] = {day: days[day] for day in keep}
+
+
 def save_state(state: dict) -> None:
     with _state_save_lock:
+        trim_state(state)
         tmp = STATE_FILE.with_suffix(".tmp")
         tmp.write_text(json.dumps(state, ensure_ascii=False, indent=1), encoding="utf-8")
         tmp.replace(STATE_FILE)
@@ -541,7 +552,11 @@ def is_approach_value(val: str) -> bool:
 
 
 def is_countable(ev: dict) -> tuple:
-    """Возвращает (считать ли, ключ дедупликации)."""
+    """Возвращает (считать ли, прошивный ключ события).
+
+    Прошивный ключ не является признаком дубля: GroupID переиспользуется.
+    Он только сохраняется в source_key для диагностики.
+    """
     code = ev.get("EventBaseInfo.Code", "")
     if code != "TrafficJunction":
         return False, ""
@@ -576,9 +591,117 @@ def direction_label(value):
     return {'Approach': 'Въезд', 'Leave': 'Выезд', '': 'не определено'}[direction_kind(value)]
 
 
+def store_passage(rec: dict, source_key: str | None = None) -> int | None:
+    """Сохранить проезд в SQLite — единый источник истины для всех проездов."""
+    iso = rec.get('iso', '')
+    plate = rec.get('plate', '')
+    lane = rec.get('lane', '')
+    if rec.get('backfill'):
+        key = backfill_key(rec.get('rec_no'), iso, plate, lane)
+    else:
+        key = passage_key(iso, plate, lane)
+    try:
+        return STORE.add_event(key, rec, source_key)
+    except sqlite3.Error as error:
+        print(f'[storage] проезд не сохранён: {error}', file=sys.stderr)
+        return None
+
+
+def normalize_plate(value) -> str:
+    """Номер без пробелов и регистра — для сравнения номеров из разных источников."""
+    return re.sub(r'\s+', '', str(value or '')).upper()
+
+
+def find_archive_row(plate: str, when: datetime, window: int = 120):
+    """Запись того же проезда, пришедшая ранее из архива камеры."""
+    day = when.strftime('%Y-%m-%d')
+    wanted = normalize_plate(plate)
+    for row in STORE.day_passages(day):
+        if not row.get('backfill') or normalize_plate(row.get('plate')) != wanted:
+            continue
+        try:
+            stamp = datetime.fromisoformat(row.get('captured_at') or '')
+        except (ValueError, TypeError):
+            continue
+        if stamp.tzinfo is None:
+            stamp = stamp.replace(tzinfo=TZ)
+        if abs((when - stamp).total_seconds()) <= window:
+            return row
+    return None
+
+
+def replace_mirror_record(state: dict, archived: dict, rec: dict) -> bool:
+    """Заменить архивную запись в JSON-зеркале на live-запись того же проезда."""
+    for mirror in (state.get('days') or {}).values():
+        for index, old in enumerate(mirror):
+            if (old.get('backfill') and old.get('plate') == rec.get('plate')
+                    and old.get('iso') == archived.get('captured_at')):
+                mirror[index] = rec
+                return True
+    return False
+
+
+def save_passage(rec: dict, source_key: str | None = None, archived: dict | None = None) -> int | None:
+    """Сохранить проезд в SQLite: новая строка или обновление уже записанной."""
+    try:
+        if archived:
+            return STORE.update_event(archived['id'], rec, source_key)
+        return store_passage(rec, source_key)
+    except sqlite3.Error as error:
+        print(f'[storage] проезд не сохранён: {error}', file=sys.stderr)
+        return None
+
+
+def record_from_row(row: dict) -> dict:
+    """Строка БД -> запись в том же формате, что и в JSON-состоянии."""
+    iso = row.get('captured_at', '') or ''
+    try:
+        stamp = datetime.fromisoformat(iso).strftime('%H:%M:%S')
+    except (ValueError, TypeError):
+        stamp = iso[11:19]
+    return {
+        'plate': row.get('plate', '—'),
+        'time': stamp,
+        'iso': iso,
+        'lane': row.get('lane', ''),
+        'speed': row.get('speed', ''),
+        'type': row.get('plate_type', ''),
+        'color': row.get('vehicle_color', ''),
+        'direction': row.get('direction', ''),
+        'confidence': row.get('confidence', ''),
+        'backfill': bool(row.get('backfill')),
+    }
+
+
+def reconcile_state_with_store(state: dict) -> int:
+    """Перенести в SQLite проезды, которые пока есть только в JSON-состоянии."""
+    items = []
+    for records in (state.get('days') or {}).values():
+        for rec in records:
+            iso = rec.get('iso', '')
+            plate = rec.get('plate', '')
+            if not iso or not plate:
+                continue
+            if STORE.passage_exists(iso, plate):
+                continue
+            key = (backfill_key(rec.get('rec_no'), iso, plate, rec.get('lane', ''))
+                   if rec.get('backfill') else passage_key(iso, plate, rec.get('lane', '')))
+            items.append((key, rec, None))
+    if not items:
+        return 0
+    try:
+        imported = STORE.add_events(items)
+    except sqlite3.Error as error:
+        print(f'[storage] перенос из JSON не удался: {error}', file=sys.stderr)
+        return 0
+    if imported:
+        print(f'[storage] перенесено из JSON в SQLite: {imported}', file=sys.stderr)
+    return imported
+
+
 def record_event(state: dict, ev: dict, image: bytes | None) -> dict | None:
     """Добавить событие в состояние. Возвращает запись или None (дубль/не въезд)."""
-    countable, key = is_countable(ev)
+    countable, source_key = is_countable(ev)
     if not countable:
         if ev.get("EventBaseInfo.Code") == "TrafficJunction":
             dval = get_direction_value(ev)[0]
@@ -589,7 +712,7 @@ def record_event(state: dict, ev: dict, image: bytes | None) -> dict | None:
     # Never treat its presence in the historical list as a permanent duplicate.
     plate = plate_of(ev)
     normalized = re.sub(r'\s+', '', plate).upper()
-    passage_key = json.dumps([normalized, ev.get('Lane', ''), get_direction_value(ev)[0]], ensure_ascii=False)
+    dedup_key = json.dumps([normalized, ev.get('Lane', ''), get_direction_value(ev)[0]], ensure_ascii=False)
     fingerprint = 'photo:' + hashlib.sha256(image).hexdigest() if image else None
     if fingerprint and fingerprint in state['seen']:
         print('[filter] повторная передача того же снимка', file=sys.stderr)
@@ -598,9 +721,9 @@ def record_event(state: dict, ev: dict, image: bytes | None) -> dict | None:
     cutoff = now.timestamp() - DEDUP_WINDOW_SECONDS
     recent = {k: v for k, v in recent.items() if isinstance(v, (int, float)) and v > cutoff}
     state['recent_live'] = recent
-    duplicate = bool(normalized and passage_key in recent)
+    duplicate = bool(normalized and dedup_key in recent)
     if normalized:
-        recent[passage_key] = now.timestamp()
+        recent[dedup_key] = now.timestamp()
     if fingerprint:
         state['seen'] = (state['seen'] + [fingerprint])[-5000:]
     if duplicate:
@@ -620,10 +743,17 @@ def record_event(state: dict, ev: dict, image: bytes | None) -> dict | None:
                        or ev.get("Object.Confidence") or ev.get("Vehicle.Confidence") or ""),
     }
     day = today_str(now)
-    state["days"].setdefault(day, []).append(rec)
-    STORE.add_event(key, rec)
+    archived = find_archive_row(plate, now)
+    if archived:
+        # Тот же проезд уже пришёл из архива камеры — обновляем ту же строку.
+        save_passage(rec, source_key, archived)
+        if not replace_mirror_record(state, archived, rec):
+            state["days"].setdefault(day, []).append(rec)
+    else:
+        save_passage(rec, source_key)
+        state["days"].setdefault(day, []).append(rec)
     state["last_event_time"] = rec["iso"]
-    state["seen"].append(key)
+    state["seen"].append(passage_key(rec["iso"], rec.get("plate", ""), rec.get("lane", "")))
     state["seen"] = state["seen"][-5000:]  # не разрастаться
     # Images are stored separately after event metadata is recorded.
     save_state(state)
@@ -632,7 +762,10 @@ def record_event(state: dict, ev: dict, image: bytes | None) -> dict | None:
 
 def build_report(state: dict, day: str | None = None) -> str:
     day = day or today_str()
-    events = state.get("days", {}).get(day, [])
+    events = [record_from_row(row) for row in STORE.day_passages(day)]
+    if not events:
+        # Резерв: проезды, которые ещё не попали в БД (запись в БД не удалась).
+        events = state.get("days", {}).get(day, [])
     total = len(events)
     plates = [e.get("plate", "—") for e in events]
     unique = len(set(plates))
@@ -711,17 +844,25 @@ def _timedelta_minutes(m: int):
 def is_duplicate_backfill(state: dict, plate: str, when: datetime, direction: str = '') -> bool:
     """Тот же номер ±120с от уже записанного события того же дня — дубль."""
     day = when.strftime("%Y-%m-%d")
+    candidates = []
+    for row in STORE.day_passages(day):
+        candidates.append({'plate': row.get('plate'), 'iso': row.get('captured_at', ''),
+                           'direction': row.get('direction') or '', 'backfill': bool(row.get('backfill'))})
     for rec in state.get("days", {}).get(day, []):
+        candidates.append({'plate': rec.get('plate'), 'iso': rec.get('iso', ''),
+                           'time': rec.get('time', ''),
+                           'direction': rec.get('direction') or '', 'backfill': bool(rec.get('backfill'))})
+    for cand in candidates:
         # Archive entries have their own RecNo; old imported records may use
         # an incorrect timezone and must never suppress a new archive record.
-        if rec.get('backfill'):
+        if cand['backfill']:
             continue
-        if rec.get("plate") != plate:
+        if cand['plate'] != plate:
             continue
-        old_direction, new_direction = direction_kind(rec.get('direction')), direction_kind(direction)
+        old_direction, new_direction = direction_kind(cand['direction']), direction_kind(direction)
         if old_direction and new_direction and old_direction != new_direction:
             continue
-        iso = rec.get("iso", "")
+        iso = cand['iso']
         if iso:
             try:
                 t = datetime.fromisoformat(iso)
@@ -731,19 +872,23 @@ def is_duplicate_backfill(state: dict, plate: str, when: datetime, direction: st
                     return True
             except ValueError:
                 pass
-        elif rec.get("time") == when.strftime("%H:%M:%S"):
+        elif cand.get('time') and cand['time'] == when.strftime("%H:%M:%S"):
             return True
     return False
 
 
 def record_backfill_event(state: dict, plate: str, when: datetime, speed: str = "", image: bytes | None = None,
-                        lane: str = "", direction: str = "", color: str = "", category: str = "") -> dict | None:
+                        lane: str = "", direction: str = "", color: str = "", category: str = "",
+                        rec_no=None) -> dict | None:
     if is_duplicate_backfill(state, plate, when, direction):
         return None
     rec = {"plate": plate or "—", "time": when.strftime("%H:%M:%S"), "iso": when.isoformat(),
            "lane": lane, "speed": speed, "type": category, "color": color,
            "direction": direction, "backfill": True}
+    if rec_no not in (None, ''):
+        rec["rec_no"] = int(rec_no)
     day = when.strftime("%Y-%m-%d")
+    store_passage(rec)
     state["days"].setdefault(day, []).append(rec)
     state["last_event_time"] = when.isoformat()
     # Backfill has no image payload and stores metadata only.
@@ -854,7 +999,8 @@ def backfill_once(sess, state: dict, dry_run: bool = False) -> int:
         rec = record_backfill_event(state, r.get("PlateNumber", ""), when,
                                     speed="", lane=r.get("Lane", ""),
                                     direction=r.get("JunctionDirection", ""),
-                                    color=r.get("VehicleColor", ""), category=r.get("Category", ""))
+                                    color=r.get("VehicleColor", ""), category=r.get("Category", ""),
+                                    rec_no=rec_no)
         state["last_rec_no"] = rec_no
         if rec:
             missed.append(rec)
@@ -974,6 +1120,7 @@ def consume_camera_stream(response, state, dry_run=False, image_wait=1.0, no_ima
             flush_pending_events(state, events, images, dry_run=dry_run)
 
     chunks = stream_chunks_with_ticks(response)
+    next_outbox_check = 0.0
     try:
         for chunk in chunks:
             if chunk:
@@ -995,12 +1142,33 @@ def consume_camera_stream(response, state, dry_run=False, image_wait=1.0, no_ima
             wait = image_wait if pending_images else no_image_wait
             if pending_events and time.monotonic() - last_activity >= wait:
                 flush()
-            if not dry_run:
+            if not dry_run and time.monotonic() >= next_outbox_check:
+                # Очередь недоставленных проверяем не чаще раза в 5 с, а не в каждом чанке.
+                next_outbox_check = time.monotonic() + 5
                 flush_missed_messages()
             maybe_send_report(state, dry_run=dry_run)
     finally:
         chunks.close()
         flush()  # retain complete events when the camera disconnects
+
+
+_backfill_lock = threading.Lock()
+
+
+def run_backfill(state: dict, dry_run: bool = False) -> int:
+    """Добор пропущенного из архива камеры. Одновременно может идти только один сеанс."""
+    if not _backfill_lock.acquire(blocking=False):
+        print("[backfill] предыдущий добор ещё выполняется — пропускаю", file=sys.stderr)
+        return 0
+    try:
+        sess = requests.Session()
+        sess.auth = HTTPDigestAuth(DAHUA_USERNAME, DAHUA_PASSWORD)
+        return backfill_once(sess, state, dry_run=dry_run)
+    except Exception as e:  # pragma: no cover
+        print(f"[backfill] ошибка: {e}", file=sys.stderr)
+        return 0
+    finally:
+        _backfill_lock.release()
 
 
 def subscribe_loop(state: dict, dry_run: bool = False) -> None:
@@ -1019,23 +1187,18 @@ def subscribe_loop(state: dict, dry_run: bool = False) -> None:
         # Страховка: даже если live-молчит (прошивка шлёт heartbeat редко), добор каждые 60с.
         def _periodic_backfill():
             while not stop.is_set():
-                time.sleep(60)
-                try:
-                    s3 = requests.Session()
-                    s3.auth = HTTPDigestAuth(DAHUA_USERNAME, DAHUA_PASSWORD)
-                    backfill_once(s3, state, dry_run=dry_run)
-                except Exception as e:
-                    print(f"[backfill-periodic] ошибка: {e}", file=sys.stderr)
+                stop.wait(60)
+                if stop.is_set():
+                    break
+                run_backfill(state, dry_run=dry_run)
+                # Синхронизируем БД с JSON-зеркалом (страховка от потери записи в БД).
+                reconcile_state_with_store(state)
         threading.Thread(target=_periodic_backfill, daemon=True).start()
     while True:
         try:
             if BACKFILL_ENABLED:
                 # Backfill в фоне на ОТДЕЛЬНОЙ сессии — shared Session ломает live-стрим.
-                def _bf():
-                    s2 = requests.Session()
-                    s2.auth = HTTPDigestAuth(DAHUA_USERNAME, DAHUA_PASSWORD)
-                    backfill_once(s2, state, dry_run=dry_run)
-                threading.Thread(target=_bf, daemon=True).start()
+                threading.Thread(target=run_backfill, args=(state,), kwargs={"dry_run": dry_run}, daemon=True).start()
                 print("[backfill] добор пропущенного в фоне, live стартует сразу", file=sys.stderr)
             params = {
                 "action": "attachFileProc",
@@ -1094,17 +1257,24 @@ def run_parser_test() -> int:
     ev = extract_events(parse_kv_text(text_body.decode()))[0]
     st = {"days": {}, "seen": [], "last_report_date": ""}
     old_state_file = globals()["STATE_FILE"]
+    old_store = globals()["STORE"]
+    test_db = BASE_DIR / "_parser_test.sqlite3"
     globals()["STATE_FILE"] = BASE_DIR / "_parser_test_state.json"
+    globals()["STORE"] = Store(test_db)
     try:
         rec = record_event(st, ev, jpeg)
         assert rec and rec["plate"] == "ABC123" and rec["speed"] == "55"
         assert record_event(st, ev, jpeg) is None  # дедупликация
     finally:
+        globals()["STORE"].close()
+        globals()["STORE"] = old_store
         globals()["STATE_FILE"] = old_state_file
-        try:
-            Path(BASE_DIR / "_parser_test_state.json").unlink()
-        except OSError:
-            pass
+        for tmp in (BASE_DIR / "_parser_test_state.json", test_db,
+                    test_db.with_name(test_db.name + "-wal"), test_db.with_name(test_db.name + "-shm")):
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
     print(build_entry_caption(rec))
     print("---")
     print(build_report(st))
@@ -1133,6 +1303,7 @@ def main() -> int:
         return 1
 
     state = load_state()
+    reconcile_state_with_store(state)
 
     if args.check:
         info = check_connection()

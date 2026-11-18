@@ -10,6 +10,29 @@ from dashboard import MonitorWindow, aggregate_hours, archived_photo, chart_last
 from storage import Store
 
 class DashboardTests(unittest.TestCase):
+    def test_plate_search_spans_all_period_rows_without_changing_metrics(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / 'events.sqlite3'
+            store = Store(path)
+            try:
+                for i in range(35):
+                    store.add_event(f'recent{i}', {'iso': f'2026-11-17T12:{i:02}:00+05:00',
+                                                   'plate': f'OTHER{i}', 'direction': 'entry'})
+                store.add_event('older', {'iso': '2026-11-16T23:00:00+05:00',
+                                          'plate': '01 D 555 AA', 'direction': 'exit'})
+                store.add_event('outside', {'iso': '2026-11-15T23:00:00+05:00',
+                                            'plate': '01D555AA', 'direction': 'exit'})
+                result = load_dashboard(path, '2026-11-16', '2026-11-17', 'd-555')
+                self.assertEqual(result['total'], 36)
+                self.assertEqual(result['directions'], {'Въезд': 35, 'Выезд': 1, 'Неизвестно': 0})
+                self.assertEqual([row[2] for row in result['recent']], ['01 D 555 AA'])
+                missing = load_dashboard(path, '2026-11-17', '2026-11-17', 'd555')
+                self.assertEqual(missing['total'], 35)
+                self.assertEqual(missing['recent'], [])
+                self.assertEqual(len(load_dashboard(path, '2026-11-17', plate_query='  --  ')['recent']), 35)
+            finally:
+                store.close()
+
     def test_period_includes_both_boundaries_and_aggregates_hours_and_plates(self):
         with tempfile.TemporaryDirectory() as folder:
             path = Path(folder) / 'events.sqlite3'

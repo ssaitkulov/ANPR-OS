@@ -4,6 +4,7 @@
 import threading
 import os
 import time
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 import anpr_telegram as M
@@ -22,18 +23,22 @@ started_at = time.time()
 _worker_started = False
 _worker = None
 
-app = FastAPI(title="ANPR FAYZ", version="1.0")
 
-
-@app.on_event("startup")
-def on_startup():
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
     global _worker_started, _worker
     if not _worker_started:
         M.EVENTS.add('started', 'Система запущена', M.now_local().isoformat())
+        # Проезды, которые остались только в JSON, переносим в БД — источник истины один.
+        M.reconcile_state_with_store(state)
         t = threading.Thread(target=M.subscribe_loop, args=(state,), kwargs={"dry_run": False}, daemon=True)
         t.start()
         _worker = t
         _worker_started = True
+    yield
+
+
+app = FastAPI(title="ANPR FAYZ", version="1.0", lifespan=lifespan)
 
 
 @app.get("/health")
@@ -74,9 +79,9 @@ def passage_photo(event_id: int):
 @app.get("/status")
 def status():
     day = M.today_str()
-    events = state.get("days", {}).get(day, [])
-    return {"today": day, "entries": len(events), **M.STORE.stats(),
-            "unique_plates": len({e.get("plate") for e in events}),
+    passages = M.STORE.day_passages(day)
+    return {"today": day, "entries": len(passages), **M.STORE.stats(),
+            "unique_plates": len({row.get("plate") for row in passages}),
             "subscribers": len(M.load_subscribers()),
             "last_event_time": state.get("last_event_time", ""),
             "last_rec_no": state.get("last_rec_no", 0),
@@ -86,7 +91,8 @@ def status():
 @app.get("/entries/today")
 def entries_today():
     day = M.today_str()
-    return {"date": day, "events": state.get("days", {}).get(day, [])}
+    events = [M.record_from_row(row) for row in M.STORE.day_passages(day)]
+    return {"date": day, "events": events}
 
 
 @app.post("/report-now")

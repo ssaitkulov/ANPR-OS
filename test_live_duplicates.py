@@ -1,7 +1,10 @@
+import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from unittest.mock import patch
 import anpr_telegram as bot
+from storage import Store
 
 
 class DuplicateTests(unittest.TestCase):
@@ -9,6 +12,14 @@ class DuplicateTests(unittest.TestCase):
         direction = patch.object(bot, 'DIRECTION', '')
         direction.start()
         self.addCleanup(direction.stop)
+        # Тесты не должны писать в рабочую БД.
+        folder = tempfile.TemporaryDirectory()
+        self.addCleanup(folder.cleanup)
+        store = Store(Path(folder.name) / 'test.sqlite3')
+        self.addCleanup(store.close)
+        store_patch = patch.object(bot, 'STORE', store)
+        store_patch.start()
+        self.addCleanup(store_patch.stop)
 
     def test_reused_camera_id_does_not_block_later_passage(self):
         event = {'EventBaseInfo.Code': 'TrafficJunction', 'GroupID': '1048576',
