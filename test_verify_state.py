@@ -69,6 +69,10 @@ class VerifyStateTests(unittest.TestCase):
         kinds = {issue['kind'] for issue in report['issues']}
         self.assertEqual(kinds, {'flag_mismatch'})
 
+    def test_tool_switches_console_to_utf8(self):
+        """Кириллица в консоли Windows не должна превращаться в «кракозябры»."""
+        self.assertEqual(getattr(verify.sys.stdout, 'encoding', '').lower().replace('-', ''), 'utf8')
+
 
 if __name__ == '__main__':
     unittest.main()

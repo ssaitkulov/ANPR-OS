@@ -307,7 +307,10 @@ class Panel:
                               'Ошибка отправки' if 'не удалось' in telegram_message else 'Ожидание отправки')
         delivery = data.get('telegram_delivery') if data else None
         if running and delivery is not None:
-            telegram_state = 'Отправлено' if delivery.get('ok') else 'Ошибка отправки'
+            # Счётчики пустые — отправки ещё не было: это не ошибка.
+            attempted = bool(delivery.get('at')) or bool(delivery.get('delivered')) or bool(delivery.get('failed'))
+            if attempted:
+                telegram_state = 'Отправлено' if delivery.get('ok') else 'Ошибка отправки'
         delivery_at = delivery.get('at') if delivery else None
         started_at = data.get('started_at') if data else None
         current = (running, camera_state, telegram_state, delivery_at, data.get('pid') if data else None)

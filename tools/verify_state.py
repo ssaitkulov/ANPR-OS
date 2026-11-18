@@ -27,6 +27,14 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 if str(BASE_DIR) not in sys.path:
     sys.path.insert(0, str(BASE_DIR))
 
+# Консоль Windows по умолчанию печатает в cp866/cp1251 — кириллица в отчёте
+# превратилась бы в «кракозябры». Как в acceptance_check.py и check_lock.py.
+try:
+    sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+    sys.stderr.reconfigure(encoding='utf-8', errors='replace')
+except Exception:
+    pass
+
 from storage import Store, normalize_plate  # noqa: E402
 
 DEFAULT_STATE = BASE_DIR / 'anpr_state.json'

@@ -32,6 +32,20 @@ class StatusTests(unittest.TestCase):
         self.assertEqual(self.panel.telegram[0].value, 'Ожидание отправки')
         self.assertEqual(self.panel.telegram[1].value, '')
 
+    def test_no_delivery_attempt_is_not_reported_as_failure(self):
+        """До первой отправки счётчики пусты — это «Ожидание», а не «Ошибка»."""
+        self.panel.update_status({**self.data,
+                                  'telegram_delivery': {'ok': False, 'delivered': 0, 'failed': 0, 'at': ''}})
+        self.assertEqual(self.panel.telegram[0].value, 'Ожидание отправки')
+        self.assertEqual(self.panel.telegram[1].value, '')
+
+    def test_failed_delivery_is_reported_as_error(self):
+        self.panel.update_status({**self.data,
+                                  'telegram_message': 'не удалось доставить уведомление (в очередь).',
+                                  'telegram_delivery': {'ok': False, 'delivered': 0, 'failed': 1,
+                                                        'at': '2026-11-18T17:05:06+05:00'}})
+        self.assertEqual(self.panel.telegram[0].value, 'Ошибка отправки')
+
     def test_confirmed_delivery_and_stop(self):
         self.panel.update_status(self.data)
         self.panel.update_status({**self.data, 'camera_message': 'подключена, получаю данные.',
