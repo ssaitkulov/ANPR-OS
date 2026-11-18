@@ -9,7 +9,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import anpr_telegram as bot
-from storage import Store, event_key, is_event_key, passage_key
+from app.storage.database import Store, event_key, is_event_key, passage_key
 
 
 class StoreTestCase(unittest.TestCase):

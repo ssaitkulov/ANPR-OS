@@ -2,8 +2,8 @@ import anpr_testenv  # noqa: F401  — изоляция тестов от бое
 import tempfile
 import unittest
 from pathlib import Path
-from photo_archive import save_photo
-from storage import Store
+from app.storage.photo_archive import save_photo
+from app.storage.database import Store
 
 class RulesAndArchiveTests(unittest.TestCase):
     def test_photo_file_and_path_survive_reopen(self):

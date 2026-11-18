@@ -7,7 +7,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from storage import Store
+from app.storage.database import Store
 
 SPEC = importlib.util.spec_from_file_location(
     'verify_state', Path(__file__).resolve().parent / 'tools' / 'verify_state.py')

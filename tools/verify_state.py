@@ -35,7 +35,7 @@ try:
 except Exception:
     pass
 
-from storage import Store, normalize_plate  # noqa: E402
+from app.storage.database import Store, normalize_plate  # noqa: E402
 
 DEFAULT_STATE = BASE_DIR / 'anpr_state.json'
 DEFAULT_DB = BASE_DIR / 'anpr.sqlite3'

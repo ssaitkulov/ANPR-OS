@@ -126,7 +126,7 @@ class IsolatedTestCase(unittest.TestCase):
 
     def setUp(self):
         import anpr_telegram as bot
-        from storage import Store
+        from app.storage.database import Store
 
         # Предыдущий тест не должен оставить в модуле подмены: если оставил —
         # падать нужно сразу и с понятным сообщением, а не с загадочным «True».

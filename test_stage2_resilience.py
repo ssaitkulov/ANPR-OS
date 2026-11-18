@@ -20,8 +20,8 @@ import requests
 import anpr_telegram as bot
 import service_control
 import service_logs
-import storage
-from photo_archive import cleanup_old_photos
+from app.storage import database as storage
+from app.storage.photo_archive import cleanup_old_photos
 
 
 def _state():

@@ -5,7 +5,7 @@ import unittest
 from unittest.mock import patch
 from PIL import Image
 import anpr_telegram as bot
-from event_images import prepare_event_images
+from app.storage.event_images import prepare_event_images
 
 
 def jpeg(size, color):

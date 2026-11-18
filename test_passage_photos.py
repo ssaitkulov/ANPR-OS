@@ -1,6 +1,6 @@
 import anpr_testenv  # noqa: F401  — изоляция тестов от боевой БД
 import unittest
-from passage_photos import PhotoCache
+from app.storage.passage_photos import PhotoCache
 from unittest.mock import patch
 import anpr_telegram as m
 

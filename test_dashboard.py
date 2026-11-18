@@ -8,7 +8,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 from dashboard import MonitorWindow, aggregate_hours, archived_photo, chart_last_hour, direction, load_dashboard
-from storage import Store
+from app.storage.database import Store
 
 class DashboardTests(unittest.TestCase):
     def test_plate_search_spans_all_period_rows_without_changing_metrics(self):

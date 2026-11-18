@@ -21,7 +21,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import anpr_telegram as bot
-from photo_archive import save_photo
+from app.storage.photo_archive import save_photo
 
 TZ = bot.TZ
 

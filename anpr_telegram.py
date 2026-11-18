@@ -36,12 +36,12 @@ from zoneinfo import ZoneInfo
 
 import requests
 from requests.auth import HTTPDigestAuth
-from event_images import prepare_event_images
-from storage import Store, event_key, passage_key, normalize_plate
-import storage as storage_module
+from app.storage.event_images import prepare_event_images
+from app.storage.database import Store, event_key, passage_key, normalize_plate
+from app.storage import database as storage_module
 from app.core.system_events import EVENTS
-from passage_photos import PHOTOS
-from photo_archive import save_photo, cleanup_old_photos
+from app.storage.passage_photos import PHOTOS
+from app.storage.photo_archive import save_photo, cleanup_old_photos
 
 # ---------------------------------------------------------------------------
 # Конфиг (переменные окружения / .env)

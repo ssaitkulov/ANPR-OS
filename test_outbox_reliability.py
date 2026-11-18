@@ -14,8 +14,8 @@ from pathlib import Path
 from unittest.mock import patch
 
 import anpr_telegram as bot
-import storage as storage_module
-from storage import Store
+from app.storage import database as storage_module
+from app.storage.database import Store
 
 
 class StoreCase(unittest.TestCase):

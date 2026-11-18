@@ -2,7 +2,7 @@ import anpr_testenv  # noqa: F401  — изоляция тестов от бое
 import tempfile
 import unittest
 from pathlib import Path
-from storage import Store
+from app.storage.database import Store
 
 class PassageTests(unittest.TestCase):
     def test_recent_passages_sorted_and_persisted_without_photos(self):

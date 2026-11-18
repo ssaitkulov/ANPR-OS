@@ -6,7 +6,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import anpr_telegram as bot
-from storage import Store
+from app.storage.database import Store
 
 
 class StorageTests(unittest.TestCase):
