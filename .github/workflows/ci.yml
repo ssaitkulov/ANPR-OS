@@ -28,8 +28,8 @@ jobs:
             requirements.txt
             requirements-lock.txt
 
-      # Ставим ограниченные диапазоны из requirements.txt: так CI ловит
-      # выход новой версии пакета за верхнюю границу.
+      # Ставим зафиксированные версии из requirements.txt: CI проверяет
+      # именно ту сборку, которая идёт в бой.
       - name: Установить зависимости
         run: |
           python -m pip install --upgrade pip
@@ -39,6 +39,11 @@ jobs:
       # Этап 3: битые зависимости (конфликт версий) — тоже падение сборки.
       - name: Проверить зависимости (pip check)
         run: python -m pip check
+
+      # Этап 4: версии в requirements.txt, requirements-lock.txt и pyproject.toml
+      # должны совпадать — иначе машины поставят разные наборы.
+      - name: Проверить согласованность файлов зависимостей
+        run: python tools/check_lock.py
 
       - name: Проверить, что импорт не создаёт рабочую базу и состояние
         run: |

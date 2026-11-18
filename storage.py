@@ -22,6 +22,7 @@ import sqlite3
 import sys
 import threading
 import time
+from datetime import datetime
 from pathlib import Path
 
 
@@ -381,6 +382,45 @@ class Store:
             row = self.conn.execute('SELECT path FROM passage_photo_paths WHERE captured_at=? AND plate=?',
                                     (captured_at, plate)).fetchone()
         return row[0] if row else None
+
+    def find_photo_path(self, captured_at, plate, window: int = 120):
+        """Путь к фото проезда: сначала точное совпадение, иначе тот же номер в ±window секунд.
+
+        Номер из архива камеры и номер из live-события могут отличаться
+        пробелами и регистром, а время — секундой. Поэтому сравнение идёт
+        по нормализованному номеру и близкому времени.
+        """
+        day = str(captured_at or '')[:10]
+        target = normalize_plate(plate)
+        if not day or not target:
+            return None
+        with self.lock:
+            rows = self.conn.execute(
+                'SELECT captured_at, plate, path FROM passage_photo_paths WHERE captured_at LIKE ?',
+                (day + '%',)).fetchall()
+        if not rows:
+            return None
+        try:
+            moment = datetime.fromisoformat(str(captured_at))
+        except (TypeError, ValueError):
+            moment = None
+        fallback = None
+        for stamp, stored_plate, path in rows:
+            if normalize_plate(stored_plate) != target:
+                continue
+            if str(stamp) == str(captured_at):
+                return path
+            if moment is None:
+                fallback = fallback or path
+                continue
+            try:
+                other = datetime.fromisoformat(str(stamp))
+            except (TypeError, ValueError):
+                continue
+            if abs((moment - other).total_seconds()) <= max(0, int(window)):
+                return path
+            fallback = fallback or path
+        return fallback
 
     # -- outbox ------------------------------------------------------------
 

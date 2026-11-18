@@ -131,7 +131,10 @@ storage_module.RETRY_MAX_DELAY = float(OUTBOX_RETRY_MAX_SECONDS)
 # Широковещательная запись очереди: получателей станет известно позже.
 BROADCAST_CHAT = ''
 BACKFILL_INTERVAL = max(15, int(cfg('BACKFILL_INTERVAL', '60')))  # сек между доборами архива
-RUNTIME = {'camera_message': 'подключаюсь…', 'telegram_message': 'ожидаю первую отправку.', 'last_camera_data': ''}
+RUNTIME = {'camera_message': 'подключаюсь…', 'telegram_message': 'ожидаю первую отправку.',
+           'last_camera_data': '',
+           # Счётчики последней рассылки: их читает приёмочная проверка.
+           'telegram_delivery': {'ok': False, 'delivered': 0, 'failed': 0, 'at': ''}}
 
 
 class LazyStore:
@@ -1300,7 +1303,37 @@ def _dir_human(direction) -> str:
     return f" · напр. {d}"
 
 
-def build_backfill_text(records: list, start, end) -> str:
+def collect_backfill_photos(records: list) -> dict:
+    """Фото проездов архива, которые уже лежат в фотоархиве: (iso, plate) -> bytes.
+
+    Сама камера снимки из архива не отдаёт (`loadfile.cgi?action=downPicByTime`
+    на этой камере — 501 Not Implemented), поэтому фотографией архивного проезда
+    может быть только снимок, уже сохранённый этим же сервисом.
+    """
+    photos: dict = {}
+    for rec in records:
+        iso = rec.get("iso") or ""
+        plate = rec.get("plate") or ""
+        if not iso or not plate or (iso, plate) in photos:
+            continue
+        try:
+            path = STORE.find_photo_path(iso, plate)
+        except sqlite3.Error as error:
+            print(f'[backfill] фотоархив недоступен: {error}', file=sys.stderr)
+            continue
+        if not path:
+            continue
+        try:
+            data = Path(path).read_bytes()
+        except OSError:
+            continue
+        if data:
+            photos[(iso, plate)] = data
+    return photos
+
+
+def build_backfill_text(records: list, start, end, photos: dict | None = None) -> str:
+    photos = photos or {}
     lines = [f"📥 <b>Проезды из архива камеры: {len(records)}</b>",
              f"Период: {start.strftime('%d.%m %H:%M')} — {end.strftime('%d.%m %H:%M')}",
              ""]
@@ -1310,9 +1343,13 @@ def build_backfill_text(records: list, start, end) -> str:
         _c = "" if _c in ("", "Unknown") else f" · {_c}"
         _t = "" if _t in ("", "Unknown") else f" · {_t}"
         dir_h = _dir_human(rec.get("direction", ""))
-        lines.append(f"• {day} {rec.get('time', '')} — {display_plate(rec.get('plate', '—'))}{_c}{_t}{dir_h}")
+        mark = " 📷" if (rec.get("iso"), rec.get("plate")) in photos else ""
+        lines.append(f"• {day} {rec.get('time', '')} — {display_plate(rec.get('plate', '—'))}{_c}{_t}{dir_h}{mark}")
     lines.append("")
-    lines.append("Фотографии этих проездов недоступны: в момент сбоя они не сохранялись.")
+    if photos:
+        lines.append(f"Фото приложены отдельно: {len(photos)} из {len(records)}.")
+    else:
+        lines.append("Фотографии этих проездов недоступны: в момент сбоя они не сохранялись.")
     return "\n".join(lines)
 
 
@@ -1342,7 +1379,11 @@ def archive_time(timestamp: int) -> datetime:
 
 
 def backfill_once(sess, state: dict, dry_run: bool = False) -> int:
-    """Добор через recordFinder TrafficSnapEventInfo по RecNo (текст, без фото).
+    """Добор через recordFinder TrafficSnapEventInfo по RecNo.
+
+    По умолчанию — один текстовый список на всех подписчиков: сама камера
+    снимки из архива не отдаёт. При BACKFILL_SEND_PHOTOS=true к списку
+    добавляются альбомом те фотографии, которые уже лежат в фотоархиве.
 
     Сетевой запрос идёт без общего замка состояния: живая камера не должна
     ждать, пока скачивается архив. Запись найденного — уже под замком.
@@ -1362,7 +1403,8 @@ def backfill_once(sess, state: dict, dry_run: bool = False) -> int:
     if changed:
         save_state(state)
     if missed:
-        text = build_backfill_text(missed, start or now_local(), end or now_local())
+        photos = collect_backfill_photos(missed) if BACKFILL_SEND_PHOTOS else {}
+        text = build_backfill_text(missed, start or now_local(), end or now_local(), photos)
         print(text, file=sys.stderr)
         if not dry_run:
             # ОДНО сообщение-список на всех подписчиков (фото в архиве нет).
@@ -1370,6 +1412,20 @@ def backfill_once(sess, state: dict, dry_run: bool = False) -> int:
             ok = telegram_send(text, kind='backfill')
             if not ok:
                 print('[backfill] список не доставлен — сохранён в очереди', file=sys.stderr)
+            if photos:
+                # Фото, которые уже есть в фотоархиве, уходят альбомом следом.
+                items = []
+                for rec in sorted(missed, key=lambda r: r.get("iso", "")):
+                    data = photos.get((rec.get("iso"), rec.get("plate")))
+                    if not data:
+                        continue
+                    caption = (f"📷 {display_plate(rec.get('plate', '—'))} · "
+                               f"{rec.get('time', '')} · {rec.get('iso', '')[:10]}")
+                    items.append((data, caption))
+                if items:
+                    sent = telegram_send_media_group(items, kind='backfill')
+                    print(f"[backfill] фото из архива: {'отправлено' if sent else 'в очереди'} "
+                          f"({len(items)})", file=sys.stderr)
         print(f"[backfill] добавлено: {len(missed)}", file=sys.stderr)
     elif changed:
         print("[backfill] новых въездов нет", file=sys.stderr)

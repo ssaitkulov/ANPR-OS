@@ -1,16 +1,21 @@
-# Прямые зависимости ANPR OS Fayz.
+# Прямые зависимости ANPR OS Fayz — версии зафиксированы.
 #
-# Верхние границы обязательны: без них обновление пакета может сломать
-# проверенную сборку (проверенный набор — Python 3.14.7, Windows 11).
-# Точные версии проверенного окружения зафиксированы в requirements-lock.txt.
-# После осознанного обновления: обновить версию здесь и в lock-файле,
-# прогнать python -m pytest, и только потом обновлять рабочую машину.
+# Это рабочая сборка: Python 3.14.7 (Windows 11 x64), проверено 2026-11-18.
+# Версии точные (==): обновление пакета не должно молча сломать боевой режим.
+# Полный набор с транзитивными зависимостями — в requirements-lock.txt.
+#
+# Обновление одного пакета (по порядку):
+#   1. править версию здесь и в requirements-lock.txt (и в pyproject.toml);
+#   2. python -m pip install -r requirements-lock.txt
+#   3. python -m pip check
+#   4. python -m unittest discover -v
+#   5. только потом обновлять рабочую машину.
 
-requests>=2.32,<3
-Pillow>=10.4,<13
-tzdata>=2024.1,<2027
-fastapi>=0.110,<1
-uvicorn>=0.29,<1
-customtkinter>=5.2,<6
-pystray>=0.19,<1
-opencv-python-headless>=4.10,<6
+requests==2.32.5
+Pillow==12.3.0
+tzdata==2026.3
+fastapi==0.116.1
+uvicorn==0.35.0
+customtkinter==5.2.2
+pystray==0.19.5
+opencv-python-headless==5.0.0.93
