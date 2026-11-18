@@ -13,7 +13,7 @@ import pystray
 import requests
 from PIL import Image
 import service_control as service
-import app_preferences as preferences
+from app.core import preferences
 
 ctk.set_appearance_mode('dark')
 ASSETS = Path(__file__).resolve().parent / 'assets'

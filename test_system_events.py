@@ -3,7 +3,7 @@ import threading
 import unittest
 from unittest.mock import patch
 
-from system_events import EventLog
+from app.core.system_events import EventLog
 import anpr_telegram as module
 
 

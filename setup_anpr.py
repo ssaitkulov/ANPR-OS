@@ -12,7 +12,7 @@ from PIL import Image
 from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-import app_preferences as preferences
+from app.core import preferences
 import requests
 from requests.auth import HTTPDigestAuth
 

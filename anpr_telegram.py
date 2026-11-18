@@ -39,7 +39,7 @@ from requests.auth import HTTPDigestAuth
 from event_images import prepare_event_images
 from storage import Store, event_key, passage_key, normalize_plate
 import storage as storage_module
-from system_events import EVENTS
+from app.core.system_events import EVENTS
 from passage_photos import PHOTOS
 from photo_archive import save_photo, cleanup_old_photos
 

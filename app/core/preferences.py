@@ -6,7 +6,11 @@ import subprocess
 import sys
 import winreg
 
-BASE = Path(__file__).resolve().parent
+from app.core.paths import PROJECT_ROOT
+
+#: Корень проекта. Путь к панели в автозапуске Windows остаётся прежним:
+#: лаунчер `control_panel.py` лежит в корне.
+BASE = PROJECT_ROOT
 PREFERENCES = BASE / 'ui_preferences.json'
 RUN_KEY = r'Software\Microsoft\Windows\CurrentVersion\Run'
 RUN_NAME = 'EvrikaANPR'

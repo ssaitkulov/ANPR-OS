@@ -3,7 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
-import app_preferences as prefs
+from app.core import preferences as prefs
 from control_panel import Panel
 
 class PreferencesTests(unittest.TestCase):
