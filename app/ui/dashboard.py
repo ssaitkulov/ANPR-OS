@@ -105,13 +105,17 @@ class MonitoringSection:
     раздел не пересоздаёт ни видеопоток, ни фоновые задачи.
     """
 
-    def __init__(self, master, on_close=None, show_back=True, service_hook=None, embedded=False):
+    def __init__(self, master, on_close=None, show_back=True, embedded=False):
         self.root = ctk.CTkFrame(master, fg_color=BG, corner_radius=0)
         if not embedded:
             self.root.pack(fill='both', expand=True)
         self.on_close = on_close
         self.show_back = show_back
-        self.service_hook = service_hook
+        # Отложенные вызовы Tk: идентификаторы хранятся, чтобы отменить их
+        # при закрытии раздела (ошибка «invalid command name … poll»).
+        self._after_ids = set()
+        self._window_afters = {}
+        self._closing = False
         # Пауза показа видео (сворачивание в трей) — отдельно от того,
         # что пользователь отключил видео вручную.
         self.paused = threading.Event()
@@ -164,8 +168,10 @@ class MonitoringSection:
         self.live_icon = ctk.CTkImage(light_image=Image.open(BASE / 'assets' / 'live-video-filled.png'), size=(18, 18))
         ctk.CTkLabel(video_header, text='', image=self.live_icon, width=32, height=32,
                      corner_radius=8, fg_color='#263b57').pack(side='left', padx=(0, 8))
-        ctk.CTkLabel(video_header, text='Прямой эфир', text_color=TEXT,
-                     font=('Segoe UI', 12, 'bold'), anchor='w').pack(side='left')
+        # Название камеры из настроек; если его нет — «Прямой эфир».
+        self.video_title = ctk.CTkLabel(video_header, text=self._camera_title(), text_color=TEXT,
+                                        font=('Segoe UI', 12, 'bold'), anchor='w')
+        self.video_title.pack(side='left')
         self.video_status = ctk.CTkLabel(video_header, text='● Подключение', text_color=MUTED,
                                          font=('Segoe UI', 10))
         self.video_status.pack(side='left', padx=(10, 0))
@@ -182,17 +188,8 @@ class MonitoringSection:
         self.stream_switch.set('Основной')
         self.stream_switch.pack(side='right')
         self.video_label = ctk.CTkLabel(video, text='Подключение к камере…', text_color=MUTED, fg_color='#090e16')
-        self.video_label.pack(fill='both', expand=True, padx=10, pady=(0, 10))
+        self.video_label.pack(fill='both', expand=True, padx=10, pady=10)
         self.video_label.bind('<Double-Button-1>', self.open_video_fullscreen)
-        # Запуск и остановка ANPR-мониторинга — внутри блока камеры.
-        anpr = ctk.CTkFrame(video, fg_color='transparent')
-        anpr.pack(fill='x', padx=10, pady=(0, 10))
-        self.service_button = ctk.CTkButton(anpr, text='Запустить', width=118, height=30,
-                                             fg_color='#2869df', hover_color='#1d55b9',
-                                             text_color=TEXT, font=('Segoe UI', 11, 'bold'),
-                                             command=self._toggle_service)
-        self.service_button.pack(side='right')
-        ctk.CTkLabel(anpr, text='ANPR-мониторинг', text_color=MUTED, font=('Segoe UI', 11), anchor='w').pack(side='left')
         right = ctk.CTkFrame(layout, fg_color='transparent')
         right.grid(row=0, column=1, rowspan=2, sticky='nsew', padx=(7, 0))
         right.grid_columnconfigure((0, 1), weight=1, uniform='metric')
@@ -229,8 +226,8 @@ class MonitoringSection:
                       command=self.clear_search).pack(side='right', padx=(0, 5))
         self.search_entry.pack(side='left', fill='x', expand=True)
         self.search_entry.bind('<KeyRelease>', self.schedule_search)
-        self.search_entry.bind('<<Paste>>', lambda _event: self.root.after_idle(self.schedule_search))
-        self.search_entry.bind('<<Cut>>', lambda _event: self.root.after_idle(self.schedule_search))
+        self.search_entry.bind('<<Paste>>', lambda _event: self.schedule_idle(self.schedule_search))
+        self.search_entry.bind('<<Cut>>', lambda _event: self.schedule_idle(self.schedule_search))
         self.search_entry.bind('<Escape>', lambda _event: self.clear_search())
         self.feed = ctk.CTkScrollableFrame(feed, fg_color='transparent')
         self.feed.pack(fill='both', expand=True, padx=4, pady=(0, 8))
@@ -264,10 +261,118 @@ class MonitoringSection:
                         threading.Thread(target=self.video_worker, daemon=True)]
         for thread in self.threads:
             thread.start()
-        root.after(100, self.poll)
+        self.schedule(100, self.poll)
+
+    def _camera_title(self):
+        """Заголовок блока видео: название камеры или «Прямой эфир»."""
+        name = str(self.settings.get('CAMERA_NAME') or '').strip()
+        return name or 'Прямой эфир'
 
     def card(self, parent, row, col, **kwargs):
         frame=ctk.CTkFrame(parent, fg_color=CARD, border_color=BORDER, border_width=1, corner_radius=10); frame.grid(row=row, column=col, sticky='nsew', **kwargs); return frame
+
+    # ------------------------------------------------------------------
+    # Отложенные вызовы Tk: свои идентификаторы, отмена при закрытии
+    # ------------------------------------------------------------------
+    def schedule(self, delay, callback):
+        """Запланировать отложенный вызов с учётом его идентификатора."""
+        if self._closing:
+            return None
+        holder = {}
+
+        def run():
+            identifier = holder.get('id')
+            if identifier is not None:
+                self._after_ids.discard(identifier)
+            if self._closing:
+                return
+            callback()
+        try:
+            identifier = self.root.after(delay, run)
+        except tk.TclError:
+            return None
+        holder['id'] = identifier
+        self._after_ids.add(identifier)
+        return identifier
+
+    def schedule_idle(self, callback):
+        """Отложенный вызов сразу после обработки событий."""
+        if self._closing:
+            return None
+        holder = {}
+
+        def run():
+            identifier = holder.get('id')
+            if identifier is not None:
+                self._after_ids.discard(identifier)
+            if self._closing:
+                return
+            callback()
+        try:
+            identifier = self.root.after_idle(run)
+        except tk.TclError:
+            return None
+        holder['id'] = identifier
+        self._after_ids.add(identifier)
+        return identifier
+
+    def cancel_after(self, identifier):
+        """Отменить отложенный вызов раздела."""
+        if identifier is None:
+            return
+        self._after_ids.discard(identifier)
+        try:
+            self.root.after_cancel(identifier)
+        except Exception:
+            pass
+
+    def _cancel_all(self):
+        for identifier in list(self._after_ids):
+            try:
+                self.root.after_cancel(identifier)
+            except Exception:
+                pass
+        self._after_ids.clear()
+
+    def window_after(self, window, delay, callback, idle=False):
+        """Отложенный вызов в дополнительном окне.
+
+        Идентификатор хранится вместе с окном: перед уничтожением окна вызов
+        отменяется, иначе Tk сообщает «invalid command name».
+        """
+        if self._closing:
+            return None
+        identifiers = self._window_afters.setdefault(window, set())
+        holder = {}
+
+        def run():
+            identifier = holder.get('id')
+            if identifier is not None:
+                identifiers.discard(identifier)
+            if self._closing:
+                return
+            try:
+                callback()
+            except tk.TclError:
+                pass
+        try:
+            identifier = window.after_idle(run) if idle else window.after(delay, run)
+        except tk.TclError:
+            return None
+        holder['id'] = identifier
+        identifiers.add(identifier)
+        self._after_ids.add(identifier)
+        return identifier
+
+    def _close_window(self, window):
+        """Закрыть дополнительное окно: сначала отменить его отложенные вызовы."""
+        identifiers = self._window_afters.pop(window, set())
+        for identifier in identifiers:
+            self.cancel_after(identifier)
+        try:
+            window.destroy()
+        except tk.TclError:
+            pass
 
     def today(self):
         return datetime.now(self.tz).date()
@@ -298,7 +403,7 @@ class MonitoringSection:
         self.render_passages(None)
         self.data_changed.set()
         if self.date_window is not None:
-            self.date_window.destroy()
+            self._close_window(self.date_window)
             self.date_window = None
 
     def open_date_picker(self):
@@ -313,7 +418,7 @@ class MonitoringSection:
         window.title('Выбор периода')
         if sys.platform == 'win32':
             # CTkToplevel installs its own icon after 200 ms.
-            window.after(250, lambda: window.iconbitmap(str(BASE / 'assets' / 'calendar-month-filled.ico')))
+            self.window_after(window, 250, lambda: window.iconbitmap(str(BASE / 'assets' / 'calendar-month-filled.ico')))
         else:
             import tkinter as tk
             window.calendar_icon = tk.PhotoImage(file=str(BASE / 'assets' / 'calendar-month-filled.png'))
@@ -325,13 +430,13 @@ class MonitoringSection:
         window.geometry(f'310x375+{x}+{self.date_button.winfo_rooty() + 36}')
         def close_picker(_event=None):
             self.date_window = None
-            window.destroy()
+            self._close_window(window)
         window.protocol('WM_DELETE_WINDOW', close_picker)
         window.bind('<Escape>', close_picker)
         self.calendar_body = ctk.CTkFrame(window, fg_color='transparent')
         self.calendar_body.pack(fill='both', expand=True, padx=12, pady=10)
         self.draw_calendar()
-        window.after_idle(lambda: (window.lift(), window.focus_force()))
+        self.window_after(window, 0, lambda: (window.lift(), window.focus_force()), idle=True)
 
     def draw_calendar(self):
         for child in self.calendar_body.winfo_children():
@@ -412,8 +517,8 @@ class MonitoringSection:
 
     def schedule_search(self, _event=None):
         if self.search_after is not None:
-            self.root.after_cancel(self.search_after)
-        self.search_after = self.root.after(250, self.apply_search)
+            self.cancel_after(self.search_after)
+        self.search_after = self.schedule(250, self.apply_search)
 
     def clear_search(self):
         self.search_entry.delete(0, tk.END)
@@ -493,9 +598,10 @@ class MonitoringSection:
         window.transient(self.root.winfo_toplevel())
         window.attributes('-fullscreen', True)
         window.lift()
-        window.after_idle(lambda: (window.lift(), window.focus_force(), window.grab_set()))
-        window.bind('<Escape>', lambda _: window.destroy())
-        ctk.CTkButton(window, text='Закрыть  ✕', width=110, command=window.destroy).pack(anchor='ne', padx=16, pady=12)
+        self.window_after(window, 0, lambda: (window.lift(), window.focus_force(), window.grab_set()), idle=True)
+        window.bind('<Escape>', lambda _: self._close_window(window))
+        ctk.CTkButton(window, text='Закрыть  ✕', width=110,
+                      command=lambda: self._close_window(window)).pack(anchor='ne', padx=16, pady=12)
         label = ctk.CTkLabel(window, text=''); label.pack(fill='both', expand=True, padx=12, pady=(0, 12))
         def resize(_=None):
             w, h = label.winfo_width(), label.winfo_height()
@@ -569,11 +675,6 @@ class MonitoringSection:
         self.set_video_status('connecting' if enabled else 'disabled')
         self.show_video_message('Подключение к камере…' if enabled else 'Видео выключено')
 
-    def _toggle_service(self):
-        """Кнопка ANPR-мониторинга в блоке камеры."""
-        if self.service_hook is not None:
-            self.service_hook()
-
     def pause_video(self):
         """Приостановить показ видео (окно свёрнуто в трей).
 
@@ -596,12 +697,20 @@ class MonitoringSection:
         self.stream_changed.set()
 
     def shutdown(self):
-        """Остановить фоновые потоки раздела перед закрытием приложения."""
+        """Остановить фоновые потоки и отложенные вызовы раздела.
+
+        Вызывается при закрытии приложения: сначала отменяются callback'и,
+        затем останавливаются потоки. Повторный вызов безопасен.
+        """
+        if self._closing:
+            return
+        self._closing = True
+        self._cancel_all()
         self.stop.set()
         self.stream_changed.set()
         self.data_changed.set()
         for thread in self.threads:
-            thread.join(2)
+            thread.join(5)
 
     def set_video_status(self, state):
         text, color = {
@@ -615,12 +724,18 @@ class MonitoringSection:
 
     def show_video_message(self, message):
         # Clear Tk's image before dropping the CTkImage reference.
-        self.video_label._label.configure(image='')
-        self.video_label.configure(image=None, text=message)
+        try:
+            self.video_label._label.configure(image='')
+            self.video_label.configure(image=None, text=message)
+        except tk.TclError:
+            pass
         self.image = None
         if self.fullscreen_label is not None:
-            self.fullscreen_label._label.configure(image='')
-            self.fullscreen_label.configure(image=None, text=message)
+            try:
+                self.fullscreen_label._label.configure(image='')
+                self.fullscreen_label.configure(image=None, text=message)
+            except tk.TclError:
+                pass
             self.fullscreen_image = None
 
     def open_video_fullscreen(self, _event=None):
@@ -640,14 +755,14 @@ class MonitoringSection:
                                              text_color=MUTED, fg_color='#090e16')
         self.fullscreen_label.pack(fill='both', expand=True, padx=12, pady=12)
         self.fullscreen_label.bind('<Double-Button-1>', self.close_video_fullscreen)
-        window.after_idle(lambda: (window.lift(), window.focus_force()))
+        self.window_after(window, 0, lambda: (window.lift(), window.focus_force()), idle=True)
 
     def close_video_fullscreen(self, _event=None):
         window = self.fullscreen_window
         self.fullscreen_window = None
         self.fullscreen_label = None
         if window is not None:
-            window.destroy()
+            self._close_window(window)
         self.fullscreen_image = None
 
     def video_worker(self):
@@ -671,7 +786,7 @@ class MonitoringSection:
             url=f'rtsp://{user}:{password}@{host}:554/cam/realmonitor?channel={channel}&subtype={subtype}'
             capture = cv2.VideoCapture()
             try:
-                capture.open(url, cv2.CAP_FFMPEG, [cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, 5000, cv2.CAP_PROP_READ_TIMEOUT_MSEC, 5000])
+                capture.open(url, cv2.CAP_FFMPEG, [cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, 4000, cv2.CAP_PROP_READ_TIMEOUT_MSEC, 3000])
                 if not capture.isOpened(): raise OSError('video unavailable')
                 last_published = 0.0
                 while not self.stop.is_set() and self.stream_selection[0] == generation:
@@ -752,27 +867,36 @@ class MonitoringSection:
                                fill='#4598ff', outline='#e4f0ff', width=1)
 
     def poll(self):
-        self.video_size = (max(self.video_label.winfo_width(), 2), max(self.video_label.winfo_height(), 2))
-        if self.fullscreen_label is not None:
-            self.video_size = (max(self.video_size[0], self.fullscreen_label.winfo_width()),
-                               max(self.video_size[1], self.fullscreen_label.winfo_height()))
+        # Размер области видео: пока виджет не показан, размер не меняется —
+        # иначе кадры уменьшаются до пикселей, пока раздел скрыт.
+        width, height = self.video_label.winfo_width(), self.video_label.winfo_height()
+        if width > 10 and height > 10:
+            self.video_size = (max(width, 160), max(height, 90))
+            if self.fullscreen_label is not None:
+                full_width = self.fullscreen_label.winfo_width()
+                full_height = self.fullscreen_label.winfo_height()
+                if full_width > 10 and full_height > 10:
+                    self.video_size = (max(self.video_size[0], full_width), max(self.video_size[1], full_height))
         try:
             generation, kind, value=self.frames.get_nowait()
             if generation != self.stream_selection[0]:
                 pass
             elif kind == 'frame':
                 self.set_video_status('online')
-                w=max(self.video_label.winfo_width(), 2); h=max(self.video_label.winfo_height(), 2)
-                fitted=ImageOps.contain(value, (w, h), Image.Resampling.LANCZOS)
-                image=ctk.CTkImage(light_image=fitted, dark_image=fitted, size=fitted.size)
-                self.video_label.configure(image=image, text='')
-                self.image=image
-                if self.fullscreen_label is not None:
-                    w=max(self.fullscreen_label.winfo_width(), 2); h=max(self.fullscreen_label.winfo_height(), 2)
-                    fitted=ImageOps.contain(value, (w, h), Image.Resampling.LANCZOS)
-                    image=ctk.CTkImage(light_image=fitted, dark_image=fitted, size=fitted.size)
+                if self.video_label.winfo_ismapped():
+                    w = max(self.video_label.winfo_width(), 10)
+                    h = max(self.video_label.winfo_height(), 10)
+                    fitted = ImageOps.contain(value, (w, h), Image.Resampling.LANCZOS)
+                    image = ctk.CTkImage(light_image=fitted, dark_image=fitted, size=fitted.size)
+                    self.video_label.configure(image=image, text='')
+                    self.image = image
+                if self.fullscreen_label is not None and self.fullscreen_label.winfo_ismapped():
+                    w = max(self.fullscreen_label.winfo_width(), 10)
+                    h = max(self.fullscreen_label.winfo_height(), 10)
+                    fitted = ImageOps.contain(value, (w, h), Image.Resampling.LANCZOS)
+                    image = ctk.CTkImage(light_image=fitted, dark_image=fitted, size=fitted.size)
                     self.fullscreen_label.configure(image=image, text='')
-                    self.fullscreen_image=image
+                    self.fullscreen_image = image
             else:
                 self.set_video_status('offline')
                 self.show_video_message(value)
@@ -801,7 +925,7 @@ class MonitoringSection:
                     self.render_passages(content)
                     self._feed_content = content
                     if self.reset_feed_scroll:
-                        self.feed.after_idle(lambda: self.feed._parent_canvas.yview_moveto(0))
+                        self.schedule_idle(lambda: self.feed._parent_canvas.yview_moveto(0))
                         self.reset_feed_scroll = False
         except queue.Empty: pass
         try:
@@ -812,17 +936,19 @@ class MonitoringSection:
                     self.photo_bytes[event_id] = photo
                     self.set_photo(event_id, photo)
         except queue.Empty: pass
-        self.root.after(40, self.poll)
+        self.schedule(40, self.poll)
 
     def close(self):
-        self.stop.set()
-        self.stream_changed.set()
-        self.data_changed.set()
+        """Закрыть раздел (автономный режим): отменить вызовы и остановить потоки."""
+        self.shutdown()
         if self.date_window is not None:
-            self.date_window.destroy()
+            self._close_window(self.date_window)
             self.date_window = None
         self.close_video_fullscreen()
-        self.root.destroy()
+        try:
+            self.root.destroy()
+        except tk.TclError:
+            pass
         if self.on_close:
             self.on_close()
 
