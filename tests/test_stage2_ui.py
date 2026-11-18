@@ -17,7 +17,8 @@ from tests import anpr_testenv  # noqa: F401  — изоляция тестов 
 import queue
 import time
 import unittest
-from unittest.mock import patch
+from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 import customtkinter as ctk
 
@@ -36,6 +37,27 @@ HEALTH = {
 
 EMPTY_DASHBOARD = {'total': 0, 'unique': 0, 'hours': [0] * 24,
                    'directions': {'Въезд': 0, 'Выезд': 0, 'Неизвестно': 0}, 'recent': []}
+
+#: Подменённый сервис. Держится на всё время модуля: фоновые потоки
+#: не успевают завершиться до конца теста, и обращение к настоящему сервису
+#: (остановка живого ANPR) недопустимо.
+FAKE_SERVICE = MagicMock()
+FAKE_SERVICE.URL = 'http://127.0.0.1:18749'
+FAKE_SERVICE.BASE = Path(__file__).resolve().parent.parent
+
+
+def setUpModule():
+    global _service_patch
+    FAKE_SERVICE.reset_mock()
+    FAKE_SERVICE.health.return_value = HEALTH
+    FAKE_SERVICE.start.return_value = HEALTH
+    FAKE_SERVICE.stop.return_value = None
+    _service_patch = patch('app.ui.shell.service', FAKE_SERVICE)
+    _service_patch.start()
+
+
+def tearDownModule():
+    _service_patch.stop()
 
 
 def wait_for(predicate, timeout=3.0):
@@ -145,9 +167,6 @@ class ShellTestCase(unittest.TestCase):
         self.root.report_callback_excepter = self._report_error
         self.patches = [
             patch.object(AppShell, '_start_tray'),                       # без иконки в трее
-            patch('app.ui.shell.service.start'),
-            patch('app.ui.shell.service.stop'),
-            patch('app.ui.shell.service.health', return_value=HEALTH),
             patch('app.ui.shell.window_state.save_state', return_value=True),
             patch('app.ui.dashboard.load_dashboard', return_value=EMPTY_DASHBOARD),
             patch.dict('sys.modules', {'cv2': type('FakeCv2', (), {
@@ -159,6 +178,7 @@ class ShellTestCase(unittest.TestCase):
         self.shell = AppShell(self.root)
         # Дать завершиться стартовой операции (сервис подменён заглушкой).
         self.pump(0.4)
+        self.wait(lambda: not self.shell.busy)
 
     def tearDown(self):
         try:
@@ -215,33 +235,33 @@ class ServiceControlTests(ShellTestCase):
             self.shell.running = True
             self.shell.toggle_service()
         self.assertFalse(self.shell.busy)
-        with patch('app.ui.shell.service.stop') as stop:
-            with patch('app.ui.shell.messagebox.askyesno', return_value=True):
-                self.shell.running = True
-                self.shell.toggle_service()
-            self.assertTrue(wait_for(lambda: stop.called))
-        stop.assert_called_once()
+        FAKE_SERVICE.reset_mock()
+        with patch('app.ui.shell.messagebox.askyesno', return_value=True):
+            self.shell.running = True
+            self.shell.toggle_service()
+            self.assertTrue(wait_for(lambda: FAKE_SERVICE.stop.called))
+        FAKE_SERVICE.stop.assert_called_once()
 
     def test_start_does_not_ask_confirmation(self):
-        with patch('app.ui.shell.service.start') as start:
-            with patch('app.ui.shell.messagebox.askyesno', return_value=False) as confirm:
-                self.shell.running = False
-                self.shell.toggle_service()
+        FAKE_SERVICE.reset_mock()
+        with patch('app.ui.shell.messagebox.askyesno', return_value=False) as confirm:
+            self.shell.running = False
+            self.shell.toggle_service()
             confirm.assert_not_called()
-            self.assertTrue(wait_for(lambda: start.called))
-        start.assert_called_once()
+            self.assertTrue(wait_for(lambda: FAKE_SERVICE.start.called))
+        FAKE_SERVICE.start.assert_called_once()
 
     def test_restart_requires_confirmation(self):
-        with patch('app.ui.shell.service.stop') as stop, patch('app.ui.shell.service.start') as start:
-            with patch('app.ui.shell.messagebox.askyesno', return_value=False):
-                self.shell.restart_service()
-            stop.assert_not_called()
-            start.assert_not_called()
-            with patch('app.ui.shell.messagebox.askyesno', return_value=True):
-                self.shell.restart_service()
-            self.assertTrue(wait_for(lambda: stop.called and start.called))
-        stop.assert_called_once()
-        start.assert_called_once()
+        FAKE_SERVICE.reset_mock()
+        with patch('app.ui.shell.messagebox.askyesno', return_value=False):
+            self.shell.restart_service()
+            self.pump(0.3)
+        FAKE_SERVICE.stop.assert_not_called()
+        FAKE_SERVICE.start.assert_not_called()
+        with patch('app.ui.shell.messagebox.askyesno', return_value=True):
+            self.shell.restart_service()
+            self.assertTrue(self.wait(lambda: FAKE_SERVICE.stop.called and FAKE_SERVICE.start.called))
+        FAKE_SERVICE.start.assert_called_once()
 
     def test_controls_are_blocked_during_operation(self):
         self.shell.busy = True
@@ -249,10 +269,11 @@ class ServiceControlTests(ShellTestCase):
         self.assertEqual(str(self.shell.header.action_button.cget('state')), 'disabled')
         self.assertEqual(str(self.shell.header.restart_button.cget('state')), 'disabled')
         # Повторная команда при занятом сервисе игнорируется.
-        with patch('app.ui.shell.service.stop') as stop:
-            self.shell.toggle_service()
-            self.shell.restart_service()
-        stop.assert_not_called()
+        FAKE_SERVICE.reset_mock()
+        self.shell.toggle_service()
+        self.shell.restart_service()
+        FAKE_SERVICE.stop.assert_not_called()
+        FAKE_SERVICE.start.assert_not_called()
         self.assertTrue(self.shell.busy)
 
     def test_parallel_operations_are_impossible(self):
@@ -290,6 +311,22 @@ class ServiceControlTests(ShellTestCase):
         self.shell.header.toggle_details('service')
         self.assertEqual(self.shell.header.details.frame.winfo_manager(), '')
 
+    def test_narrow_window_switches_indicators_to_short_labels(self):
+        self.shell.update_status(HEALTH)
+        self.root.geometry('1024x650+20+20')
+        self.pump(0.5)
+        self.shell.header._fit_width()
+        self.pump(0.2)
+        self.assertTrue(self.shell.header.compact)
+        # Полная подпись остаётся в данных состояния.
+        self.assertEqual(self.shell._states['service']['label'], 'Работает')
+        # Блок управления не выходит за пределы окна.
+        control = self.shell.header.control
+        self.assertLessEqual(control.winfo_rootx() + control.winfo_width(),
+                             self.root.winfo_rootx() + self.root.winfo_width())
+        self.root.geometry('1500x940+20+20')
+        self.pump(0.4)
+
 
 class SectionLifecycleTests(ShellTestCase):
     def test_sections_are_created_once(self):
@@ -313,10 +350,10 @@ class SectionLifecycleTests(ShellTestCase):
 
     def test_video_and_anpr_are_independent(self):
         monitor = self.shell.section_objects['monitor']
-        with patch('app.ui.shell.service.start') as start, patch('app.ui.shell.service.stop') as stop:
-            monitor.video_enabled.toggle()      # пользователь выключил видео
-        start.assert_not_called()
-        stop.assert_not_called()
+        FAKE_SERVICE.reset_mock()
+        monitor.video_enabled.toggle()      # пользователь выключил видео
+        FAKE_SERVICE.start.assert_not_called()
+        FAKE_SERVICE.stop.assert_not_called()
         self.assertFalse(monitor.stream_selection[2])
         # Пауза в трее не включает видео обратно.
         monitor.pause_video()

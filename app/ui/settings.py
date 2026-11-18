@@ -337,18 +337,24 @@ class SettingsSection:
     def _fit_form(self, event=None):
         """Ширина формы: не больше 800 px и не шире доступного места.
 
-        Ширина задаётся через `minsize` колонки: иначе файл сжимается до
+        Ширина задаётся через `minsize` колонки: иначе форма сжимается до
         ширины полей, а колонка с полями не растягивается на всю форму.
         """
-        available = event.width if event is not None else self.scroll.winfo_width()
-        width = max(320, min(self.FORM_MAX_WIDTH, int(available) - 12))
-        if width == self._form_width:
+        try:
+            if not self.form.winfo_exists():
+                return
+            available = event.width if event is not None else self.scroll.winfo_width()
+            width = max(320, min(self.FORM_MAX_WIDTH, int(available) - 12))
+            if width == self._form_width:
+                return
+            self._form_width = width
+            self.form.configure(width=width)
+            self.form.grid_columnconfigure(0, weight=1, minsize=width)
+            for note in self._notes:
+                note.configure(wraplength=max(200, width - self.LABEL_WIDTH - 28))
+        except tk.TclError:
+            # Виджеты уже уничтожены (окно закрывается) — тихо выходим.
             return
-        self._form_width = width
-        self.form.configure(width=width)
-        self.form.grid_columnconfigure(0, weight=1, minsize=width)
-        for note in self._notes:
-            note.configure(wraplength=max(200, width - self.LABEL_WIDTH - 28))
 
     def _field(self, parent, row, label, key, secret=False):
         ctk.CTkLabel(parent, text=label, text_color=self.TEXT, anchor='w', width=self.LABEL_WIDTH,

@@ -27,6 +27,7 @@ class StatusChip:
 
     def __init__(self, parent, key, caption, on_click):
         self.key = key
+        self.state = None
         self.frame = ctk.CTkFrame(parent, fg_color='transparent')
         caption_label = ctk.CTkLabel(self.frame, text=caption.upper(), text_color=ui_status.MUTED,
                                      font=('Segoe UI', 9), anchor='w')
@@ -36,14 +37,15 @@ class StatusChip:
         self.dot = ctk.CTkFrame(row, width=9, height=9, corner_radius=5, fg_color=ui_status.MUTED)
         self.dot.pack(side='left', padx=(0, 6), pady=(1, 0))
         self.value = ctk.CTkLabel(row, text='Проверяю…', text_color='#f2f5fa',
-                                  font=('Segoe UI', 11, 'bold'), anchor='w', width=112)
+                                  font=('Segoe UI', 11, 'bold'), anchor='w')
         self.value.pack(side='left')
         for widget in (self.frame, caption_label, row, self.dot, self.value):
             widget.bind('<Button-1>', lambda _event: on_click(self.key))
 
-    def set_state(self, state):
+    def set_state(self, state, compact=False):
         """Показать состояние индикатора (словарь из `app.ui.status`)."""
-        self.value.configure(text=state['label'])
+        self.state = state
+        self.value.configure(text=state['short'] if compact else state['label'])
         self.dot.configure(fg_color=state['color'])
 
 
@@ -114,18 +116,23 @@ class SystemHeader:
 
     def __init__(self, master, overlay, owner):
         self.owner = owner
+        self.overlay = overlay
+        self.compact = False
         self.frame = ctk.CTkFrame(master, fg_color='transparent')
-        self.frame.pack(fill='x', padx=24, pady=(16, 8))
+        self.frame.pack(fill='x', padx=20, pady=(16, 8))
         self.chips = {}
+        self._states = {}
 
         # --- левая часть: логотип и навигация ---
-        self.logo = ctk.CTkImage(light_image=owner.logo_image(), size=(128, 27))
-        ctk.CTkLabel(self.frame, text='', image=self.logo, anchor='w').pack(side='left')
-        nav = ctk.CTkFrame(self.frame, fg_color='transparent')
-        nav.pack(side='left', padx=(14, 0))
+        self.left = ctk.CTkFrame(self.frame, fg_color='transparent')
+        self.left.pack(side='left')
+        self.logo = ctk.CTkImage(light_image=owner.logo_image(), size=(116, 25))
+        ctk.CTkLabel(self.left, text='', image=self.logo, anchor='w').pack(side='left')
+        nav = ctk.CTkFrame(self.left, fg_color='transparent')
+        nav.pack(side='left', padx=(12, 0))
         self.nav_buttons = {}
         for key in ('monitor', 'settings'):
-            button = ctk.CTkButton(nav, text=owner.section_titles[key], width=112, height=34,
+            button = ctk.CTkButton(nav, text=owner.section_titles[key], width=104, height=34,
                                     fg_color='#1a2432', hover_color='#34455a', border_color='#303e51',
                                     border_width=1, font=('Segoe UI', 12),
                                     command=lambda key=key: owner.show_section(key))
@@ -136,41 +143,42 @@ class SystemHeader:
         control = ctk.CTkFrame(self.frame, fg_color='#1a2432', corner_radius=10,
                                border_color='#303e51', border_width=1)
         control.pack(side='right')
+        self.control = control
         inner = ctk.CTkFrame(control, fg_color='transparent')
         inner.pack(padx=12, pady=8)
         row = ctk.CTkFrame(inner, fg_color='transparent')
         row.pack(fill='x')
 
         self.service_chip = StatusChip(row, 'service', 'Сервис', self.toggle_details)
-        self.service_chip.frame.pack(side='left', padx=(0, 12))
+        self.service_chip.frame.pack(side='left', padx=(0, 10))
         self.chips['service'] = self.service_chip
 
-        self.action_button = ctk.CTkButton(row, text='Запустить', width=104, height=34,
+        self.action_button = ctk.CTkButton(row, text='Запустить', width=100, height=34,
                                            fg_color='#2869df', hover_color='#1d55b9',
                                            font=('Segoe UI', 11, 'bold'),
                                            command=self.owner.toggle_service)
         self.action_button.pack(side='left')
 
-        self.restart_button = ctk.CTkButton(row, text='Перезапустить', width=104, height=34,
+        self.restart_button = ctk.CTkButton(row, text='Перезапустить', width=100, height=34,
                                             fg_color='#263b57', hover_color='#365172',
-                                            font=('Segoe UI', 11),
+                                            font=('Segoe UI', 10),
                                             command=self.owner.restart_service)
         self.restart_button.pack(side='left', padx=(6, 0))
 
-        ctk.CTkFrame(row, width=1, height=34, fg_color='#303e51').pack(side='left', fill='y', padx=12)
+        ctk.CTkFrame(row, width=1, height=34, fg_color='#303e51').pack(side='left', fill='y', padx=10)
 
         self.camera_chip = StatusChip(row, 'camera', 'Камера', self.toggle_details)
-        self.camera_chip.frame.pack(side='left', padx=(0, 12))
+        self.camera_chip.frame.pack(side='left', padx=(0, 10))
         self.chips['camera'] = self.camera_chip
 
         self.telegram_chip = StatusChip(row, 'telegram', 'Telegram', self.toggle_details)
-        self.telegram_chip.frame.pack(side='left', padx=(0, 12))
+        self.telegram_chip.frame.pack(side='left', padx=(0, 10))
         self.chips['telegram'] = self.telegram_chip
 
-        self.log_button = ctk.CTkButton(row, text='Журнал', width=76, height=34,
+        self.log_button = ctk.CTkButton(row, text='Журнал', width=72, height=34,
                                         fg_color='transparent', hover_color='#263b57',
                                         border_color='#303e51', border_width=1,
-                                        font=('Segoe UI', 11), command=self.owner.open_log)
+                                        font=('Segoe UI', 10), command=self.owner.open_log)
         self.log_button.pack(side='left')
 
         # Короткие сообщения (результат операции) — под блоком индикаторов.
@@ -178,6 +186,7 @@ class SystemHeader:
                                            font=('Segoe UI', 11), anchor='w', justify='left')
         self.details = DetailsPanel(overlay, owner)
         overlay.bind('<Button-1>', self._on_overlay_click, add='+')
+        overlay.bind('<Configure>', self._fit_width, add='+')
 
     # ------------------------------------------------------------------
     def sync_message(self):
@@ -230,8 +239,42 @@ class SystemHeader:
     def set_state(self, key, state):
         """Обновить индикатор состояния."""
         chip = self.chips.get(key)
-        if chip is not None:
-            chip.set_state(state)
+        if chip is None:
+            return
+        self._states[key] = state
+        chip.set_state(state, self.compact)
+        # После смены подписи ширина блока могла измениться — пересчитываем.
+        try:
+            self.control.update_idletasks()
+        except tk.TclError:
+            pass
+        self._fit_width()
+
+    def _fit_width(self, _event=None):
+        """В узком окне индикаторы показывают короткие подписи.
+
+        Так верхняя панель никогда не обрезается: полные названия состояний
+        остаются в панели подробностей.
+        """
+        try:
+            if not self.control.winfo_exists():
+                return
+            available = self.overlay.winfo_width() - self.left.winfo_reqwidth() - 48
+            needed = self.control.winfo_reqwidth()
+        except tk.TclError:
+            return
+        if needed > available and not self.compact:
+            self.compact = True
+            self._refresh_labels()
+        elif needed <= available - 120 and self.compact:
+            self.compact = False
+            self._refresh_labels()
+
+    def _refresh_labels(self):
+        for key, chip in self.chips.items():
+            state = self._states.get(key)
+            if state is not None:
+                chip.set_state(state, self.compact)
 
     def set_running(self, running):
         """Кнопка запуска/остановки отражает текущее состояние сервиса."""
