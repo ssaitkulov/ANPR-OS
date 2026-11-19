@@ -9,6 +9,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from app.services import logs as service_logs
+from app.services import audit
 
 import anpr_telegram as M
 from fastapi import FastAPI, BackgroundTasks, HTTPException
@@ -163,7 +164,10 @@ def shutdown():
     база закрывается — после этого процесс завершается сам.
     """
     if _server is None:
+        audit.control('service.shutdown', 'error', source='service',
+                      target_pid=os.getpid(), error='сервис запущен без управляющего сервера')
         raise HTTPException(status_code=503, detail="Сервис запущен без управляющего сервера")
+    audit.control('service.shutdown', 'ok', source='service', target_pid=os.getpid())
     _server.should_exit = True
     return {"service": "anpr-fayz", "status": "stopping"}
 

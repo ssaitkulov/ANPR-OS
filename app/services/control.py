@@ -10,6 +10,7 @@ import requests
 
 from app.core.paths import PROJECT_ROOT, runtime_dir, env_file
 from app.core import safe_mode
+from app.services import audit
 
 #: Корень проекта: журналы, pid-файл и лаунчер сервиса лежат в корне.
 BASE = PROJECT_ROOT
@@ -64,69 +65,91 @@ def health():
     return result
 
 
-def start():
-    safe_mode.guard('Запуск сервиса ANPR')
+def start(source: str = 'cli'):
+    """Запустить сервис.
+
+    Операция записывается в структурированный журнал `service.control.log`:
+    запрос, длительность, PID запущенного процесса и причина ошибки.
+    """
     try:
-        return health()
-    except requests.ConnectionError:
-        pass
-    with socket.socket() as probe:
+        safe_mode.guard('Запуск сервиса ANPR')
+    except safe_mode.SafeModeError as error:
+        audit.control('service.start', 'denied', source=source, error=str(error))
+        raise
+    with audit.operation('service.start', source=source) as op:
         try:
-            probe.bind(('127.0.0.1', PORT))
-        except OSError:
-            raise RuntimeError('Порт занят. Другие программы не остановлены.')
-    if not env_file().exists():
-        raise RuntimeError('Сначала откройте «Настройки» и сохраните данные камеры и бота.')
-    python = str(Path(sys.executable).with_name('python.exe')) if os.name == 'nt' else sys.executable
-    _trim_boot_log()
-    # Журналы сервиса пишет сам сервис (с ротацией) — в файле остаётся только
-    # вывод до старта: ошибки запуска python или uvicorn.
-    boot = boot_log()
-    with boot.open('ab') as out:
-        process = subprocess.Popen([python, str(BASE / 'app.py')], cwd=BASE, stdout=out, stderr=out,
-                                   creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0)
-    pid_file().write_text(str(process.pid), encoding='ascii')
-    for _ in range(30):
-        if process.poll() is not None:
-            _copy_boot_log_to_stderr()
-            raise RuntimeError('Не удалось запустить программу. Подробности в журнале service.stderr.log.')
-        try:
-            result = health()
-            if result.get('pid') == process.pid:
-                return result
+            return health()
         except requests.ConnectionError:
             pass
-        time.sleep(0.3)
-    raise RuntimeError('Запуск затянулся. Проверьте состояние через несколько секунд.')
+        with socket.socket() as probe:
+            try:
+                probe.bind(('127.0.0.1', PORT))
+            except OSError:
+                raise RuntimeError('Порт занят. Другие программы не остановлены.')
+        if not env_file().exists():
+            raise RuntimeError('Сначала откройте «Настройки» и сохраните данные камеры и бота.')
+        python = str(Path(sys.executable).with_name('python.exe')) if os.name == 'nt' else sys.executable
+        _trim_boot_log()
+        # Журналы сервиса пишет сам сервис (с ротацией) — в файле остаётся только
+        # вывод до старта: ошибки запуска python или uvicorn.
+        boot = boot_log()
+        with boot.open('ab') as out:
+            process = subprocess.Popen([python, str(BASE / 'app.py')], cwd=BASE, stdout=out, stderr=out,
+                                       creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0)
+        pid_file().write_text(str(process.pid), encoding='ascii')
+        op['target_pid'] = process.pid
+        for _ in range(30):
+            if process.poll() is not None:
+                _copy_boot_log_to_stderr()
+                raise RuntimeError('Не удалось запустить программу. Подробности в журнале service.stderr.log.')
+            try:
+                result = health()
+                if result.get('pid') == process.pid:
+                    op['target_pid'] = result.get('pid')
+                    return result
+            except requests.ConnectionError:
+                pass
+            time.sleep(0.3)
+        raise RuntimeError('Запуск затянулся. Проверьте состояние через несколько секунд.')
 
 
-def stop():
-    safe_mode.guard('Остановка сервиса ANPR')
+def stop(source: str = 'cli'):
+    """Остановить сервис (операция пишется в журнал управления)."""
     try:
-        result = health()
-    except requests.ConnectionError:
-        pid_file().unlink(missing_ok=True)
-        return
-    store = pid_file()
-    if not store.exists() or int(store.read_text()) != result.get('pid'):
-        raise RuntimeError('Это другой экземпляр программы. Автоматическая остановка отменена.')
-    stop_gracefully(result['pid'])
-    store.unlink(missing_ok=True)
+        safe_mode.guard('Остановка сервиса ANPR')
+    except safe_mode.SafeModeError as error:
+        audit.control('service.stop', 'denied', source=source, error=str(error))
+        raise
+    with audit.operation('service.stop', source=source) as op:
+        try:
+            result = health()
+        except requests.ConnectionError:
+            pid_file().unlink(missing_ok=True)
+            return
+        store = pid_file()
+        if not store.exists() or int(store.read_text()) != result.get('pid'):
+            raise RuntimeError('Это другой экземпляр программы. Автоматическая остановка отменена.')
+        op['target_pid'] = result.get('pid')
+        stop_gracefully(result['pid'], source=source)
+        store.unlink(missing_ok=True)
 
 
-def stop_gracefully(pid) -> None:
+def stop_gracefully(pid, source: str = 'cli') -> None:
     """Мягкая остановка: сервис сам останавливает потоки и пишет состояние на диск.
 
     Жёсткое завершение — только если сервис не освободил порт за STOP_TIMEOUT
     секунд (зависший поток). Обычно этого не происходит.
     """
     safe_mode.guard('Остановка сервиса ANPR')
+    audit.record('service.shutdown.requested', 'requested', source=source, target_pid=pid,
+                 transport='http')
     try:
         with requests.Session() as session:
             session.trust_env = False
             session.post(URL + '/shutdown', timeout=5)
-    except requests.RequestException:
-        pass
+    except requests.RequestException as error:
+        audit.record('service.shutdown.requested', 'error', source=source, target_pid=pid,
+                     error=str(error))
     deadline = time.time() + STOP_TIMEOUT
     while time.time() < deadline:
         try:

@@ -33,6 +33,7 @@ import requests
 from PIL import Image
 
 from app.services import control as service
+from app.services import audit
 from app.core import preferences
 from app.core import window_state
 from app.core.paths import ASSETS_DIR
@@ -342,33 +343,47 @@ class AppShell:
             return
         if self.running:
             if not self._confirm('Остановить систему',
-                                'Остановить ANPR-мониторинг?\nПроезды перестанут фиксироваться.'):
+                                'Остановить ANPR-мониторинг?\nПроезды перестанут фиксироваться.',
+                                action='service.stop'):
                 return
-            self.work(service.stop, 'stop')
+            self.work(lambda: service.stop(source='panel'), 'stop')
         else:
-            self.work(service.start, 'start')
+            audit.panel('service.start.requested', 'requested', source='panel',
+                        confirmation=False)
+            self.work(lambda: service.start(source='panel'), 'start')
 
     def restart_service(self):
         """Перезапустить ANPR-сервис."""
         if self.busy or self.closing:
             return
         if not self._confirm('Перезапустить систему',
-                            'Перезапустить ANPR-мониторинг?\nСбор данных прервётся на несколько секунд.'):
+                            'Перезапустить ANPR-мониторинг?\nСбор данных прервётся на несколько секунд.',
+                            action='service.restart'):
             return
         self.work(self._restart_sequence, 'restart')
 
-    def _confirm(self, title, text):
+    def _confirm(self, title, text, action: str = ''):
+        """Запрос подтверждения пользователя.
+
+        Ответ пользователя — в журнал панели: по нему видно, был ли запрос
+        подтверждения и чем закончился.
+        """
         try:
-            return bool(messagebox.askyesno(title, text, parent=self.root, default=messagebox.NO))
+            answer = bool(messagebox.askyesno(title, text, parent=self.root, default=messagebox.NO))
         except tk.TclError:
-            return False
+            answer = False
+        if action:
+            audit.panel(f'{action}.confirm', 'requested', source='panel',
+                        title=title, confirmed=answer)
+        return answer
 
     def _restart_sequence(self):
         """Остановить и снова запустить сервис (в фоновом потоке)."""
+        audit.panel('service.restart.requested', 'requested', source='panel')
         self.queue.put(('phase', 'stop'))
-        service.stop()
+        service.stop(source='panel')
         self.queue.put(('phase', 'start'))
-        return service.start()
+        return service.start(source='panel')
 
     def work(self, action, operation='start'):
         """Выполнить операцию управления сервисом в фоновом потоке."""
@@ -386,8 +401,10 @@ class AppShell:
                 action()
             except Exception as error:
                 detail = str(error) if isinstance(error, (RuntimeError, ValueError)) else 'Не удалось выполнить действие.'
+                audit.panel(f'{operation}.finished', 'error', source='panel', error=detail)
                 self.queue.put(('operation_done', {'ok': False, 'error': detail}))
             else:
+                audit.panel(f'{operation}.finished', 'ok', source='panel')
                 self.queue.put(('operation_done', {'ok': True, 'error': ''}))
         threading.Thread(target=worker, daemon=True).start()
 
@@ -474,9 +491,10 @@ class AppShell:
 
         def worker():
             try:
-                service.stop()
+                service.stop(source='panel')
             except Exception as error:
                 detail = str(error) if isinstance(error, (RuntimeError, ValueError)) else 'Не удалось остановить систему.'
+                audit.panel('panel.exit', 'error', source='panel', error=detail)
                 self.queue.put(('exit_error', detail))
             else:
                 self.queue.put(('exit_complete', None))
@@ -488,6 +506,7 @@ class AppShell:
             return
         self.closed = True
         self.closing = True
+        audit.panel('panel.exit', 'ok', source='panel')
         self.save_window_state()
         self._cancel_all()
         try:

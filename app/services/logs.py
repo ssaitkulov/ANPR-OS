@@ -11,8 +11,10 @@
 import logging
 import logging.handlers
 import os
+import atexit
 import sys
 import threading
+from datetime import datetime
 from pathlib import Path
 
 from app.core.paths import PROJECT_ROOT, runtime_dir
@@ -21,6 +23,11 @@ DEFAULT_MAX_MB = 10          # размер одного файла журнал
 DEFAULT_BACKUPS = 3          # сколько старых копий хранить
 STDOUT_NAME = 'service.stdout.log'
 STDERR_NAME = 'service.stderr.log'
+
+
+def _stamp() -> str:
+    """Временная метка строки журнала: ISO 8601 с часовым поясом."""
+    return datetime.now().astimezone().isoformat(timespec='milliseconds')
 
 
 def _max_bytes() -> int:
@@ -44,6 +51,10 @@ class RotatingFileWriter:
 
     Запись идёт через `RotatingFileHandler`: он держит открытый файл,
     а при переполнении переименовывает его в `.1` и открывает новый.
+
+    Каждая строка получает временную метку ISO 8601 с часовым поясом —
+    по журналу видно, когда что произошло. Незаконченная строка ждёт
+    продолжения: метка ставится только когда строка дописана.
     """
 
     def __init__(self, path, max_bytes=None, backups=None):
@@ -51,7 +62,8 @@ class RotatingFileWriter:
         self._handler = logging.handlers.RotatingFileHandler(
             str(self.path), maxBytes=max_bytes or _max_bytes(), backupCount=_backups() if backups is None else backups,
             encoding='utf-8', delay=False)
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
+        self._pending = ''
 
     def write(self, text: str) -> None:
         """Записать текст. Ошибка диска не должна ронять сервис."""
@@ -64,10 +76,31 @@ class RotatingFileWriter:
                     # Файл закрывали — открываем заново, журнал продолжает жить.
                     stream = self._handler._open()
                     self._handler.stream = stream
-                stream.write(text)
-                stream.flush()
+                self._pending += text
+                lines = self._pending.split('\n')
+                self._pending = lines.pop()
+                payload = ''.join(f'{_stamp()} {line}\n' for line in lines)
+                if payload:
+                    stream.write(payload)
+                    stream.flush()
                 if self._size(stream) >= self._handler.maxBytes:
                     self._handler.doRollover()
+            except (OSError, ValueError, AttributeError):
+                pass
+
+    def flush_pending(self) -> None:
+        """Дописать недописанную строку (при остановке сервиса)."""
+        with self._lock:
+            if not self._pending:
+                return
+            text = self._pending
+            self._pending = ''
+            try:
+                stream = self._handler.stream
+                if stream is None:
+                    return
+                stream.write(f'{_stamp()} {text}\n')
+                stream.flush()
             except (OSError, ValueError, AttributeError):
                 pass
 
@@ -86,6 +119,10 @@ class RotatingFileWriter:
 
     def close(self) -> None:
         with self._lock:
+            try:
+                self.flush_pending()
+            except Exception:
+                pass
             try:
                 self._handler.close()
             except Exception:
@@ -123,7 +160,10 @@ class LogStream:
         return len(text)
 
     def flush(self):
-        pass
+        try:
+            writer_for(self.path).flush_pending()
+        except Exception:
+            pass
 
     def isatty(self):
         return False
@@ -169,7 +209,19 @@ def install(base_dir=None, stdout_name: str = STDOUT_NAME, stderr_name: str = ST
         sys.stdout = LogStream(out_path)
         sys.stderr = LogStream(err_path)
         _installed = True
+        atexit.register(_flush_all)
     return out_path, err_path
+
+
+def _flush_all() -> None:
+    """Дописать недописанные строки при остановке сервиса."""
+    with _writers_lock:
+        writers = list(_writers.values())
+    for writer in writers:
+        try:
+            writer.flush_pending()
+        except Exception:
+            pass
 
 
 class BridgeHandler(logging.Handler):
