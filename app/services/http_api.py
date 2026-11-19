@@ -11,6 +11,7 @@ from pathlib import Path
 from app.services import logs as service_logs
 from app.services import audit
 from app.services import auth
+from app.services import instance as service_instance
 
 import anpr_telegram as M
 from fastapi import FastAPI, BackgroundTasks, HTTPException, Request
@@ -210,6 +211,12 @@ def run() -> None:
     """
     global _server
     import uvicorn
+    # Один экземпляр сервиса на машину: второй не должен портить базу
+    # и бороться за порт.
+    guard = service_instance.ServiceInstance()
+    if not guard.acquire():
+        print('[start] сервис уже запущен: второй экземпляр не нужен', file=sys.stderr)
+        raise SystemExit(2)
     # Токен управления создаётся при старте: файл с ним должен быть готов
     # до первого запроса остановки.
     _control_token()
@@ -219,7 +226,10 @@ def run() -> None:
                             log_config=service_logs.uvicorn_log_config(), access_log=False)
     server = uvicorn.Server(config)
     _server = server
-    server.run()
+    try:
+        server.run()
+    finally:
+        guard.release()
 
 
 if __name__ == "__main__":

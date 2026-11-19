@@ -12,6 +12,7 @@ from app.core.paths import PROJECT_ROOT, runtime_dir, env_file
 from app.core import safe_mode
 from app.services import audit
 from app.services import auth
+from app.services import process_info
 
 #: Корень проекта: журналы, pid-файл и лаунчер сервиса лежат в корне.
 BASE = PROJECT_ROOT
@@ -132,8 +133,27 @@ def stop(source: str = 'cli'):
             raise RuntimeError('Это другой экземпляр программы. Автоматическая остановка отменена.')
         target = result.get('pid')
         op['target_pid'] = target
+        # Совпадения порта недостаточно: процесс должен быть нашим сервисом.
+        _verify_service_process(target)
         stop_gracefully(target, source=source)
         store.unlink(missing_ok=True)
+
+
+def _verify_service_process(pid) -> None:
+    """Убедиться, что процесс с таким PID — наш сервис.
+
+    Чужой процесс (например, другая программа на том же порту) не
+    останавливается: это не наш сервис, даже если порт совпал.
+    """
+    if not pid:
+        raise RuntimeError('Сервис не сообщил свой PID: остановка отменена.')
+    if not process_info.pid_alive(pid):
+        raise RuntimeError('Процесс сервиса уже не работает: остановка отменена.')
+    if not process_info.looks_like_service(pid):
+        owner = process_info.port_owner_pid(PORT)
+        audit.control('service.stop', 'denied', source='cli', target_pid=pid,
+                      reason='процесс не похож на сервис ANPR', port_owner=owner)
+        raise RuntimeError('На этом порту работает не наша программа. Остановка отменена.')
 
 
 def server_capabilities() -> dict:
@@ -191,6 +211,11 @@ def stop_gracefully(pid, source: str = 'cli') -> None:
         except requests.ConnectionError:
             return  # сервис остановился и порт освободил
         time.sleep(0.2)
+    # Порт не освободился: жёсткое завершение — но только своего процесса.
+    if not process_info.looks_like_service(pid):
+        audit.control('service.shutdown.force', 'denied', source=source, target_pid=pid,
+                      reason='процесс не распознан как сервис ANPR')
+        raise RuntimeError('Сервис не отвечает и не распознан как наш: остановка отменена.')
     subprocess.run(['taskkill', '/PID', str(pid), '/F'], check=True, capture_output=True,
                    creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0)
 

@@ -342,9 +342,36 @@ class GracefulShutdownTests(unittest.TestCase):
              patch.object(service_control.requests, 'Session', return_value=FakeSession()), \
              patch.object(service_control, 'health', return_value={'pid': 4242}), \
              patch.object(service_control, 'STOP_TIMEOUT', 0.1), \
+             patch.object(service_control.process_info, 'looks_like_service', return_value=True), \
              patch.object(service_control.subprocess, 'run') as kill:
             service_control.stop_gracefully(4242)
         kill.assert_called_once()
+
+    def test_force_kill_is_refused_for_a_foreign_process(self):
+        """Чужой процесс не завершаем, даже если он держит наш порт."""
+
+        class FakeResponse:
+            status_code = 200
+
+        class FakeSession:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+            def post(self, url, timeout=None, headers=None):
+                return FakeResponse()
+
+        with safe_mode.guards_suspended(), \
+             patch.object(service_control.requests, 'Session', return_value=FakeSession()), \
+             patch.object(service_control, 'health', return_value={'pid': 4242}), \
+             patch.object(service_control, 'STOP_TIMEOUT', 0.1), \
+             patch.object(service_control.process_info, 'looks_like_service', return_value=False), \
+             patch.object(service_control.subprocess, 'run') as kill:
+            with self.assertRaises(RuntimeError):
+                service_control.stop_gracefully(4242)
+        kill.assert_not_called()
 
     def test_stop_is_forbidden_in_safe_mode(self):
         """В безопасном режиме остановка сервиса невозможна в принципе."""

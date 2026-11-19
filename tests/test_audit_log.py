@@ -131,6 +131,8 @@ class ControlOperationTests(unittest.TestCase):
         try:
             with safe_mode.guards_suspended(), \
                  patch.object(service_control, 'health', return_value={'pid': 4242}), \
+                 patch.object(service_control.process_info, 'pid_alive', return_value=True), \
+                 patch.object(service_control.process_info, 'looks_like_service', return_value=True), \
                  patch.object(service_control, 'stop_gracefully') as graceful:
                 service_control.stop(source='panel')
         finally:
