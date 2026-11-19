@@ -10,6 +10,7 @@
 рабочих данных в него выполняется отдельной согласованной процедурой
 (см. `data/README.md`).
 """
+import os
 from pathlib import Path
 
 #: Корень проекта: app/core/paths.py → app/core → app → корень.
@@ -32,6 +33,27 @@ TESTS_DIR = PROJECT_ROOT / 'tests'
 
 #: Живой конфиг с секретами — остаётся в корне проекта.
 ENV_FILE = PROJECT_ROOT / '.env'
+
+
+def runtime_dir() -> Path:
+    """Каталог для изменяемых файлов сервиса: PID-файл, журналы запуска.
+
+    Обычно это корень проекта. В безопасном тестовом режиме
+    (`app.core.safe_mode`) каталог подменяется на временный — тест не
+    должен трогать боевые PID-файлы и журналы.
+    """
+    override = os.environ.get('ANPR_RUNTIME_DIR')
+    return Path(override) if override else PROJECT_ROOT
+
+
+def env_file() -> Path:
+    """Файл настроек `.env`.
+
+    В безопасном тестовом режиме указывает на пустую копию во временном
+    каталоге: боевые пароль камеры и токен бота в тестах недоступны.
+    """
+    override = os.environ.get('ANPR_ENV_FILE')
+    return Path(override) if override else ENV_FILE
 
 
 def project_path(*parts) -> Path:

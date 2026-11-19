@@ -25,6 +25,14 @@ class StoreTestCase(unittest.TestCase):
 
 
 class PassageStorageTests(StoreTestCase):
+    """Направление и полоса задаются явно: результат не зависит от `.env`."""
+
+    def setUp(self):
+        super().setUp()
+        direction_patch = patch.object(bot, 'DIRECTION', '')
+        direction_patch.start()
+        self.addCleanup(direction_patch.stop)
+
     def test_same_group_id_keeps_every_passage(self):
         """Прошивка переиспользует GroupID — каждый проезд должен попасть в БД."""
         event = {'EventBaseInfo.Code': 'TrafficJunction', 'GroupID': '1048576',
@@ -224,6 +232,12 @@ class KeyMigrationTests(unittest.TestCase):
 
 
 class RepeatedGroupIdTests(StoreTestCase):
+    def setUp(self):
+        super().setUp()
+        direction_patch = patch.object(bot, 'DIRECTION', '')
+        direction_patch.start()
+        self.addCleanup(direction_patch.stop)
+
     def test_reused_group_id_creates_a_second_row(self):
         """Повторный проезд с тем же GroupID — вторая строка, id без пропусков."""
         event = {'EventBaseInfo.Code': 'TrafficJunction', 'GroupID': '1048576',

@@ -12,13 +12,14 @@ from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from app.core import preferences
-from app.core.paths import PROJECT_ROOT
+from app.core import safe_mode
+from app.core.paths import PROJECT_ROOT, env_file
 from app.ui.tklife import cancel_pending_scripts
 import requests
 from requests.auth import HTTPDigestAuth
 
 BASE = PROJECT_ROOT
-ENV = BASE / '.env'
+ENV = env_file()
 ASSETS = BASE / 'assets'
 DIRECTIONS = {'Оба направления': '', 'Только въезд': 'Approach', 'Только выезд': 'Leave'}
 FIELDS = [
@@ -34,7 +35,8 @@ FIELDS = [
 ]
 
 
-def read_settings(path=ENV):
+def read_settings(path=None):
+    path = Path(path) if path is not None else env_file()
     result = {}
     if path.exists():
         for line in path.read_text(encoding='utf-8-sig').splitlines():
@@ -89,7 +91,8 @@ def validate(values):
     return result
 
 
-def save_settings(values, path=ENV):
+def save_settings(values, path=None):
+    path = Path(path) if path is not None else env_file()
     updates = validate(values)
     lines = path.read_text(encoding='utf-8-sig').splitlines() if path.exists() else []
     output = []
@@ -104,6 +107,8 @@ def save_settings(values, path=ENV):
 
 
 def check_camera(values):
+    if safe_mode.is_active():
+        return 'Проверка камеры отключена в безопасном тестовом режиме.'
     host, port = camera_settings(values)
     try:
         with requests.Session() as session:
@@ -122,6 +127,8 @@ def check_camera(values):
 
 
 def check_bot(values):
+    if safe_mode.is_active():
+        return 'Проверка Telegram отключена в безопасном тестовом режиме.'
     token = values.get('TELEGRAM_BOT_TOKEN', '')
     if not re.fullmatch(r'\d+:[A-Za-z0-9_-]+', token):
         return 'Введите токен бота от BotFather.'

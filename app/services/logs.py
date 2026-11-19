@@ -15,7 +15,7 @@ import sys
 import threading
 from pathlib import Path
 
-from app.core.paths import PROJECT_ROOT
+from app.core.paths import PROJECT_ROOT, runtime_dir
 
 DEFAULT_MAX_MB = 10          # размер одного файла журнала, МБ
 DEFAULT_BACKUPS = 3          # сколько старых копий хранить
@@ -162,7 +162,7 @@ def install(base_dir=None, stdout_name: str = STDOUT_NAME, stderr_name: str = ST
     Возвращает пару путей (stdout, stderr). Повторный вызов ничего не меняет.
     """
     global _installed
-    base = Path(base_dir or PROJECT_ROOT)
+    base = Path(base_dir) if base_dir else runtime_dir()
     out_path = base / stdout_name
     err_path = base / stderr_name
     if not _installed:
@@ -195,7 +195,7 @@ def uvicorn_log_config(base_dir=None, stdout_name: str = STDOUT_NAME,
     Access-журнал (строки на каждый опрос панели) оставлен на уровне WARNING:
     иначе файл растёт на сотни килобайт в час без единой полезной записи.
     """
-    base = Path(base_dir or PROJECT_ROOT)
+    base = Path(base_dir) if base_dir else runtime_dir()
     out_path = str(base / stdout_name)
     err_path = str(base / stderr_name)
     return {

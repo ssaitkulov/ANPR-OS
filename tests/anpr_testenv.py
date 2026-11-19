@@ -7,6 +7,11 @@
 Без этого ``python -m unittest discover`` мог бы изменить рабочие
 ``anpr.sqlite3`` / ``anpr_state.json`` или отправить сообщение подписчикам.
 
+Теперь изоляция не «своя» для тестов, а общая: безопасный тестовый режим
+включается в ``tests/__init__.py`` и в корневом ``conftest.py`` — до импорта
+модулей приложения. Здесь мы лишь подключаемся к нему и сохраняем прежний
+публичный интерфейс (см. ``app/core/safe_mode.py``).
+
 Пользоваться можно и как фикстура:
 
     class MyTest(anpr_testenv.IsolatedTestCase):
@@ -23,11 +28,18 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
+from app.core import safe_mode
+
+#: Безопасный тестовый режим: включается здесь, если пакет `tests` импортирован
+#: первым (обычный случай), и уже включён — если первым был `conftest.py`.
+safe_mode.activate(reason='tests.anpr_testenv')
+
 #: Корень проекта: рабочие файлы сервиса лежат в корне, а не рядом с тестами.
 BASE_DIR = Path(__file__).resolve().parents[1]
 
 #: Временный каталог тестового прогона — база, состояние, фото, подписчики.
-ISOLATION_DIR = Path(tempfile.mkdtemp(prefix='anpr-tests-'))
+#: Тот же каталог, что и у безопасного режима: пути не расходятся.
+ISOLATION_DIR = safe_mode.isolation_dir()
 atexit.register(shutil.rmtree, ISOLATION_DIR, True)
 
 #: Рабочие файлы сервиса — их прогон тестов не должен менять.

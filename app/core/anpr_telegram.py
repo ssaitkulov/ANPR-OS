@@ -39,10 +39,11 @@ from requests.auth import HTTPDigestAuth
 from app.storage.event_images import prepare_event_images
 from app.storage.database import Store, event_key, passage_key, normalize_plate
 from app.storage import database as storage_module
-from app.core.paths import PROJECT_ROOT, DATA_DIR, resolve_path
+from app.core.paths import PROJECT_ROOT, DATA_DIR, resolve_path, env_file
 from app.core.system_events import EVENTS
 from app.storage.passage_photos import PHOTOS
 from app.storage.photo_archive import save_photo, cleanup_old_photos
+from app.core import safe_mode
 
 # ---------------------------------------------------------------------------
 # Конфиг (переменные окружения / .env)
@@ -53,7 +54,13 @@ from app.storage.photo_archive import save_photo, cleanup_old_photos
 BASE_DIR = PROJECT_ROOT
 
 
-def load_env(path: Path = BASE_DIR / ".env") -> None:
+def load_env(path: Path | None = None) -> None:
+    """Загрузить настройки из `.env`.
+
+    Путь берётся из `env_file()`: в безопасном тестовом режиме это пустая
+    копия во временном каталоге, боевые секреты в тестах не читаются.
+    """
+    path = Path(path) if path is not None else env_file()
     if not path.exists():
         return
     for line in path.read_text(encoding="utf-8").splitlines():
@@ -662,6 +669,10 @@ def _allowed(chat_id: str) -> bool:
 def poll_telegram_updates(state: dict, stop_event=None) -> None:
     """Long-poll getUpdates: /start подписка, /stop отписка, /report отчёт дня."""
     if not TELEGRAM_BOT_TOKEN:
+        return
+    if safe_mode.is_active():
+        # Опрашивать Telegram в тестах нельзя: это обращение к боевому боту.
+        print('[telegram] опрос обновлений отключён (безопасный тестовый режим)', file=sys.stderr)
         return
     offset = 0
     while stop_event is None or not stop_event.is_set():
@@ -1775,6 +1786,7 @@ def subscribe_loop(state: dict, dry_run: bool = False, stop: threading.Event | N
     Один поток на весь сервис: добор архива, доставка очереди, дневной отчёт и
     обслуживание живут отдельными потоками и не пересоздаются при переподключении.
     """
+    safe_mode.guard('Подключение к камере Dahua')
     sess = requests.Session()
     sess.auth = HTTPDigestAuth(DAHUA_USERNAME, DAHUA_PASSWORD)
     url = f"http://{DAHUA_HOST}:{DAHUA_PORT}/cgi-bin/snapManager.cgi"

@@ -21,6 +21,7 @@ from app.ui.settings import read_settings
 import requests
 
 from app.core.paths import PROJECT_ROOT
+from app.core import safe_mode
 from app.ui.tklife import cancel_pending_scripts
 
 BASE = PROJECT_ROOT
@@ -774,6 +775,12 @@ class MonitoringSection:
         except ImportError:
             self.frames.put((self.stream_selection[0], 'error', 'Видеомодуль недоступен')); return
         host=self.settings.get('DAHUA_HOST', '')
+        if safe_mode.is_active() and host:
+            # Настроена настоящая камера: RTSP-подключение в тестах запрещено.
+            # (Пустой адрес — это заглушка в тестах, ей подключение не нужно.)
+            self.frames.put((self.stream_selection[0], 'error',
+                             'Видео отключено в безопасном тестовом режиме'))
+            return
         user=quote(self.settings.get('DAHUA_USERNAME', ''), safe=''); password=quote(self.settings.get('DAHUA_PASSWORD', ''), safe='')
         channel=self.settings.get('DAHUA_CHANNEL', '1')
         # Пауза показа видео не смешана с ручным отключением: поток просто

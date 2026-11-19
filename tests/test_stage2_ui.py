@@ -292,13 +292,17 @@ class ServiceControlTests(ShellTestCase):
         self.assertTrue(self.wait(lambda: self.shell.busy is False))
 
     def test_indicators_show_factual_data(self):
-        self.shell.update_status(HEALTH)
-        self.assertEqual(self.shell.header.service_chip.value.cget('text'), 'Работает')
-        self.assertEqual(self.shell.header.camera_chip.value.cget('text'), 'Подключена')
-        self.assertEqual(self.shell.header.telegram_chip.value.cget('text'), 'Работает')
-        self.shell.update_status(None)
-        self.assertEqual(self.shell.header.service_chip.value.cget('text'), 'Остановлен')
-        self.assertEqual(self.shell.header.camera_chip.value.cget('text'), 'Нет связи')
+        # Настройки Telegram задаются явно: индикатор не зависит от боевого `.env`.
+        configured = {'TELEGRAM_BOT_TOKEN': 'example', 'ALLOWED_CHAT_IDS': '42'}
+        self.shell._settings_cache = (0.0, {})   # кэш настроек сброшен
+        with patch('app.ui.settings.read_settings', return_value=configured):
+            self.shell.update_status(HEALTH)
+            self.assertEqual(self.shell.header.service_chip.value.cget('text'), 'Работает')
+            self.assertEqual(self.shell.header.camera_chip.value.cget('text'), 'Подключена')
+            self.assertEqual(self.shell.header.telegram_chip.value.cget('text'), 'Работает')
+            self.shell.update_status(None)
+            self.assertEqual(self.shell.header.service_chip.value.cget('text'), 'Остановлен')
+            self.assertEqual(self.shell.header.camera_chip.value.cget('text'), 'Нет связи')
 
     def test_details_panel_opens_and_closes(self):
         self.shell.update_status(HEALTH)

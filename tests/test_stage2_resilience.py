@@ -19,6 +19,7 @@ import requests
 
 import anpr_telegram as bot
 from app.services import control as service_control
+from app.core import safe_mode
 from app.services import logs as service_logs
 from app.storage import database as storage
 from app.storage.photo_archive import cleanup_old_photos
@@ -311,7 +312,9 @@ class GracefulShutdownTests(unittest.TestCase):
             def get(self, url, timeout=None):
                 raise requests.ConnectionError()
 
-        with patch.object(service_control.requests, 'Session', return_value=FakeSession()), \
+        # Сеть подменена целиком: проверяем код остановки, а не живой сервис.
+        with safe_mode.guards_suspended(), \
+             patch.object(service_control.requests, 'Session', return_value=FakeSession()), \
              patch.object(service_control, 'health', side_effect=requests.ConnectionError()), \
              patch.object(service_control.subprocess, 'run') as kill:
             service_control.stop_gracefully(4242)
@@ -329,12 +332,21 @@ class GracefulShutdownTests(unittest.TestCase):
             def post(self, url, timeout=None):
                 return object()
 
-        with patch.object(service_control.requests, 'Session', return_value=FakeSession()), \
+        with safe_mode.guards_suspended(), \
+             patch.object(service_control.requests, 'Session', return_value=FakeSession()), \
              patch.object(service_control, 'health', return_value={'pid': 4242}), \
              patch.object(service_control, 'STOP_TIMEOUT', 0.1), \
              patch.object(service_control.subprocess, 'run') as kill:
             service_control.stop_gracefully(4242)
         kill.assert_called_once()
+
+    def test_stop_is_forbidden_in_safe_mode(self):
+        """В безопасном режиме остановка сервиса невозможна в принципе."""
+        with patch.object(service_control, 'health', return_value={'pid': 4242}), \
+             patch.object(service_control.subprocess, 'run') as kill:
+            with self.assertRaises(safe_mode.SafeModeError):
+                service_control.stop()
+        kill.assert_not_called()
 
 
 if __name__ == '__main__':
