@@ -47,6 +47,7 @@ DEFAULT_SERVICE_PORT = 18749
 ENV_ISOLATION_DIR = 'ANPR_ISOLATION_DIR'
 ENV_ENV_FILE = 'ANPR_ENV_FILE'
 ENV_RUNTIME_DIR = 'ANPR_RUNTIME_DIR'
+ENV_LOG_DIR = 'ANPR_LOG_DIR'
 ENV_SERVICE_PORT = 'ANPR_SERVICE_PORT'
 
 
@@ -179,18 +180,24 @@ def _setup_isolation() -> None:
     runtime_dir.mkdir(parents=True, exist_ok=True)
     images = root / 'images'
     images.mkdir(parents=True, exist_ok=True)
+    logs = root / 'logs'
+    logs.mkdir(parents=True, exist_ok=True)
 
     overrides = {
         ENV_ISOLATION_DIR: root,
         ENV_ENV_FILE: env_file,
         ENV_RUNTIME_DIR: runtime_dir,
+        ENV_LOG_DIR: logs,
         # Пути, которые читает ядро сбора.
         'DB_FILE': root / 'anpr.sqlite3',
         'STATE_FILE': root / 'anpr_state.json',
         'IMAGE_DIR': images,
         'SUBSCRIBERS_FILE': root / 'subscribers.json',
-        # Путь PID-файла и журналов сервиса.
+        'UI_PREFERENCES_FILE': root / 'ui_preferences.json',
+        'UI_WINDOW_FILE': root / 'ui_window.json',
+        # Путь PID-файла, токена управления и журналов сервиса.
         'SERVICE_PID_FILE': runtime_dir / 'service.pid',
+        'SERVICE_TOKEN_FILE': runtime_dir / 'service.token',
         'ANPR_SERVICE_PORT': os.environ.get(ENV_SERVICE_PORT, str(DEFAULT_SERVICE_PORT)),
         # Секреты обнуляются: с ними нельзя ни отправить сообщение, ни войти.
         'TELEGRAM_BOT_TOKEN': '',

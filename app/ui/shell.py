@@ -36,7 +36,7 @@ from app.services import control as service
 from app.services import audit
 from app.core import preferences
 from app.core import window_state
-from app.core.paths import ASSETS_DIR
+from app.core.paths import ASSETS_DIR, log_dir
 from app.ui import status as ui_status
 from app.ui.header import SystemHeader
 from app.ui.tklife import cancel_pending_scripts
@@ -432,7 +432,7 @@ class AppShell:
     # ------------------------------------------------------------------
     def open_log(self):
         """Открыть системный журнал сервиса."""
-        subprocess.Popen(['notepad.exe', str(service.BASE / 'service.stderr.log')])
+        subprocess.Popen(['notepad.exe', str(log_dir() / 'service.stderr.log')])
 
     # ------------------------------------------------------------------
     # Окно, трей, выход

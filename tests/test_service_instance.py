@@ -128,15 +128,17 @@ class StopSafetyTests(unittest.TestCase):
             path.unlink(missing_ok=True)
 
     def test_pid_file_lives_beside_the_program_by_default(self):
-        """В рабочем режиме PID-файл — прежний `service.pid` в корне проекта."""
+        """В рабочем режиме PID-файл — `service.pid` в `data/runtime/`."""
         # Окружение восстанавливается целиком: иначе следующий тест писал бы
         # журналы в рабочий каталог.
         with patch.dict(os.environ, {}, clear=False):
             os.environ.pop('SERVICE_PID_FILE', None)
             os.environ.pop('ANPR_RUNTIME_DIR', None)
-            self.assertEqual(service_control.pid_file(), PROJECT_ROOT / 'service.pid')
+            self.assertEqual(service_control.pid_file(),
+                             PROJECT_ROOT / 'data' / 'runtime' / 'service.pid')
         self.assertIn('ANPR_RUNTIME_DIR', os.environ)
-        self.assertNotEqual(service_control.pid_file(), PROJECT_ROOT / 'service.pid')
+        self.assertNotEqual(service_control.pid_file(),
+                            PROJECT_ROOT / 'data' / 'runtime' / 'service.pid')
 
 
 if __name__ == '__main__':

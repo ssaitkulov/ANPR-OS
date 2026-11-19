@@ -167,7 +167,12 @@ class SavePhotosTests(anpr_testenv.IsolatedTestCase):
         self.assertEqual(len(files), 1)
         rows = self.store.conn.execute('SELECT captured_at, plate, path FROM passage_photo_paths').fetchall()
         self.assertEqual(len(rows), 1)
-        self.assertTrue(Path(rows[0][2]).exists())
+        # В базе — путь относительно каталога снимков: база не знает, где
+        # лежит проект, поэтому проект переносится целиком на другой диск.
+        self.assertFalse(Path(rows[0][2]).is_absolute())
+        resolved = bot.photo_file(rows[0][2])
+        self.assertIsNotNone(resolved)
+        self.assertTrue(resolved.exists())
 
     def test_nothing_is_written_when_the_flag_is_off(self):
         with patch.object(bot, 'SAVE_PHOTOS', False), patch.object(bot, 'send_entry_notification'):

@@ -20,6 +20,7 @@ from PIL import Image, ImageOps
 from app.ui.settings import read_settings
 import requests
 
+from app.core import paths as app_paths
 from app.core.paths import PROJECT_ROOT
 from app.core import safe_mode
 from app.ui.tklife import cancel_pending_scripts
@@ -95,7 +96,10 @@ def archived_photo(path, event_id):
             row = conn.execute('''SELECT p.path FROM events e
                                   JOIN passage_photo_paths p ON p.captured_at=e.captured_at AND p.plate=e.plate
                                   WHERE e.id=?''', (event_id,)).fetchone()
-        return Path(row[0]).read_bytes() if row and row[0] else None
+        if not row or not row[0]:
+            return None
+        photo = app_paths.resolve_photo_path(row[0])
+        return photo.read_bytes() if photo else None
     except (OSError, sqlite3.Error):
         return None
 
@@ -628,7 +632,7 @@ class MonitoringSection:
                     checked_at = {}
                     checked_generation = (generation, search_generation)
                 try:
-                    data = load_dashboard(BASE / 'anpr.sqlite3', start.isoformat(), end.isoformat(), query)
+                    data = load_dashboard(app_paths.db_file(), start.isoformat(), end.isoformat(), query)
                     try: self.results.get_nowait()
                     except queue.Empty: pass
                     self.results.put_nowait((generation, search_generation, (start, end), 'data', data))
@@ -642,7 +646,7 @@ class MonitoringSection:
                         if event_id in self.photo_bytes or now - checked_at.get(event_id, -100) < 5: continue
                         checked_at[event_id] = now
                         try:
-                            photo = archived_photo(BASE / 'anpr.sqlite3', event_id)
+                            photo = archived_photo(app_paths.db_file(), event_id)
                             if photo is None:
                                 response = session.get(f'http://127.0.0.1:18749/passages/{event_id}/photo', timeout=1)
                                 if response.ok and response.headers.get('Content-Type', '').startswith('image/'):

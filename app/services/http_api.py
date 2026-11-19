@@ -123,7 +123,8 @@ def passage_photo(event_id: int):
     identity = M.STORE.passage_identity(event_id)
     photo = M.PHOTOS.get(*identity) if identity else None
     if photo is None and identity:
-        path = M.STORE.get_photo_path(*identity)
+        stored = M.STORE.get_photo_path(*identity)
+        path = M.photo_file(stored) if stored else None
         if path:
             try:
                 photo = Path(path).read_bytes()

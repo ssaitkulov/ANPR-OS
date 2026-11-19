@@ -17,7 +17,7 @@ import threading
 from datetime import datetime
 from pathlib import Path
 
-from app.core.paths import PROJECT_ROOT, runtime_dir
+from app.core.paths import PROJECT_ROOT, log_dir
 
 DEFAULT_MAX_MB = 10          # размер одного файла журнала, МБ
 DEFAULT_BACKUPS = 3          # сколько старых копий хранить
@@ -199,12 +199,14 @@ _installed = False
 def install(base_dir=None, stdout_name: str = STDOUT_NAME, stderr_name: str = STDERR_NAME):
     """Перенаправить print() сервиса в журналы с ротацией.
 
-    Возвращает пару путей (stdout, stderr). Повторный вызов ничего не меняет.
+    Журналы лежат в `data/logs/`. Возвращает пару путей (stdout, stderr).
+    Повторный вызов ничего не меняет.
     """
     global _installed
-    base = Path(base_dir) if base_dir else runtime_dir()
+    base = Path(base_dir) if base_dir else log_dir()
     out_path = base / stdout_name
     err_path = base / stderr_name
+    base.mkdir(parents=True, exist_ok=True)
     if not _installed:
         sys.stdout = LogStream(out_path)
         sys.stderr = LogStream(err_path)
@@ -247,7 +249,7 @@ def uvicorn_log_config(base_dir=None, stdout_name: str = STDOUT_NAME,
     Access-журнал (строки на каждый опрос панели) оставлен на уровне WARNING:
     иначе файл растёт на сотни килобайт в час без единой полезной записи.
     """
-    base = Path(base_dir) if base_dir else runtime_dir()
+    base = Path(base_dir) if base_dir else log_dir()
     out_path = str(base / stdout_name)
     err_path = str(base / stderr_name)
     return {

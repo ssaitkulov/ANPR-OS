@@ -23,9 +23,11 @@ import sys
 from collections import Counter
 from pathlib import Path
 
-BASE_DIR = Path(__file__).resolve().parent.parent
-if str(BASE_DIR) not in sys.path:
-    sys.path.insert(0, str(BASE_DIR))
+SCRIPTS_DIR = Path(__file__).resolve().parent
+if str(SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS_DIR))
+
+from _bootstrap import PROJECT_ROOT  # noqa: E402  — корень проекта — из app.core.paths
 
 # Консоль Windows по умолчанию печатает в cp866/cp1251 — кириллица в отчёте
 # превратилась бы в «кракозябры». Как в acceptance_check.py и check_lock.py.
@@ -36,9 +38,11 @@ except Exception:
     pass
 
 from app.storage.database import Store, normalize_plate  # noqa: E402
+from app.core import paths as app_paths  # noqa: E402
 
-DEFAULT_STATE = BASE_DIR / 'anpr_state.json'
-DEFAULT_DB = BASE_DIR / 'anpr.sqlite3'
+#: Рабочие данные — в `data/` (см. `app/core/paths.py`).
+DEFAULT_STATE = app_paths.state_file()
+DEFAULT_DB = app_paths.db_file()
 
 # Поля, которые должны совпадать в обоих источниках.
 REPORTED_FIELDS = (

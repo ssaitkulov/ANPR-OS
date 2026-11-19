@@ -31,9 +31,16 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-BASE_DIR = Path(__file__).resolve().parent.parent
-DEFAULT_STATE = BASE_DIR / 'anpr_state.json'
-DEFAULT_DB = BASE_DIR / 'anpr.sqlite3'
+SCRIPTS_DIR = Path(__file__).resolve().parent
+if str(SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS_DIR))
+
+from _bootstrap import PROJECT_ROOT  # noqa: E402  — корень проекта — из app.core.paths
+from app.core import paths as app_paths  # noqa: E402  — единый источник путей
+
+#: Рабочие данные — в `data/` (см. `app/core/paths.py`).
+DEFAULT_STATE = app_paths.state_file()
+DEFAULT_DB = app_paths.db_file()
 SERVICE_URL = 'http://127.0.0.1:18749'
 
 try:  # консоль Windows по умолчанию не печатает кириллицу
@@ -90,7 +97,7 @@ def open_readonly(path: Path) -> sqlite3.Connection:
 
 def check_sources(report: Report, state_path: Path, db_path: Path) -> None:
     """JSON-зеркало ↔ SQLite: расхождений быть не должно."""
-    sys.path.insert(0, str(BASE_DIR / 'scripts'))
+    sys.path.insert(0, str(SCRIPTS_DIR))
     try:
         from verify_state import verify
     except Exception as error:  # pragma: no cover
@@ -190,7 +197,8 @@ def check_photo_archive(report: Report, conn: sqlite3.Connection, day: str, imag
                 archive_with_photo += 1
             continue
         live_total += 1
-        if path and Path(path).exists():
+        photo = app_paths.resolve_photo_path(path, image_dir) if path else None
+        if photo and photo.exists():
             live_with_photo += 1
         else:
             live_missing.append(f'{_captured} {_plate}')
@@ -212,7 +220,7 @@ def expected_recipients(env: dict) -> list:
     chat_ids = []
     if env.get('TELEGRAM_CHAT_ID'):
         chat_ids.append(str(env['TELEGRAM_CHAT_ID']))
-    subscribers_file = Path(env.get('SUBSCRIBERS_FILE') or (BASE_DIR / 'subscribers.json'))
+    subscribers_file = Path(env.get('SUBSCRIBERS_FILE') or app_paths.subscribers_file())
     if not subscribers_file.is_absolute():
         subscribers_file = BASE_DIR / subscribers_file
     subscribers = []
@@ -307,7 +315,7 @@ def main(argv=None) -> int:
     parser.add_argument('--day', default='', help='день проверки (ГГГГ-ММ-ДД), по умолчанию сегодня')
     parser.add_argument('--state', type=Path, default=DEFAULT_STATE)
     parser.add_argument('--db', type=Path, default=DEFAULT_DB)
-    parser.add_argument('--env', type=Path, default=BASE_DIR / '.env')
+    parser.add_argument('--env', type=Path, default=PROJECT_ROOT / '.env')
     parser.add_argument('--stale-minutes', type=int, default=30,
                         help='через сколько минут сообщение в очереди считается зависшим')
     parser.add_argument('--skip-service', action='store_true',
@@ -340,9 +348,9 @@ def main(argv=None) -> int:
         check_outbox(report, conn, args.stale_minutes)
         check_report(report, conn, state, day, datetime.now(tz),
                      env.get('REPORT_TIME') or '20:00', env)
-        image_dir = Path(env.get('IMAGE_DIR') or 'images')
+        image_dir = Path(env.get('IMAGE_DIR') or app_paths.photo_dir())
         if not image_dir.is_absolute():
-            image_dir = BASE_DIR / image_dir
+            image_dir = PROJECT_ROOT / image_dir
         check_photo_archive(report, conn, day, image_dir)
         check_recipients(report, conn, env, health)
     finally:

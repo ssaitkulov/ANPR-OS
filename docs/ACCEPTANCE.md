@@ -26,10 +26,10 @@ python scripts/acceptance_check.py --json     # отчёт для отчёта �
 | Согласованность зависимостей | `python scripts/check_lock.py` | версии в `requirements.txt`, `requirements-lock.txt` и `pyproject.toml` совпадают |
 | Тесты | `python -m unittest discover -v` | `OK`, без падений |
 | Сверка источников | `python scripts/verify_state.py` | `расхождений нет`, код 0 |
-| Резервная копия | копия `.env`, `anpr.sqlite3`, `anpr_state.json`, `subscribers.json` | копия вне рабочей папки (регламент — в [MAINTENANCE.md](MAINTENANCE.md)) |
-| Список получателей | `python -c "import json;print(json.load(open('subscribers.json',encoding='utf-8')))"` | все ожидаемые чаты на месте (основной чат + подписчики) |
+| Резервная копия | копия `.env`, `data/anpr.sqlite3`, `data/anpr_state.json`, `data/subscribers.json` | копия вне рабочей папки (регламент — в [MAINTENANCE.md](MAINTENANCE.md)) |
+| Список получателей | `python -c "import json;print(json.load(open('data/subscribers.json',encoding='utf-8')))"` | все ожидаемые чаты на месте (основной чат + подписчики) |
 
-Зафиксировать перед сутками: число подписчиков (`subscribers.json`),
+Зафиксировать перед сутками: число подписчиков (`data/subscribers.json`),
 идентификатор основного чата (`TELEGRAM_CHAT_ID`), свободное место на диске
 (фотоархив растёт на `IMAGE_RETENTION_DAYS` дней) и текущий `last_rec_no`
 (в `/status`).
@@ -45,13 +45,13 @@ python scripts/acceptance_check.py --json     # отчёт для отчёта �
 | Сервис жив | `curl http://127.0.0.1:18749/health` | `"status": "ok"`, `started_at` не менялся |
 | Камера на связи | `curl .../health` → `camera_message` | «подключено», `last_camera_data` обновляется |
 | Telegram доставляет | `curl .../health` → `telegram_message` | «последнее уведомление доставлено хотя бы в один разрешённый чат» |
-| Нет ошибок в журнале | `service.stderr.log` | нет строк `Traceback`, `ERROR`, `telegram_dead` |
+| Нет ошибок в журнале | `data/logs/service.stderr.log` | нет строк `Traceback`, `ERROR`, `telegram_dead` |
 | Очередь не растёт | `curl .../status` → `outbox.pending` | `pending = 0`, `dead = 0` |
 | База растёт | `SELECT COUNT(*) FROM events` | число проездов соответствует реальным проездам дня |
-| Фотоархив пишется | каталоги `images/ГГГГ-ММ-ДД/` в `IMAGE_DIR` | файлы `.jpg` появляются, старые каталоги удаляются через `IMAGE_RETENTION_DAYS` |
-| Журналы ротируются | `service.stderr.log`, `.1`, `.2`, `.3` | файлы не больше `LOG_MAX_MB`, копии созданы |
-| WAL не растёт | `anpr.sqlite3-wal` | размер стабилен (поток обслуживания делает `wal_checkpoint`) |
-| Состояние пишется | `anpr_state.json` | обновляется, `last_rec_no` растёт |
+| Фотоархив пишется | каталоги `data/photos/ГГГГ-ММ-ДД/` в `IMAGE_DIR` | файлы `.jpg` появляются, старые каталоги удаляются через `IMAGE_RETENTION_DAYS` |
+| Журналы ротируются | `data/logs/service.stderr.log`, `.1`, `.2`, `.3` | файлы не больше `LOG_MAX_MB`, копии созданы |
+| WAL не растёт | `data/anpr.sqlite3-wal` | размер стабилен (поток обслуживания делает `wal_checkpoint`) |
+| Состояние пишется | `data/anpr_state.json` | обновляется, `last_rec_no` растёт |
 
 ## 2. Сверка источников после суток
 
@@ -82,7 +82,7 @@ python scripts/acceptance_check.py    # та же проверка плюс ос
    ```
 
 2. **Дождаться 5–10 минут.** Ожидаемое поведение:
-   - в `service.stderr.log` — обрыв и переподключение камеры, без падения сервиса;
+   - в `data/logs/service.stderr.log` — обрыв и переподключение камеры, без падения сервиса;
    - `/health` → `camera_message` сообщает об обрыве, `status` остаётся `ok`;
    - очередь доставки продолжает развозиться (`pending` не растёт);
    - `/status` и `/entries/today` продолжают отдавать данные из базы.
@@ -157,7 +157,7 @@ Telegram сообщения копятся в очереди и уходят с�
 | Шаг | Действие | Ожидаемый результат |
 |---|---|---|
 | Время отправки | дождаться `REPORT_TIME` (20:00) | отчёт уходит всем получателям в течение минуты |
-| Отметка | `python -c "import json;print(json.load(open('anpr_state.json',encoding='utf-8'))['reported_days'])"` | сегодняшний день в списке |
+| Отметка | `python -c "import json;print(json.load(open('data/anpr_state.json',encoding='utf-8'))['reported_days'])"` | сегодняшний день в списке |
 | Без дублей | `POST /report-now` вручную после отчёта | отчёт отправляется повторно только по явной команде; в состоянии день не дублируется (`reported_days` без повторов) |
 | Догон за вчера | выключить сервис до 20:00, включить на следующий день | отчёт за пропущенный день уходит сам (catch-up) |
 | Содержимое | сообщение в Telegram | число въездов, число разных номеров, средняя скорость, список номеров и времени |
@@ -197,10 +197,10 @@ python scripts/acceptance_check.py --skip-service   # раздел «Фотоа�
 1. Снять список чатов до события:
 
    ```bash
-   python -c "import json,os;s=json.load(open('subscribers.json',encoding='utf-8'));print(len(s));print(sorted(map(str,s)))"
+   python -c "import json,os;s=json.load(open('data/subscribers.json',encoding='utf-8'));print(len(s));print(sorted(map(str,s)))"
    ```
 
-   Получатели = `TELEGRAM_CHAT_ID` + подписчики из `subscribers.json`,
+   Получатели = `TELEGRAM_CHAT_ID` + подписчики из `data/subscribers.json`,
    отфильтрованные `ALLOWED_CHAT_IDS`. Их должно быть столько же, сколько
    ожидается (например, 104, если подписчиков 104).
 

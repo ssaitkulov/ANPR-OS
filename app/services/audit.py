@@ -33,7 +33,7 @@ from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 
-from app.core.paths import runtime_dir
+from app.core.paths import log_dir
 
 #: Имена журналов и файлы, в которых они живут.
 JOURNALS = {
@@ -180,9 +180,9 @@ class JournalWriter:
 
 
 def journal_path(journal: str) -> Path:
-    """Путь к файлу журнала."""
+    """Путь к файлу журнала (`data/logs/`)."""
     name = JOURNALS.get(journal, journal)
-    return runtime_dir() / name
+    return log_dir() / name
 
 
 def writer_for(journal: str) -> JournalWriter:

@@ -11,10 +11,10 @@ import os
 import re
 from pathlib import Path
 
-from app.core.paths import PROJECT_ROOT
+from app.core.paths import ui_window_file
 
-#: Файл состояния окна — рядом с рабочими данными, в корне проекта.
-STATE_FILE = PROJECT_ROOT / 'ui_window.json'
+#: Файл состояния окна — рядом с рабочими данными, в `data/`.
+STATE_FILE = ui_window_file()
 
 #: Размер окна при первом запуске и минимальный допустимый размер.
 DEFAULT_SIZE = (1440, 900)
@@ -72,6 +72,7 @@ def load_state(path=None):
 def save_state(state, path=None):
     """Записать состояние окна атомарно (через временный файл)."""
     path = Path(path or STATE_FILE)
+    path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(path.name + '.tmp')
     try:
         temporary.write_text(json.dumps(state, ensure_ascii=False) + '\n', encoding='utf-8')

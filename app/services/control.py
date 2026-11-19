@@ -8,13 +8,13 @@ import sys
 import time
 import requests
 
-from app.core.paths import PROJECT_ROOT, runtime_dir, env_file
+from app.core.paths import PROJECT_ROOT, runtime_dir, log_dir, env_file
 from app.core import safe_mode
 from app.services import audit
 from app.services import auth
 from app.services import process_info
 
-#: Корень проекта: журналы, pid-файл и лаунчер сервиса лежат в корне.
+#: Корень проекта: лаунчер сервиса лежит в корне, рабочие файлы — в `data/`.
 BASE = PROJECT_ROOT
 PORT = 18749
 URL = f'http://127.0.0.1:{PORT}'
@@ -25,7 +25,7 @@ BOOT_LOG_MAX_BYTES = 1024 * 1024
 def pid_file() -> Path:
     """PID-файл сервиса.
 
-    Обычно — `service.pid` в корне проекта. В безопасном тестовом режиме
+    Обычно — `data/runtime/service.pid`. В безопасном тестовом режиме
     файл уводится во временный каталог: тест не должен трогать рабочий
     PID-файл (совместимость формата — одна строка с номером процесса).
     """
@@ -36,11 +36,11 @@ def pid_file() -> Path:
 
 
 def boot_log() -> Path:
-    """Журнал вывода процесса до старта журналов сервиса."""
+    """Журнал вывода процесса до старта журналов сервиса (`data/logs/`)."""
     override = os.environ.get('SERVICE_BOOT_LOG')
     if override:
         return Path(override)
-    return runtime_dir() / 'service.boot.log'
+    return log_dir() / 'service.boot.log'
 
 
 #: Прежние имена — для совместимости с прежним кодом и скриптами.
@@ -239,7 +239,7 @@ def _copy_boot_log_to_stderr():
     if not text.strip():
         return
     try:
-        with (runtime_dir() / 'service.stderr.log').open('a', encoding='utf-8') as out:
+        with (log_dir() / 'service.stderr.log').open('a', encoding='utf-8') as out:
             out.write(text)
             if not text.endswith('\n'):
                 out.write('\n')

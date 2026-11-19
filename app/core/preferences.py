@@ -6,12 +6,13 @@ import subprocess
 import sys
 import winreg
 
-from app.core.paths import PROJECT_ROOT
+from app.core.paths import PROJECT_ROOT, ui_preferences_file
 
 #: Корень проекта. Путь к панели в автозапуске Windows остаётся прежним:
 #: лаунчер `control_panel.py` лежит в корне.
 BASE = PROJECT_ROOT
-PREFERENCES = BASE / 'ui_preferences.json'
+#: Настройки панели — рядом с рабочими данными, в `data/`.
+PREFERENCES = ui_preferences_file()
 RUN_KEY = r'Software\Microsoft\Windows\CurrentVersion\Run'
 RUN_NAME = 'EvrikaANPR'
 
@@ -58,6 +59,8 @@ def get_minimize_to_tray(path=PREFERENCES):
 
 
 def set_minimize_to_tray(enabled, path=PREFERENCES):
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(path.name + '.tmp')
     temporary.write_text(json.dumps({'minimize_to_tray': bool(enabled)}, ensure_ascii=False) + '\n', encoding='utf-8')
     os.replace(temporary, path)

@@ -8,7 +8,7 @@
 
 * токен — 32 байта из `secrets.token_urlsafe(32)`; сравнение — только
   `hmac.compare_digest` (сравнение за постоянное время);
-* токен лежит в файле `service.token`, права доступа ограничены: на Windows
+* токен лежит в файле `data/runtime/service.token`, права доступа ограничены: на Windows
   через SDDL `D:P(A;;FA;;;OW)` — доступ имеет только владелец файла, то
   есть тот же локальный пользователь, от имени которого запущен сервис;
 * основание для доступа — сам секрет, а не localhost, Origin, Referer или
@@ -49,7 +49,7 @@ ERROR_FILE_EXISTS = 80
 
 
 def token_path() -> Path:
-    """Путь к файлу с токеном."""
+    """Путь к файлу с токеном (`data/runtime/service.token`)."""
     override = os.environ.get('SERVICE_TOKEN_FILE')
     if override:
         return Path(override)

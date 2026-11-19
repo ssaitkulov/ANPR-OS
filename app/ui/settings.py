@@ -13,6 +13,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from app.core import preferences
 from app.core import safe_mode
+from app.core import paths as app_paths
 from app.core.paths import PROJECT_ROOT, env_file
 from app.ui.tklife import cancel_pending_scripts
 import requests
@@ -22,6 +23,19 @@ BASE = PROJECT_ROOT
 ENV = env_file()
 ASSETS = BASE / 'assets'
 DIRECTIONS = {'Оба направления': '', 'Только въезд': 'Approach', 'Только выезд': 'Leave'}
+
+
+def default_photo_dir() -> str:
+    """Значение поля «Папка фотографий» по умолчанию.
+
+    Если каталог внутри проекта — относительный путь (`data/photos`):
+    так проект переносится на другой диск без правки настроек.
+    """
+    folder = app_paths.photo_dir()
+    try:
+        return folder.relative_to(app_paths.PROJECT_ROOT).as_posix()
+    except ValueError:
+        return str(folder)
 FIELDS = [
     ('CAMERA_NAME', 'Название камеры', 'Главные ворота'),
     ('CAMERA_URL', 'Адрес камеры', 'http://192.168.100.249/'),
@@ -31,7 +45,7 @@ FIELDS = [
     ('TELEGRAM_CHAT_ID', 'Чат для уведомлений (ID)', ''),
     ('ALLOWED_CHAT_IDS', 'Разрешённые чаты (ID через запятую)', ''),
     ('TIMEZONE', 'Часовой пояс', 'Asia/Tashkent'),
-    ('IMAGE_DIR', 'Папка фотографий', str(BASE / 'images')),
+    ('IMAGE_DIR', 'Папка фотографий', default_photo_dir()),
 ]
 
 
@@ -386,8 +400,10 @@ class SettingsSection:
         self.check_buttons.append(button)
 
     def choose_photo_folder(self):
+        current = self.variables['IMAGE_DIR'].get()
+        initial = app_paths.resolve_path(current, app_paths.PHOTO_DIR) if current else app_paths.PHOTO_DIR
         selected = filedialog.askdirectory(parent=self.root.winfo_toplevel(), title='Папка фотографий',
-                                           initialdir=self.variables['IMAGE_DIR'].get() or str(BASE))
+                                           initialdir=str(initial))
         if selected:
             self.variables['IMAGE_DIR'].set(selected)
 

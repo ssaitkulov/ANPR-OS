@@ -29,12 +29,13 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 from app.core import safe_mode
+from app.core import paths as app_paths
 
 #: Безопасный тестовый режим: включается здесь, если пакет `tests` импортирован
 #: первым (обычный случай), и уже включён — если первым был `conftest.py`.
 safe_mode.activate(reason='tests.anpr_testenv')
 
-#: Корень проекта: рабочие файлы сервиса лежат в корне, а не рядом с тестами.
+#: Корень проекта: рабочие файлы сервиса лежат в `data/`, а не рядом с тестами.
 BASE_DIR = Path(__file__).resolve().parents[1]
 
 #: Временный каталог тестового прогона — база, состояние, фото, подписчики.
@@ -43,10 +44,13 @@ ISOLATION_DIR = safe_mode.isolation_dir()
 atexit.register(shutil.rmtree, ISOLATION_DIR, True)
 
 #: Рабочие файлы сервиса — их прогон тестов не должен менять.
+#: Именно рабочие пути (без учёта изоляции), а не те, что подставил
+#: безопасный режим: иначе проверка «тест не тронул боевые данные»
+#: сравнивала бы файл сам с собой.
 WORKING_FILES = {
-    'db': BASE_DIR / 'anpr.sqlite3',
-    'state': BASE_DIR / 'anpr_state.json',
-    'subscribers': BASE_DIR / 'subscribers.json',
+    'db': app_paths.DB_FILE,
+    'state': app_paths.STATE_FILE,
+    'subscribers': app_paths.SUBSCRIBERS_FILE,
 }
 
 

@@ -26,7 +26,9 @@ import os
 import sqlite3
 import re
 import queue
+import shutil
 import sys
+import tempfile
 import threading
 import time
 from collections import defaultdict
@@ -39,7 +41,8 @@ from requests.auth import HTTPDigestAuth
 from app.storage.event_images import prepare_event_images
 from app.storage.database import Store, event_key, passage_key, normalize_plate
 from app.storage import database as storage_module
-from app.core.paths import PROJECT_ROOT, DATA_DIR, resolve_path, env_file
+from app.core import paths as app_paths
+from app.core.paths import PROJECT_ROOT, env_file
 from app.core.system_events import EVENTS
 from app.storage.passage_photos import PHOTOS
 from app.storage.photo_archive import save_photo, cleanup_old_photos
@@ -49,8 +52,7 @@ from app.core import safe_mode
 # Конфиг (переменные окружения / .env)
 # ---------------------------------------------------------------------------
 
-#: Корень проекта: рабочие файлы (база, зеркало состояния, фото, .env)
-#: лежат в корне, пока перенос в data/ не выполнен.
+#: Корень проекта: от него считаются все рабочие пути (см. `app/core/paths.py`).
 BASE_DIR = PROJECT_ROOT
 
 
@@ -99,11 +101,12 @@ REPORT_TIME = cfg("REPORT_TIME", "20:00")          # HH:MM
 TIMEZONE = cfg("TIMEZONE", "Europe/Moscow")
 TELEGRAM_BOT_TOKEN = cfg("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = cfg("TELEGRAM_CHAT_ID", "")
-# Относительный путь из .env считается от корня проекта, а не от текущей
-# директории: сервис запускают из разных мест.
-STATE_FILE = resolve_path(cfg("STATE_FILE", str(BASE_DIR / "anpr_state.json")))
-DB_FILE = resolve_path(cfg("DB_FILE", str(BASE_DIR / "anpr.sqlite3")))
-IMAGE_DIR = resolve_path(cfg("IMAGE_DIR", str(BASE_DIR / "images")))
+# Рабочие данные лежат в `data/` (см. `app/core/paths.py`). Относительный путь
+# из .env считается от корня проекта, а не от текущей директории: сервис
+# запускают из разных мест, и проект переносят целиком.
+STATE_FILE = app_paths.state_file()
+DB_FILE = app_paths.db_file()
+IMAGE_DIR = app_paths.photo_dir()
 SEND_EACH_ENTRY = cfg("TELEGRAM_SEND_EACH_ENTRY", "true").lower() in ("1", "true", "yes")
 # Снимки на диск: true — архивировать (мониторинг читает их с диска), false — не писать.
 SAVE_PHOTOS = cfg("SAVE_PHOTOS", "true").lower() in ("1", "true", "yes")
@@ -114,7 +117,7 @@ BACKFILL_LOOKBACK_MINUTES = int(cfg("BACKFILL_LOOKBACK_MINUTES", "180"))
 BACKFILL_MAX_MINUTES = int(cfg("BACKFILL_MAX_MINUTES", "1440"))
 BACKFILL_SEND_PHOTOS = cfg("BACKFILL_SEND_PHOTOS", "false").lower() in ("1", "true", "yes")
 BROADCAST_ENABLED = cfg("BROADCAST_ENABLED", "true").lower() in ("1", "true", "yes")
-SUBSCRIBERS_FILE = resolve_path(cfg("SUBSCRIBERS_FILE", str(BASE_DIR / "subscribers.json")))
+SUBSCRIBERS_FILE = app_paths.subscribers_file()
 ALLOWED_CHAT_IDS = cfg("ALLOWED_CHAT_IDS", "")  # пусто = доступ запрещён
 RECONNECT_DELAY = int(cfg("RECONNECT_DELAY", "10"))
 HEARTBEAT = cfg("HEARTBEAT", "5")
@@ -185,6 +188,56 @@ try:
     TZ = ZoneInfo(TIMEZONE)
 except Exception:  # pragma: no cover
     TZ = ZoneInfo("Europe/Moscow")
+
+
+# ---------------------------------------------------------------------------
+# Фотографии: путь в базе и путь на диске
+# ---------------------------------------------------------------------------
+
+def photo_file(value) -> Path | None:
+    """Абсолютный путь к файлу фотографии по значению из базы.
+
+    В базе путь хранится относительно каталога снимков (`2026-11-17/...`):
+    база не знает, где лежит проект, — поэтому проект переносится целиком.
+    """
+    return app_paths.resolve_photo_path(value, IMAGE_DIR)
+
+
+def store_photo_path(value) -> str:
+    """Значение для базы: путь фотографии относительно каталога снимков."""
+    return app_paths.relative_photo_path(value, IMAGE_DIR)
+
+
+# ---------------------------------------------------------------------------
+# Защита от «тихой» потери данных
+# ---------------------------------------------------------------------------
+
+def guard_legacy_data() -> None:
+    """Не дать создать пустую базу, пока рабочие данные лежат в корне.
+
+    Если база ещё в корне проекта, а путь указывает в `data/`, приложение
+    не должно молча создать рядом пустую базу: запрошенные данные выглядели
+    бы как потерянные. Понятная ошибка с указанием команды переноса.
+    """
+    if safe_mode.is_active():
+        return
+    legacy = app_paths.legacy_data()
+    legacy_db = legacy.get('db')
+    if not legacy_db:
+        return
+    if DB_FILE == legacy_db:
+        return  # настройки указывают на прежнее место — база на месте
+    if DB_FILE.exists():
+        return  # база уже перенесена — старый файл просто остался
+    names = ', '.join(sorted(legacy))
+    raise RuntimeError(
+        'Рабочие данные найдены в корне проекта (' + names + '), '
+        f'а рабочая база — {DB_FILE}. Перенесите данные командой: '
+        'python scripts/migrate_data.py --migrate'
+    )
+
+
+guard_legacy_data()
 
 
 # ---------------------------------------------------------------------------
@@ -1333,14 +1386,17 @@ def collect_backfill_photos(records: list) -> dict:
         if not iso or not plate or (iso, plate) in photos:
             continue
         try:
-            path = STORE.find_photo_path(iso, plate)
+            stored = STORE.find_photo_path(iso, plate)
         except sqlite3.Error as error:
             print(f'[backfill] фотоархив недоступен: {error}', file=sys.stderr)
             continue
-        if not path:
+        if not stored:
+            continue
+        path = photo_file(stored)
+        if path is None:
             continue
         try:
-            data = Path(path).read_bytes()
+            data = path.read_bytes()
         except OSError:
             continue
         if data:
@@ -1546,7 +1602,9 @@ def flush_pending_events(state: dict, events: dict, images: list, dry_run: bool 
                         folder = IMAGE_DIR if IMAGE_DIR.is_absolute() else BASE_DIR / IMAGE_DIR
                         path = save_photo(folder, rec.get('iso'), rec.get('plate'), prepared[0])
                         if path:
-                            STORE.set_photo_path(rec['iso'], rec['plate'], path)
+                            # В базе — путь относительно каталога снимков:
+                            # база не знает, где лежит проект.
+                            STORE.set_photo_path(rec['iso'], rec['plate'], store_photo_path(path))
                     except (OSError, ValueError, sqlite3.Error) as error:
                         print(f'[photo] Не удалось сохранить снимок: {error}', file=sys.stderr)
                 else:
@@ -1879,11 +1937,11 @@ def run_parser_test() -> int:
     st = {"days": {}, "seen": [], "last_report_date": ""}
     old_state_file = globals()["STATE_FILE"]
     old_store = globals()["STORE"]
-    # Служебные файлы офлайн-проверки парсера — в data/, корень проекта
-    # не засоряется. Рабочие данные сюда не относятся и не затрагиваются.
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-    test_db = DATA_DIR / "_parser_test.sqlite3"
-    globals()["STATE_FILE"] = DATA_DIR / "_parser_test_state.json"
+    # Служебные файлы офлайн-проверки парсера — во временном каталоге:
+    # рабочие данные и каталог `data/` не засоряются.
+    temp_dir = Path(tempfile.mkdtemp(prefix='anpr-parser-test-'))
+    test_db = temp_dir / "parser_test.sqlite3"
+    globals()["STATE_FILE"] = temp_dir / "parser_test_state.json"
     globals()["STORE"] = Store(test_db)
     try:
         rec = record_event(st, ev, jpeg)
@@ -1893,12 +1951,7 @@ def run_parser_test() -> int:
         globals()["STORE"].close()
         globals()["STORE"] = old_store
         globals()["STATE_FILE"] = old_state_file
-        for tmp in (DATA_DIR / "_parser_test_state.json", test_db,
-                    test_db.with_name(test_db.name + "-wal"), test_db.with_name(test_db.name + "-shm")):
-            try:
-                tmp.unlink()
-            except OSError:
-                pass
+        shutil.rmtree(temp_dir, ignore_errors=True)
     print(build_entry_caption(rec))
     print("---")
     print(build_report(st))
