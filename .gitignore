@@ -1,6 +1,7 @@
 # --- Секреты и локальное состояние ---
 .env
 .env.tmp
+service.token
 anpr_state.json
 anpr_state.tmp
 subscribers.json
