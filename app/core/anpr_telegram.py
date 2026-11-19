@@ -146,10 +146,26 @@ storage_module.RETRY_MAX_DELAY = float(OUTBOX_RETRY_MAX_SECONDS)
 # Широковещательная запись очереди: получателей станет известно позже.
 BROADCAST_CHAT = ''
 BACKFILL_INTERVAL = max(15, int(cfg('BACKFILL_INTERVAL', '60')))  # сек между доборами архива
+
+#: Сколько символов оставлять в тексте сетевой ошибки.
+SHORT_ERROR_LEN = 120
+
+#: Сколько секунд без успешного обращения к Telegram считать обрывом связи.
+#: Долгий опрос обновлений отвечает раз в ~30 с, поэтому тремя пропусками
+#: подряд молчания считать уже обрывом связи.
+CONNECTION_STALE_SEC = 90
+
 RUNTIME = {'camera_message': 'подключаюсь…', 'telegram_message': 'ожидаю первую отправку.',
            'last_camera_data': '',
            # Счётчики последней рассылки: их читает приёмочная проверка.
-           'telegram_delivery': {'ok': False, 'delivered': 0, 'failed': 0, 'at': ''}}
+           'telegram_delivery': {'ok': False, 'delivered': 0, 'failed': 0, 'at': ''},
+           # Связь с Telegram — отдельно от доставки: успешная отправка не
+           # доказывает, что Telegram доступен сейчас.
+           #   ok       — признак связи по последнему обращению;
+           #   at       — время последнего УСПЕШНОГО обращения к API;
+           #   failed_at— время последнего неудачного обращения;
+           #   error    — текст последней сетевой ошибки.
+           'telegram_connection': {'ok': False, 'at': '', 'failed_at': '', 'error': ''}}
 
 
 class LazyStore:
@@ -318,6 +334,81 @@ def _tg_base() -> str:
     return f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
 
 
+def _short_error(error: BaseException) -> str:
+    """Короткое описание сетевой ошибки — для журнала и панели.
+
+    urllib3 описывает весь пул целиком («HTTPSConnectionPool(host=…, port=…):
+    Max retries exceeded with url: /bot<ТОКЕН>/…»), а в панели это не
+    помещается. Заодно убираем токен бота: он попадает в текст ошибки
+    вместе с адресом запроса, а токен — секрет.
+    """
+    text = str(error).strip()
+    token = str(TELEGRAM_BOT_TOKEN or '')
+    if token:
+        text = text.replace(token, '***')
+    if 'Caused by' in text:
+        text = text.rpartition('Caused by')[2].strip()
+    text = text.strip(' )\'"')
+    if len(text) > SHORT_ERROR_LEN:
+        text = text[:SHORT_ERROR_LEN] + '…'
+    return text
+
+
+def _note_telegram_contact(ok: bool, error: str = '', keep_state: bool = False) -> None:
+    """Запомнить состояние связи с Telegram.
+
+    Связь и доставка — разные вещи: сообщение могло уйти час назад, а
+    Telegram сейчас недоступен. Поэтому здесь только факт обращения к API.
+
+    `keep_state=True` — обновить текст ошибки, не трогая признак связи:
+    так работает долгий опрос обновлений, где «ответ не успел прийти»
+    ещё не значит «Telegram недоступен». Обрывом считается только молчание
+    дольше CONNECTION_STALE_SEC: одна неудачная попытка связи не роняет
+    индикатор, молчание Telegram — роняет.
+    """
+    state = RUNTIME['telegram_connection']
+    now = now_local()
+    if keep_state:
+        state['error'] = _short_error(error)
+        state['failed_at'] = now.isoformat()
+        last_ok = str(state.get('at') or '')
+        age = None
+        if last_ok:
+            try:
+                age = (now - datetime.fromisoformat(last_ok)).total_seconds()
+            except (TypeError, ValueError):
+                age = None
+        if not state.get('ok') or age is None or age > CONNECTION_STALE_SEC:
+            state['ok'] = False
+        return
+    RUNTIME['telegram_connection'] = {
+        'ok': bool(ok),
+        'at': now.isoformat() if ok else state.get('at', ''),
+        'failed_at': '' if ok else now.isoformat(),
+        'error': '' if ok else _short_error(error),
+    }
+
+
+def _telegram_call(kind: str, url: str, *, affects_connection: bool = True, **kwargs):
+    """Обращение к Telegram API с учётом состояния связи.
+
+    Ответ сервера — связь есть (что с сообщением, покажет доставка);
+    сетевая ошибка — связи нет.
+
+    `affects_connection=False` — для долгого опроса обновлений: его
+    таймаут означает лишь «ответ не успел прийти», обрыв связи покажут
+    отправки и другие обращения к API.
+    """
+    request = getattr(requests, kind)
+    try:
+        response = request(url, **kwargs)
+    except Exception as error:
+        _note_telegram_contact(False, error, keep_state=not affects_connection)
+        raise
+    _note_telegram_contact(True)
+    return response
+
+
 # Недоставленный хвост последней отправки по чатам: доставленное не повторяем.
 _LAST_TAIL: dict = {}
 # Итог последней рассылки: кому доставлено, кому ушло в очередь.
@@ -369,14 +460,14 @@ def _set_delivery(delivered: list, failed: list) -> None:
 def _telegram_post_message(chat_id: str, text: str) -> bool:
     """Один вызов sendMessage (текст не длиннее 4000 символов)."""
     try:
-        r = requests.post(f"{_tg_base()}/sendMessage",
-                          json={"chat_id": chat_id, "text": text,
-                                "parse_mode": "HTML", "disable_web_page_preview": True},
-                          timeout=30)
+        r = _telegram_call('post', f"{_tg_base()}/sendMessage",
+                           json={"chat_id": chat_id, "text": text,
+                                 "parse_mode": "HTML", "disable_web_page_preview": True},
+                           timeout=30)
         r.raise_for_status()
         return True
     except Exception as e:  # pragma: no cover
-        print(f"[telegram] {chat_id}: {e}", file=sys.stderr)
+        print(f"[telegram] {chat_id}: {_short_error(e)}", file=sys.stderr)
         return False
 
 
@@ -571,11 +662,11 @@ def telegram_send_media_group_to(chat_id: str, items: list) -> bool:
             files.append((str(idx), (f"{idx}.jpg", io.BytesIO(img), "image/jpeg")))
             first = {"caption": cap[:1024], "parse_mode": "HTML"} if idx == 0 else {}
             data.append({"type": "photo", "media": f"attach://{idx}", **first})
-        r = requests.post(f"{_tg_base()}/sendMediaGroup",
-                          data={"chat_id": chat_id, "media": json.dumps(data)}, files=files, timeout=60)
+        r = _telegram_call('post', f"{_tg_base()}/sendMediaGroup",
+                           data={"chat_id": chat_id, "media": json.dumps(data)}, files=files, timeout=60)
         return r.status_code == 200
     except Exception as e:  # pragma: no cover
-        print(f"[telegram] mediaGroup {chat_id}: {e}", file=sys.stderr)
+        print(f"[telegram] mediaGroup {chat_id}: {_short_error(e)}", file=sys.stderr)
         return False
 
 
@@ -659,19 +750,19 @@ def telegram_send_photo_to(chat_id: str, image_bytes: bytes | None, caption: str
     """Одно фото (или текст, если снимка нет) в конкретный чат."""
     try:
         if image_bytes:
-            r = requests.post(
-                f"{_tg_base()}/sendPhoto",
+            r = _telegram_call(
+                'post', f"{_tg_base()}/sendPhoto",
                 data={"chat_id": chat_id, "caption": caption[:1024], "parse_mode": "HTML"},
                 files={"photo": ("event.jpg", io.BytesIO(image_bytes), "image/jpeg")},
                 timeout=30)
         else:
-            r = requests.post(
-                f"{_tg_base()}/sendMessage",
+            r = _telegram_call(
+                'post', f"{_tg_base()}/sendMessage",
                 json={"chat_id": chat_id, "text": caption, "parse_mode": "HTML",
                       "disable_web_page_preview": True}, timeout=30)
         return r.status_code == 200
     except Exception as e:  # pragma: no cover
-        print(f"[telegram] фото {chat_id}: {e}", file=sys.stderr)
+        print(f"[telegram] фото {chat_id}: {_short_error(e)}", file=sys.stderr)
         return False
 
 
@@ -763,8 +854,9 @@ def poll_telegram_updates(state: dict, stop_event=None) -> None:
     offset = 0
     while stop_event is None or not stop_event.is_set():
         try:
-            r = requests.get(f"{_tg_base()}/getUpdates",
-                             params={"timeout": 30, "offset": offset}, timeout=40)
+            r = _telegram_call('get', f"{_tg_base()}/getUpdates",
+                               params={"timeout": 30, "offset": offset}, timeout=40,
+                               affects_connection=False)
             for upd in r.json().get("result", []):
                 offset = upd["update_id"] + 1
                 msg = upd.get("message") or {}
@@ -786,7 +878,7 @@ def poll_telegram_updates(state: dict, stop_event=None) -> None:
                 elif cmd.startswith("/"):
                     telegram_send_to(chat_id, "Я понимаю три команды:\n/start — включить уведомления\n/stop — выключить уведомления\n/report — получить отчёт за сегодня")
         except Exception as e:  # pragma: no cover
-            print(f"[telegram] getUpdates: {e}", file=sys.stderr)
+            print(f"[telegram] getUpdates: {_short_error(e)}", file=sys.stderr)
             if stop_event is not None:
                 stop_event.wait(5)
             else:
@@ -1610,7 +1702,7 @@ def check_connection() -> dict:
     r.raise_for_status()
     out["device"] = r.text.strip()
     if TELEGRAM_BOT_TOKEN:
-        r = requests.get(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getMe", timeout=10)
+        r = _telegram_call('get', f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getMe", timeout=10)
         out["telegram_bot"] = r.json().get("result", {}).get("username", "?") if r.ok else f"HTTP {r.status_code}"
     telegram_send("✅ ANPR бот подключён. Проверка: " + out.get("device", ""))
     return out

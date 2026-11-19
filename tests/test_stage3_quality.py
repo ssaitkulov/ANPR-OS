@@ -280,6 +280,103 @@ class DeliveryCounterTests(anpr_testenv.IsolatedTestCase):
         self.assertEqual(bot.RUNTIME['telegram_message'], 'ожидаю первую отправку.')
 
 
+class TelegramConnectionTests(anpr_testenv.IsolatedTestCase):
+    """Связь с Telegram — отдельный диагноз от доставки.
+
+    Успешная отправка не доказывает, что Telegram доступен сейчас: сеть
+    может лечь в любой момент. Поэтому связь отслеживается по факту
+    обращения к API, а доставка считается отдельно.
+    """
+
+    def setUp(self):
+        super().setUp()
+        bot.RUNTIME['telegram_connection'] = {'ok': False, 'at': '', 'failed_at': '', 'error': ''}
+        bot.RUNTIME['telegram_delivery'] = {'ok': False, 'delivered': 0, 'failed': 0, 'at': ''}
+        bot.RUNTIME['telegram_message'] = 'ожидаю первую отправку.'
+
+    def test_successful_call_marks_the_connection_alive(self):
+        """Ответ Telegram API — связь есть."""
+        with patch.object(bot.requests, 'post', return_value=type('R', (), {
+                'raise_for_status': lambda self: None, 'status_code': 200})()):
+            self.assertTrue(bot.telegram_send_to('42', 'привет'))
+        connection = bot.RUNTIME['telegram_connection']
+        self.assertTrue(connection['ok'])
+        self.assertTrue(connection['at'])
+        self.assertEqual(connection['error'], '')
+
+    def test_network_error_marks_the_connection_lost(self):
+        """Сетевая ошибка — связи нет, даже если счётчики доставки удали."""
+        bot.RUNTIME['telegram_delivery'] = {'ok': True, 'delivered': 3, 'failed': 0, 'at': 'x'}
+        with patch.object(bot.requests, 'post', side_effect=requests.ConnectionError('сеть недоступна')):
+            self.assertFalse(bot.telegram_send_to('42', 'привет'))
+        connection = bot.RUNTIME['telegram_connection']
+        self.assertFalse(connection['ok'])
+        self.assertTrue(connection['failed_at'])
+        self.assertIn('сеть недоступна', connection['error'])
+        # Счётчики доставки — про доставку, их сеть не меняет.
+        self.assertEqual(bot.RUNTIME['telegram_delivery']['delivered'], 3)
+
+    def test_long_poll_failure_keeps_the_previous_state(self):
+        """Таймаут долгого опроса — это «не дождались ответа», а не обрыв связи.
+
+        Иначе одна медленная сеть мигала бы индикатором впустую.
+        """
+        bot._note_telegram_contact(True)
+        with patch.object(bot.requests, 'get', side_effect=requests.ReadTimeout('read timeout=40')):
+            with self.assertRaises(requests.ReadTimeout):
+                bot._telegram_call('get', 'https://api.telegram.org/botX/getUpdates',
+                                   affects_connection=False, timeout=1)
+        connection = bot.RUNTIME['telegram_connection']
+        self.assertTrue(connection['ok'])
+        self.assertIn('read timeout', connection['error'])
+
+    def test_long_poll_silence_breaks_the_connection(self):
+        """Telegram молчит дольше CONNECTION_STALE_SEC — связь считается потерянной.
+
+        Иначе при отсутствии проездов обрыв связи не был бы виден вовсе.
+        """
+        bot._note_telegram_contact(True)
+        with patch.object(bot.requests, 'get', side_effect=requests.ReadTimeout('read timeout=40')):
+            with self.assertRaises(requests.ReadTimeout):
+                bot._telegram_call('get', 'https://api.telegram.org/botX/getUpdates',
+                                   affects_connection=False, timeout=1)
+        self.assertTrue(bot.RUNTIME['telegram_connection']['ok'])
+        state = bot.RUNTIME['telegram_connection']
+        state['at'] = (datetime.now(bot.TZ) - timedelta(seconds=bot.CONNECTION_STALE_SEC + 10)).isoformat()
+        with patch.object(bot.requests, 'get', side_effect=requests.ReadTimeout('read timeout=40')):
+            with self.assertRaises(requests.ReadTimeout):
+                bot._telegram_call('get', 'https://api.telegram.org/botX/getUpdates',
+                                   affects_connection=False, timeout=1)
+        self.assertFalse(bot.RUNTIME['telegram_connection']['ok'])
+
+    def test_error_text_hides_the_bot_token(self):
+        """Токен бота не должен попадать в текст ошибки: он есть в адресе запроса."""
+        with patch.object(bot, 'TELEGRAM_BOT_TOKEN', '123:SECRET-TOKEN'):
+            text = bot._short_error(Exception(
+                "HTTPSConnectionPool(host='api.telegram.org', port=443): Max retries exceeded "
+                "with url: /bot123:SECRET-TOKEN/getUpdates"))
+        self.assertNotIn('SECRET-TOKEN', text)
+        self.assertIn('***', text)
+
+    def test_delivery_success_does_not_imply_connection(self):
+        """Отправка, обходящая API, не подтверждает связь."""
+        with patch.object(bot, 'TELEGRAM_BOT_TOKEN', '123:token'), \
+             patch.object(bot, 'ALLOWED_CHAT_IDS', '42'), \
+             patch.object(bot, 'get_recipients', return_value=['42']), \
+             patch.object(bot, 'telegram_send_to', return_value=True):
+            self.assertTrue(bot.telegram_send('проверка доставки', kind='backfill'))
+        self.assertTrue(bot.RUNTIME['telegram_delivery']['ok'])
+        self.assertFalse(bot.RUNTIME['telegram_connection']['at'])
+
+    def test_connection_and_delivery_do_not_bleed_into_each_other(self):
+        """Обрыв связи не должен превращаться в «ошибку доставки»."""
+        with patch.object(bot.requests, 'post', side_effect=requests.ConnectionError('сеть недоступна')):
+            bot._telegram_post_message('42', 'привет')
+        self.assertFalse(bot.RUNTIME['telegram_connection']['ok'])
+        self.assertEqual(bot.RUNTIME['telegram_delivery'],
+                         {'ok': False, 'delivered': 0, 'failed': 0, 'at': ''})
+
+
 class ConcurrentBackfillTests(anpr_testenv.IsolatedTestCase):
     """Два добора архива одновременно не должны мешать друг другу."""
 

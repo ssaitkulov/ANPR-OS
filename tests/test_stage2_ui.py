@@ -33,6 +33,8 @@ HEALTH = {
     'telegram_message': 'последнее уведомление доставлено хотя бы в один разрешённый чат.',
     'last_camera_data': '18.11.2026 13:00:00',
     'telegram_delivery': {'ok': True, 'delivered': 2, 'failed': 0, 'at': '2026-11-18T13:04:05+05:00'},
+    'telegram_connection': {'ok': True, 'at': '2026-11-18T13:04:06+05:00',
+                            'failed_at': '', 'error': ''},
 }
 
 EMPTY_DASHBOARD = {'total': 0, 'unique': 0, 'hours': [0] * 24,
@@ -106,12 +108,48 @@ class StatusModelTests(unittest.TestCase):
         self.assertEqual(ui_status.telegram_view(failed, running=True)['code'],
                          ui_status.TELEGRAM_DELIVERY_ERROR)
         waiting = dict(HEALTH, telegram_delivery={'ok': False, 'delivered': 0, 'failed': 0, 'at': ''})
-        self.assertEqual(ui_status.telegram_view(waiting, running=True)['code'],
-                         ui_status.TELEGRAM_NO_CONNECTION)
+        # Связь жива — значит «Нет соединения» показывать нельзя, даже если
+        # отправок ещё не было: это отдельные диагнозы.
+        self.assertEqual(ui_status.telegram_view(waiting, running=True)['code'], ui_status.TELEGRAM_OK)
         self.assertEqual(ui_status.telegram_view(HEALTH, running=False)['code'],
                          ui_status.TELEGRAM_NO_CONNECTION)
         self.assertEqual(ui_status.telegram_view(HEALTH, running=True, configured=False)['code'],
                          ui_status.TELEGRAM_NOT_CONFIGURED)
+
+    def test_telegram_connection_and_delivery_are_separate_diagnostics(self):
+        """Связь и доставка — два статуса: успешная отправка не значит, что
+        Telegram доступен сейчас, и наоборот."""
+        alive = dict(HEALTH, telegram_connection={'ok': True, 'at': '2026-11-18T13:04:06+05:00',
+                                                   'failed_at': '', 'error': ''})
+        self.assertEqual(ui_status.telegram_connection_view(alive, running=True)['code'],
+                         ui_status.TELEGRAM_CONNECTED)
+        self.assertEqual(ui_status.telegram_delivery_view(alive)['code'],
+                         ui_status.TELEGRAM_DELIVERY_OK)
+
+        # Связь пропала, но последняя доставка была успешной.
+        lost = dict(HEALTH, telegram_connection={'ok': False, 'at': '2026-11-18T13:04:06+05:00',
+                                                 'failed_at': '2026-11-18T13:09:07+05:00',
+                                                 'error': 'Connection refused'})
+        self.assertEqual(ui_status.telegram_connection_view(lost, running=True)['code'],
+                         ui_status.TELEGRAM_CONNECTION_LOST)
+        self.assertEqual(ui_status.telegram_delivery_view(lost)['code'],
+                         ui_status.TELEGRAM_DELIVERY_OK)
+        self.assertEqual(ui_status.telegram_view(lost, running=True)['code'],
+                         ui_status.TELEGRAM_NO_CONNECTION)
+
+        # Связь жива, но доставка сорвалась.
+        broken = dict(HEALTH, telegram_delivery={'ok': False, 'delivered': 0, 'failed': 1, 'at': 'x'})
+        self.assertEqual(ui_status.telegram_connection_view(broken, running=True)['code'],
+                         ui_status.TELEGRAM_CONNECTED)
+        self.assertEqual(ui_status.telegram_delivery_view(broken)['code'],
+                         ui_status.TELEGRAM_DELIVERY_FAILED)
+
+        # Обращений к Telegram ещё не было — состояние неизвестно, а не «нет связи».
+        unknown = dict(HEALTH, telegram_connection={'ok': False, 'at': '', 'failed_at': '', 'error': ''})
+        self.assertEqual(ui_status.telegram_connection_view(unknown, running=True)['code'],
+                         ui_status.TELEGRAM_CONNECTION_UNKNOWN)
+        self.assertEqual(ui_status.telegram_view(unknown, running=True)['code'],
+                         ui_status.TELEGRAM_CHECKING)
 
     def test_telegram_requires_token_and_allowed_chats(self):
         self.assertFalse(ui_status.telegram_configured({}))

@@ -248,10 +248,18 @@ class AppShell:
             rows.append(('Последние данные', str(data.get('last_camera_data') or '—')))
             rows.append(('Сообщение сервиса', str(data.get('camera_message') or '—')))
         elif key == 'telegram':
-            delivery = data.get('telegram_delivery') or {}
-            rows.append(('Последняя доставка', ui_status.format_time(delivery.get('at')) or '—'))
+            connection = ui_status.telegram_connection_view(data, self.running,
+                                                             self._telegram_configured())
+            delivery = ui_status.telegram_delivery_view(data)
+            link = data.get('telegram_connection') or {}
+            counters = data.get('telegram_delivery') or {}
+            rows.append(('Соединение', connection['label']))
+            rows.append(('Последняя связь', ui_status.format_time(link.get('at')) or '—'))
+            rows.append(('Последняя доставка', delivery['label']))
             rows.append(('Доставлено / ошибок',
-                         f"{delivery.get('delivered', 0)} / {delivery.get('failed', 0)}"))
+                         f"{counters.get('delivered', 0)} / {counters.get('failed', 0)}"))
+            if link.get('error'):
+                rows.append(('Ошибка связи', str(link['error'])))
             rows.append(('Сообщение сервиса', str(data.get('telegram_message') or '—')))
         rows.append(('Последняя ошибка', self._last_error or '—'))
         if state.get('detail'):

@@ -28,11 +28,23 @@ CAMERA_NO_LINK = 'no_link'
 CAMERA_RECEIVING = 'receiving'
 CAMERA_ERROR = 'error'
 
-#: Состояния Telegram.
+#: Состояния Telegram (индикатор в шапке).
 TELEGRAM_OK = 'ok'
 TELEGRAM_DELIVERY_ERROR = 'delivery_error'
 TELEGRAM_NO_CONNECTION = 'no_connection'
 TELEGRAM_NOT_CONFIGURED = 'not_configured'
+TELEGRAM_CHECKING = 'checking'
+
+#: Состояния связи с Telegram — доступен ли API сейчас.
+TELEGRAM_CONNECTED = 'connected'
+TELEGRAM_CONNECTION_LOST = 'connection_lost'
+TELEGRAM_CONNECTION_UNKNOWN = 'connection_unknown'
+
+#: Состояния последней доставки — ушло ли сообщение.
+TELEGRAM_DELIVERY_OK = 'delivery_ok'
+TELEGRAM_DELIVERY_PARTIAL = 'delivery_partial'
+TELEGRAM_DELIVERY_FAILED = 'delivery_failed'
+TELEGRAM_DELIVERY_NONE = 'delivery_none'
 
 #: Подписи состояний (единый словарь — источник истины для интерфейса).
 SERVICE_LABELS = {
@@ -55,6 +67,21 @@ TELEGRAM_LABELS = {
     TELEGRAM_DELIVERY_ERROR: 'Ошибка доставки',
     TELEGRAM_NO_CONNECTION: 'Нет соединения',
     TELEGRAM_NOT_CONFIGURED: 'Не настроен',
+    TELEGRAM_CHECKING: 'Проверяем…',
+}
+
+#: Подписи отдельных диагнозов Telegram.
+TELEGRAM_CONNECTION_LABELS = {
+    TELEGRAM_CONNECTED: 'Есть',
+    TELEGRAM_CONNECTION_LOST: 'Нет',
+    TELEGRAM_CONNECTION_UNKNOWN: 'Не проверялось',
+}
+
+TELEGRAM_DELIVERY_LABELS = {
+    TELEGRAM_DELIVERY_OK: 'Доставлено',
+    TELEGRAM_DELIVERY_PARTIAL: 'Частично',
+    TELEGRAM_DELIVERY_FAILED: 'Не доставлено',
+    TELEGRAM_DELIVERY_NONE: 'Отправок не было',
 }
 
 #: Короткие подписи — для узкого окна, где полные не помещаются.
@@ -78,6 +105,20 @@ TELEGRAM_SHORT = {
     TELEGRAM_DELIVERY_ERROR: 'Ошибка',
     TELEGRAM_NO_CONNECTION: 'Нет связи',
     TELEGRAM_NOT_CONFIGURED: 'Не задано',
+    TELEGRAM_CHECKING: 'Проверка',
+}
+
+TELEGRAM_CONNECTION_SHORT = {
+    TELEGRAM_CONNECTED: 'Есть',
+    TELEGRAM_CONNECTION_LOST: 'Нет',
+    TELEGRAM_CONNECTION_UNKNOWN: 'Не знаю',
+}
+
+TELEGRAM_DELIVERY_SHORT = {
+    TELEGRAM_DELIVERY_OK: 'Доставлено',
+    TELEGRAM_DELIVERY_PARTIAL: 'Частично',
+    TELEGRAM_DELIVERY_FAILED: 'Не доставлено',
+    TELEGRAM_DELIVERY_NONE: 'Не было',
 }
 
 
@@ -143,8 +184,71 @@ def camera_view(data=None, running=False):
                 message or 'Нет данных о состоянии камеры.', CAMERA_SHORT[CAMERA_NO_LINK])
 
 
+def telegram_connection_view(data=None, running=False, configured=True):
+    """Связь с Telegram: доступен ли API сейчас.
+
+    Отдельный диагноз от доставки: сообщение могло уйти час назад, а
+    Telegram сейчас недоступен — и наоборот, доставка может сорваться
+    при живой связи (чат заблокировал бота).
+    """
+    if not configured:
+        return view(TELEGRAM_NOT_CONFIGURED, 'Не настроен', MUTED,
+                    'Не задан токен бота или список разрешённых чатов.', 'Не задано')
+    if not running:
+        return view(TELEGRAM_CONNECTION_UNKNOWN, 'Сервис остановлен', MUTED,
+                    'Сервис остановлен — обращения к Telegram не идут.', 'Остановлен')
+    data = data or {}
+    connection = data.get('telegram_connection') or {}
+    at = str(connection.get('at') or '').strip()
+    failed_at = str(connection.get('failed_at') or '').strip()
+    error = str(connection.get('error') or '').strip()
+    if connection.get('ok'):
+        detail = (f'Последнее обращение к Telegram прошло успешно ({at}).' if at
+                  else 'Telegram отвечает.')
+        return view(TELEGRAM_CONNECTED, TELEGRAM_CONNECTION_LABELS[TELEGRAM_CONNECTED], GREEN,
+                    detail, TELEGRAM_CONNECTION_SHORT[TELEGRAM_CONNECTED])
+    if failed_at or error:
+        detail = f'Последнее обращение к Telegram не прошло: {error}' if error \
+            else f'Последнее обращение к Telegram не прошло ({failed_at}).'
+        return view(TELEGRAM_CONNECTION_LOST, TELEGRAM_CONNECTION_LABELS[TELEGRAM_CONNECTION_LOST], RED,
+                    detail, TELEGRAM_CONNECTION_SHORT[TELEGRAM_CONNECTION_LOST])
+    return view(TELEGRAM_CONNECTION_UNKNOWN, TELEGRAM_CONNECTION_LABELS[TELEGRAM_CONNECTION_UNKNOWN], AMBER,
+                'Обращений к Telegram ещё не было — состояние неизвестно.',
+                TELEGRAM_CONNECTION_SHORT[TELEGRAM_CONNECTION_UNKNOWN])
+
+
+def telegram_delivery_view(data=None):
+    """Последняя доставка: ушло ли сообщение и когда.
+
+    Считает только факт отправки; связь с Telegram — отдельный диагноз.
+    """
+    data = data or {}
+    delivery = data.get('telegram_delivery') or {}
+    at = str(delivery.get('at') or '').strip()
+    delivered = int(delivery.get('delivered') or 0)
+    failed = int(delivery.get('failed') or 0)
+    if not at:
+        return view(TELEGRAM_DELIVERY_NONE, TELEGRAM_DELIVERY_LABELS[TELEGRAM_DELIVERY_NONE], MUTED,
+                    'Сообщения ещё не отправлялись.', TELEGRAM_DELIVERY_SHORT[TELEGRAM_DELIVERY_NONE])
+    detail = f'{at}: доставлено чатов — {delivered}, не доставлено — {failed}.'
+    if not delivery.get('ok'):
+        return view(TELEGRAM_DELIVERY_FAILED, TELEGRAM_DELIVERY_LABELS[TELEGRAM_DELIVERY_FAILED], RED,
+                    detail, TELEGRAM_DELIVERY_SHORT[TELEGRAM_DELIVERY_FAILED])
+    if failed:
+        return view(TELEGRAM_DELIVERY_PARTIAL, TELEGRAM_DELIVERY_LABELS[TELEGRAM_DELIVERY_PARTIAL], AMBER,
+                    detail, TELEGRAM_DELIVERY_SHORT[TELEGRAM_DELIVERY_PARTIAL])
+    return view(TELEGRAM_DELIVERY_OK, TELEGRAM_DELIVERY_LABELS[TELEGRAM_DELIVERY_OK], GREEN,
+                detail, TELEGRAM_DELIVERY_SHORT[TELEGRAM_DELIVERY_OK])
+
+
 def telegram_view(data=None, running=False, configured=True):
-    """Состояние Telegram по данным `/health` и настройкам (.env)."""
+    """Состояние Telegram по данным `/health` и настройкам (.env).
+
+    Индикатор в шапке отвечает на вопрос «доступен ли Telegram сейчас»,
+    поэтому основной признак — связь; ошибка последней доставки тоже
+    красит его в красный, но это отдельный диагноз. Подробности — в
+    `telegram_connection_view` и `telegram_delivery_view`.
+    """
     if not configured:
         return view(TELEGRAM_NOT_CONFIGURED, TELEGRAM_LABELS[TELEGRAM_NOT_CONFIGURED], MUTED,
                     'Не задан токен бота или список разрешённых чатов.',
@@ -153,21 +257,22 @@ def telegram_view(data=None, running=False, configured=True):
         return view(TELEGRAM_NO_CONNECTION, TELEGRAM_LABELS[TELEGRAM_NO_CONNECTION], MUTED,
                     'Сервис остановлен — уведомления не отправляются.',
                     TELEGRAM_SHORT[TELEGRAM_NO_CONNECTION])
-    data = data or {}
-    delivery = data.get('telegram_delivery') or {}
-    attempted = bool(delivery.get('at')) or bool(delivery.get('delivered')) or bool(delivery.get('failed'))
-    message = str(data.get('telegram_message') or '').strip()
-    if attempted:
-        if delivery.get('ok'):
-            return view(TELEGRAM_OK, TELEGRAM_LABELS[TELEGRAM_OK], GREEN, message,
-                        TELEGRAM_SHORT[TELEGRAM_OK])
-        return view(TELEGRAM_DELIVERY_ERROR, TELEGRAM_LABELS[TELEGRAM_DELIVERY_ERROR], RED, message,
-                    TELEGRAM_SHORT[TELEGRAM_DELIVERY_ERROR])
-    if 'не удалось' in message.lower():
-        return view(TELEGRAM_DELIVERY_ERROR, TELEGRAM_LABELS[TELEGRAM_DELIVERY_ERROR], RED, message,
-                    TELEGRAM_SHORT[TELEGRAM_DELIVERY_ERROR])
-    return view(TELEGRAM_NO_CONNECTION, TELEGRAM_LABELS[TELEGRAM_NO_CONNECTION], AMBER,
-                message or 'Ожидание первой отправки.', TELEGRAM_SHORT[TELEGRAM_NO_CONNECTION])
+    connection = telegram_connection_view(data, running, configured)
+    delivery = telegram_delivery_view(data)
+    if connection['code'] == TELEGRAM_CONNECTION_LOST:
+        return view(TELEGRAM_NO_CONNECTION, 'Нет связи', RED,
+                    connection['detail'], 'Нет связи')
+    if delivery['code'] == TELEGRAM_DELIVERY_FAILED:
+        message = str((data or {}).get('telegram_message') or '').strip()
+        return view(TELEGRAM_DELIVERY_ERROR, TELEGRAM_LABELS[TELEGRAM_DELIVERY_ERROR], RED,
+                    message or delivery['detail'], TELEGRAM_SHORT[TELEGRAM_DELIVERY_ERROR])
+    if connection['code'] == TELEGRAM_CONNECTED:
+        message = str((data or {}).get('telegram_message') or '').strip()
+        return view(TELEGRAM_OK, TELEGRAM_LABELS[TELEGRAM_OK], GREEN,
+                    message or connection['detail'], TELEGRAM_SHORT[TELEGRAM_OK])
+    return view(TELEGRAM_CHECKING, TELEGRAM_LABELS[TELEGRAM_CHECKING], AMBER,
+                connection['detail'] or 'Ожидание первой отправки.',
+                TELEGRAM_SHORT[TELEGRAM_CHECKING])
 
 
 def telegram_configured(settings=None):

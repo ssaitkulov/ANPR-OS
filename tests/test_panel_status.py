@@ -39,15 +39,17 @@ class StatusTests(unittest.TestCase):
         self.panel.update_status(self.data)
         self.assertEqual(self.state('camera')['label'], 'Подключена')
         self.assertEqual(self.state('camera')['detail'], 'подключена. Ожидаю проезд автомобиля.')
-        self.assertEqual(self.state('telegram')['label'], 'Нет соединения')
+        # Обращений к Telegram ещё не было — это «проверяем», а не «нет связи».
+        self.assertEqual(self.state('telegram')['label'], 'Проверяем…')
         self.assertEqual(self.state('service')['label'], 'Работает')
 
     def test_no_delivery_attempt_is_not_reported_as_failure(self):
         """До первой отправки счётчики пусты — это ожидание, а не «Ошибка»."""
         self.panel.update_status({**self.data,
                                   'telegram_delivery': {'ok': False, 'delivered': 0, 'failed': 0, 'at': ''}})
-        self.assertEqual(self.state('telegram')['label'], 'Нет соединения')
-        self.assertEqual(self.state('telegram')['code'], ui_status.TELEGRAM_NO_CONNECTION)
+        self.assertEqual(self.state('telegram')['code'], ui_status.TELEGRAM_CHECKING)
+        self.assertEqual(ui_status.telegram_delivery_view(self.panel._health)['code'],
+                         ui_status.TELEGRAM_DELIVERY_NONE)
 
     def test_failed_delivery_is_reported_as_error(self):
         self.panel.update_status({**self.data,
@@ -61,7 +63,9 @@ class StatusTests(unittest.TestCase):
         self.panel.update_status({**self.data, 'camera_message': 'подключена, получаю данные.',
                                   'last_camera_data': '17.11.2026 13:00:00',
                                   'telegram_message': 'последнее уведомление доставлено',
-                                  'telegram_delivery': {'ok': True, 'at': '2026-11-17T13:04:05+05:00'}})
+                                  'telegram_delivery': {'ok': True, 'at': '2026-11-17T13:04:05+05:00'},
+                                  'telegram_connection': {'ok': True, 'at': '2026-11-17T13:04:06+05:00',
+                                                          'failed_at': '', 'error': ''}})
         self.assertEqual(self.state('camera')['label'], 'Подключена')
         self.assertEqual(self.state('telegram')['label'], 'Работает')
         data = {'passages': [{'id': 1, 'captured_at': '2026-11-17T13:04:05+05:00',
