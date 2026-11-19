@@ -1,127 +1,143 @@
 """Постоянная верхняя панель приложения «Эврика».
 
-Header — единственное место управления ANPR-сервисом и единственное место,
-где показываются состояния системы:
+Header — единственное место, где видно состояние системы и где управляют
+ANPR-сервисом.
 
-* сервис (работает / остановлен / запускается / останавливается / ошибка);
-* камера (подключена / нет связи / получение данных / ошибка подключения);
-* Telegram (работает / ошибка доставки / нет соединения / не настроен).
+Устройство шапки:
 
-Кнопки «Запустить»/«Остановить» и «Перезапустить» живут здесь же.
-Нажатие на индикатор открывает компактную панель подробностей с
-диагностикой (текущее состояние, последняя успешная проверка, последняя
-ошибка и доступные из API детали).
+* слева — логотип и навигация («Мониторинг», «Настройки»);
+* справа — три независимых индикатора (сервис, камера, Telegram) и кнопка
+  «Управление», которая раскрывает панель управления сервисом.
+
+Индикаторы не связаны между собой: неисправная камера не красит сервис в
+красный, а недоступный Telegram не мешает управлять сервисом. Общего
+индикатора «система неисправна» нет и не появится.
+
+Управление сервисом (запуск, остановка, перезапуск, журнал) живёт в
+раскрывающейся панели `app/ui/service_panel.py` — она показывается поверх
+содержимого окна и не сдвигает разделы.
 """
 import tkinter as tk
 
 import customtkinter as ctk
 
+from app.ui import icons
+from app.ui import motion
 from app.ui import status as ui_status
+from app.ui import theme
+from app.ui.widgets import animated_hover, focusable
+from app.ui.service_panel import ServicePanel
 
-#: Ширина панели подробностей, px.
-DETAILS_WIDTH = 364
+#: Подписи индикаторов шапки.
+INDICATOR_CAPTIONS = {
+    'service': 'Сервис',
+    'camera': 'Камера',
+    'telegram': 'Telegram',
+}
+
+#: Иконки индикаторов (Tabler Filled).
+INDICATOR_ICONS = {
+    'service': 'device-desktop',
+    'camera': 'device-cctv',
+    'telegram': 'brand-messenger',
+}
 
 
 class StatusChip:
-    """Небольшой индикатор: подпись, точка и значение состояния."""
+    """Компактный индикатор: иконка, название, точка состояния и подпись.
 
-    def __init__(self, parent, key, caption, on_click):
+    Индикатор — небольшая горизонтальная группа без обводки: фон прозрачный,
+    при наведении слегка подсвечивается. Нажатие открывает панель
+    управления, клавиатура — тоже (Enter и пробел).
+    """
+
+    def __init__(self, parent, key, caption, icon_name, on_click, motion_manager):
         self.key = key
         self.state = None
-        self.frame = ctk.CTkFrame(parent, fg_color='transparent')
-        caption_label = ctk.CTkLabel(self.frame, text=caption.upper(), text_color=ui_status.MUTED,
-                                     font=('Segoe UI', 9), anchor='w')
-        caption_label.pack(anchor='w')
-        row = ctk.CTkFrame(self.frame, fg_color='transparent')
-        row.pack(anchor='w')
-        self.dot = ctk.CTkFrame(row, width=9, height=9, corner_radius=5, fg_color=ui_status.MUTED)
-        self.dot.pack(side='left', padx=(0, 6), pady=(1, 0))
-        self.value = ctk.CTkLabel(row, text='Проверяю…', text_color='#f2f5fa',
-                                  font=('Segoe UI', 11, 'bold'), anchor='w')
-        self.value.pack(side='left')
-        for widget in (self.frame, caption_label, row, self.dot, self.value):
-            widget.bind('<Button-1>', lambda _event: on_click(self.key))
+        self.on_click = on_click
+        self.motion = motion_manager
+        self.icon_name = icon_name
+        self.frame = ctk.CTkFrame(parent, fg_color=theme.BG, corner_radius=10,
+                                  border_width=0)
+        self.icon = ctk.CTkLabel(self.frame, text='',
+                                 image=icons.icon(icon_name, theme.MUTED, 15, master=self.frame),
+                                 width=17, height=17)
+        self.icon.pack(side='left', padx=(6, 4), pady=(9, 9))
+        self.caption = ctk.CTkLabel(self.frame, text=caption, text_color=theme.TEXT,
+                                    font=theme.FONT_CAPTION_BOLD, anchor='w')
+        self.caption.pack(side='left', padx=(0, 6), pady=(9, 9))
+        self.dot = ctk.CTkFrame(self.frame, width=9, height=9, corner_radius=5,
+                                fg_color=theme.MUTED)
+        self.dot.pack(side='left', pady=1)
+        self.value = ctk.CTkLabel(self.frame, text='—', text_color=theme.MUTED,
+                                  font=theme.FONT_CAPTION, anchor='w')
+        self.value.pack(side='left', padx=(5, 4), pady=(9, 9))
+        self._bind(self.frame)
+        self._bind(self.icon)
+        self._bind(self.caption)
+        self._bind(self.value)
+        self._bind(self.dot)
+        for widget in (self.icon, self.caption, self.value, self.dot):
+            widget.bind('<Enter>', lambda _event: self._hover(True), add='+')
+            widget.bind('<Leave>', lambda _event: self._hover(False), add='+')
+        self.frame.bind('<Enter>', lambda _event: self._hover(True), add='+')
+        self.frame.bind('<Leave>', lambda _event: self._hover(False), add='+')
+        self.frame.bind('<FocusIn>', lambda _event: self._hover(True), add='+')
+        self.frame.bind('<FocusOut>', lambda _event: self._hover(False), add='+')
+        focusable(self.frame)
+
+    def _bind(self, widget):
+        widget.bind('<Button-1>', lambda _event: self.on_click(self.key), add='+')
+        widget.bind('<Return>', lambda _event: self.on_click(self.key), add='+')
+        widget.bind('<space>', lambda _event: self.on_click(self.key), add='+')
+
+    def _hover(self, active: bool):
+        """Мягкая подсветка при наведении — без рамок и теней."""
+        self.motion.animate_color(self.frame, 'fg_color',
+                                  theme.CARD_ALT if active else theme.BG)
 
     def set_state(self, state, compact=False):
         """Показать состояние индикатора (словарь из `app.ui.status`)."""
-        self.state = state
-        self.value.configure(text=state['short'] if compact else state['label'])
-        self.dot.configure(fg_color=state['color'])
-
-
-class DetailsPanel:
-    """Компактная панель подробностей поверх содержимого окна."""
-
-    def __init__(self, overlay, owner):
-        self.owner = owner
-        self.key = None
-        self.frame = ctk.CTkFrame(overlay, fg_color='#1a2432', corner_radius=10,
-                                   border_color='#303e51', border_width=1, width=DETAILS_WIDTH)
-        top = ctk.CTkFrame(self.frame, fg_color='transparent')
-        top.pack(fill='x', padx=14, pady=(10, 2))
-        self.title = ctk.CTkLabel(top, text='', text_color='#f2f5fa', anchor='w',
-                                  font=('Segoe UI', 12, 'bold'))
-        self.title.pack(side='left')
-        ctk.CTkButton(top, text='✕', width=26, height=26, fg_color='transparent',
-                      hover_color='#263b57', text_color=ui_status.MUTED,
-                      font=('Segoe UI', 12), command=self.hide).pack(side='right')
-        self.rows = ctk.CTkFrame(self.frame, fg_color='transparent')
-        self.rows.pack(fill='both', expand=True, padx=14, pady=(2, 12))
-
-    def show(self, key, chip):
-        """Открыть панель под индикатором `chip`."""
-        self.key = key
-        self._render()
-        overlay = self.frame.master
-        try:
-            x = chip.frame.winfo_rootx() - overlay.winfo_rootx() + chip.frame.winfo_width() - DETAILS_WIDTH
-            y = chip.frame.winfo_rooty() - overlay.winfo_rooty() + chip.frame.winfo_height() + 6
-            width = overlay.winfo_width()
-            height = overlay.winfo_height()
-            x = max(8, min(x, max(8, width - DETAILS_WIDTH - 8)))
-            y = max(8, min(y, max(8, height - self.frame.winfo_reqheight() - 8)))
-            self.frame.configure(width=DETAILS_WIDTH)
-            self.frame.place(x=x, y=y)
-        except tk.TclError:
+        if not state:
             return
-        self.frame.lift()
-
-    def hide(self):
-        """Скрыть панель."""
-        self.key = None
+        self.state = state
+        color = state.get('color') or theme.MUTED
+        self.value.configure(text=state.get('short') if compact else state.get('label', '—'),
+                             text_color=color)
+        self.motion.animate_color(self.dot, 'fg_color', color)
         try:
-            self.frame.place_forget()
+            self.icon.configure(image=icons.icon(self.icon_name, color, 15, master=self.icon))
         except tk.TclError:
             pass
 
-    def _render(self):
-        for child in self.rows.winfo_children():
-            child.destroy()
-        title, rows = self.owner.details_data(self.key)
-        self.title.configure(text=title)
-        for caption, value in rows:
-            self._row(caption, value)
-
-    def _row(self, caption, value):
-        row = ctk.CTkFrame(self.rows, fg_color='transparent')
-        row.pack(fill='x', pady=(2, 0))
-        ctk.CTkLabel(row, text=caption, text_color=ui_status.MUTED, anchor='w',
-                     font=('Segoe UI', 10), width=150, justify='left').pack(side='left', anchor='w')
-        ctk.CTkLabel(row, text=value or '—', text_color='#f2f5fa', anchor='w', justify='left',
-                     font=('Segoe UI', 11), wraplength=DETAILS_WIDTH - 190).pack(side='left', fill='x', expand=True)
+    def set_compact(self, tight: bool):
+        """В очень узком окне вторичный текст скрывается, название остаётся."""
+        try:
+            if tight and self.value.winfo_manager():
+                self.value.pack_forget()
+            elif not tight and not self.value.winfo_manager():
+                self.value.pack(side='left', padx=(6, 10))
+        except tk.TclError:
+            pass
 
 
 class SystemHeader:
-    """Верхняя панель: навигация слева, единый блок управления справа."""
+    """Верхняя панель: навигация слева, индикаторы и управление справа."""
 
     def __init__(self, master, overlay, owner):
         self.owner = owner
         self.overlay = overlay
         self.compact = False
         self.frame = ctk.CTkFrame(master, fg_color='transparent')
-        self.frame.pack(fill='x', padx=20, pady=(16, 8))
+        self.frame.pack(fill='x', padx=theme.GROUP_GAP * 2, pady=(14, 6))
         self.chips = {}
         self._states = {}
+        self._full_width = 0
+        self._short_width = 0
+        self.tight = False
+        self._fitting = False
+        self._refit = False
+        self.motion = motion.Motion(master)
 
         # --- левая часть: логотип и навигация ---
         self.left = ctk.CTkFrame(self.frame, fg_color='transparent')
@@ -129,102 +145,100 @@ class SystemHeader:
         self.logo = ctk.CTkImage(light_image=owner.logo_image(), size=(116, 25))
         ctk.CTkLabel(self.left, text='', image=self.logo, anchor='w').pack(side='left')
         nav = ctk.CTkFrame(self.left, fg_color='transparent')
-        nav.pack(side='left', padx=(12, 0))
+        nav.pack(side='left', padx=(14, 0))
         self.nav_buttons = {}
         for key in ('monitor', 'settings'):
-            button = ctk.CTkButton(nav, text=owner.section_titles[key], width=104, height=34,
-                                    fg_color='#1a2432', hover_color='#34455a', border_color='#303e51',
-                                    border_width=1, font=('Segoe UI', 12),
-                                    command=lambda key=key: owner.show_section(key))
-            button.pack(side='left', padx=(8, 0))
+            button = ctk.CTkButton(nav, text=owner.section_titles[key], width=100, height=34,
+                                    corner_radius=10, fg_color='transparent',
+                                    hover_color=theme.CARD_ALT, text_color=theme.TEXT,
+                                    font=theme.FONT_CAPTION, command=lambda key=key: owner.show_section(key))
+            button.pack(side='left', padx=(6, 0))
             self.nav_buttons[key] = button
 
-        # --- правая часть: единый блок управления системой ---
-        control = ctk.CTkFrame(self.frame, fg_color='#1a2432', corner_radius=10,
-                               border_color='#303e51', border_width=1)
-        control.pack(side='right')
-        self.control = control
-        inner = ctk.CTkFrame(control, fg_color='transparent')
-        inner.pack(padx=12, pady=8)
-        row = ctk.CTkFrame(inner, fg_color='transparent')
-        row.pack(fill='x')
+        # --- правая часть: индикаторы и кнопка управления ---
+        self.control = ctk.CTkFrame(self.frame, fg_color='transparent', corner_radius=10)
+        self.control.pack(side='right')
+        for key in ('service', 'camera', 'telegram'):
+            chip = StatusChip(self.control, key, INDICATOR_CAPTIONS[key], INDICATOR_ICONS[key],
+                              self.toggle_details, self.motion)
+            chip.frame.pack(side='left', padx=(0, theme.GROUP_GAP))
+            self.chips[key] = chip
+        self.service_chip = self.chips['service']
+        self.camera_chip = self.chips['camera']
+        self.telegram_chip = self.chips['telegram']
 
-        self.service_chip = StatusChip(row, 'service', 'Сервис', self.toggle_details)
-        self.service_chip.frame.pack(side='left', padx=(0, 10))
-        self.chips['service'] = self.service_chip
+        self.manage_button = ctk.CTkButton(self.control, text='Управление', width=118, height=34,
+                                           corner_radius=10, fg_color=theme.CARD,
+                                           hover_color=theme.CARD, text_color=theme.TEXT,
+                                           font=theme.FONT_CAPTION_BOLD,
+                                           image=icons.icon('chevron-down', theme.MUTED, 14, master=self.control),
+                                           command=self.toggle_panel)
+        focusable(self.manage_button)
+        animated_hover(self.manage_button, self.motion, theme.CARD, theme.CARD_ALT)
+        self.manage_button.pack(side='left', padx=(2, 0))
 
-        self.action_button = ctk.CTkButton(row, text='Запустить', width=100, height=34,
-                                           fg_color='#2869df', hover_color='#1d55b9',
-                                           font=('Segoe UI', 11, 'bold'),
-                                           command=self.owner.toggle_service)
-        self.action_button.pack(side='left')
+        # Панель управления сервисом (раскрывающаяся).
+        self.details = ServicePanel(overlay, owner, on_toggle=self._update_manage_button)
+        self.panel = self.details
 
-        self.restart_button = ctk.CTkButton(row, text='Перезапустить', width=100, height=34,
-                                            fg_color='#263b57', hover_color='#365172',
-                                            font=('Segoe UI', 10),
-                                            command=self.owner.restart_service)
-        self.restart_button.pack(side='left', padx=(6, 0))
-
-        ctk.CTkFrame(row, width=1, height=34, fg_color='#303e51').pack(side='left', fill='y', padx=10)
-
-        self.camera_chip = StatusChip(row, 'camera', 'Камера', self.toggle_details)
-        self.camera_chip.frame.pack(side='left', padx=(0, 10))
-        self.chips['camera'] = self.camera_chip
-
-        self.telegram_chip = StatusChip(row, 'telegram', 'Telegram', self.toggle_details)
-        self.telegram_chip.frame.pack(side='left', padx=(0, 10))
-        self.chips['telegram'] = self.telegram_chip
-
-        self.log_button = ctk.CTkButton(row, text='Журнал', width=72, height=34,
-                                        fg_color='transparent', hover_color='#263b57',
-                                        border_color='#303e51', border_width=1,
-                                        font=('Segoe UI', 10), command=self.owner.open_log)
-        self.log_button.pack(side='left')
-
-        # Короткие сообщения (результат операции) — под блоком индикаторов.
-        self.message_label = ctk.CTkLabel(inner, textvariable=owner.message, text_color='#ff9ca5',
-                                           font=('Segoe UI', 11), anchor='w', justify='left')
-        self.details = DetailsPanel(overlay, owner)
         overlay.bind('<Button-1>', self._on_overlay_click, add='+')
+        overlay.bind('<Escape>', self._on_escape, add='+')
         overlay.bind('<Configure>', self._fit_width, add='+')
 
     # ------------------------------------------------------------------
-    def sync_message(self):
-        """Показать или скрыть строку сообщения под индикаторами."""
-        value = (self.owner.message.get() or '').strip()
-        if value:
-            if not self.message_label.winfo_manager():
-                self.message_label.pack(fill='x', pady=(6, 0))
-        elif self.message_label.winfo_manager():
-            self.message_label.pack_forget()
-
+    # Панель управления
     # ------------------------------------------------------------------
+    @property
+    def action_button(self):
+        """Кнопка главного действия (по текущему состоянию сервиса)."""
+        return self.details.action_button
+
+    @property
+    def restart_button(self):
+        """Кнопка перезапуска сервиса."""
+        return self.details.restart_button
+
+    def _update_manage_button(self, opened: bool):
+        """Стрелка кнопки «Управление» показывает направление панели."""
+        try:
+            self.manage_button.configure(
+                image=icons.icon('chevron-down', theme.MUTED, 14, master=self.control, flip=opened))
+        except tk.TclError:
+            pass
+
     def toggle_details(self, key):
-        """Открыть/закрыть панель подробностей для индикатора."""
-        if self.details.key == key:
-            self.details.hide()
-            return
-        chip = self.chips.get(key)
-        if chip is None:
-            return
-        self.details.show(key, chip)
+        """Открыть панель управления (нажатие на индикатор)."""
+        self.details.toggle(anchor=self.manage_button, section=key)
+
+    def toggle_panel(self):
+        """Кнопка «Управление»: открыть или закрыть панель."""
+        self.details.toggle(anchor=self.manage_button)
 
     def close_details(self):
-        self.details.hide()
+        """Закрыть панель управления."""
+        self.details.close()
+
+    def _on_escape(self, _event=None):
+        """Escape закрывает панель."""
+        if self.details.is_open:
+            self.details.close()
+            return 'break'
 
     def _on_overlay_click(self, event):
-        """Клик вне панели подробностей закрывает её."""
-        if self.details.key is None:
+        """Клик вне панели закрывает её."""
+        if not self.details.is_open:
             return
         widget = getattr(event, 'widget', None)
         if widget is None:
             return
         if self._within(widget, self.details.frame):
             return
+        if self._within(widget, self.manage_button):
+            return
         for chip in self.chips.values():
             if self._within(widget, chip.frame):
                 return
-        self.details.hide()
+        self.details.close()
 
     @staticmethod
     def _within(widget, ancestor):
@@ -236,54 +250,126 @@ class SystemHeader:
         return False
 
     # ------------------------------------------------------------------
+    # Состояния
+    # ------------------------------------------------------------------
     def set_state(self, key, state):
         """Обновить индикатор состояния."""
         chip = self.chips.get(key)
-        if chip is None:
+        if chip is None or not state:
             return
         self._states[key] = state
         chip.set_state(state, self.compact)
-        # После смены подписи ширина блока могла измениться — пересчитываем.
         try:
             self.control.update_idletasks()
         except tk.TclError:
             pass
-        self._fit_width()
+        if not self.compact:
+            self._full_width = self.control.winfo_reqwidth()
 
-    def _fit_width(self, _event=None):
-        """В узком окне индикаторы показывают короткие подписи.
+    def refresh_panel(self):
+        """Обновить содержимое панели управления (один раз за цикл опроса)."""
+        self.details.refresh()
 
-        Так верхняя панель никогда не обрезается: полные названия состояний
-        остаются в панели подробностей.
+    def set_running(self, running):
+        """Учесть состояние сервиса в панели управления."""
+        self.details.refresh()
+
+    def set_busy(self, busy):
+        """На время операции кнопки управления блокируются.
+
+        Индикатор сервиса сразу показывает выполняемую операцию
+        («Запускается», «Останавливается», «Перезапускается») — ждать
+        следующего опроса пользователю не нужно.
         """
+        if busy:
+            owner = self.owner
+            state = ui_status.service_view(None, True, getattr(owner, 'operation', None),
+                                           getattr(owner, 'phase', None))
+            self.set_state('service', state)
+        self.details.refresh()
+
+    def sync_message(self):
+        """Передать результат операции в панель управления."""
+        self.details.refresh()
+
+    # ------------------------------------------------------------------
+    # Ширина
+    # ------------------------------------------------------------------
+    def _fit_width(self, _event=None):
+        """Подогнать шапку под ширину окна.
+
+        Названия компонентов («Сервис», «Камера», «Telegram») не исчезают
+        никогда: сначала сокращается вторичный текст (короткая подпись
+        состояния), и только в самом узком окне он прячется, а цвет точки —
+        критический статус — остаётся виден.
+
+        Пересчёт защищён от повторного входа: `update_idletasks()` внутри
+        обрабатывает и события Configure, поэтому без защиты шапка
+        пересчитывала бы саму себя до переполнения стека.
+        """
+        if self._fitting:
+            self._refit = True
+            return
+        self._fitting = True
+        try:
+            self._fit_width_now()
+        finally:
+            self._fitting = False
+            if self._refit:
+                self._refit = False
+                try:
+                    self.overlay.after_idle(self._fit_width)
+                except tk.TclError:
+                    pass
+
+    def _fit_width_now(self):
+        """Собственно пересчёт ширины (вызывается под защитой)."""
         try:
             if not self.control.winfo_exists():
                 return
-            available = self.overlay.winfo_width() - self.left.winfo_reqwidth() - 48
+            available = self.overlay.winfo_width() - self.left.winfo_reqwidth() - 40
             needed = self.control.winfo_reqwidth()
         except tk.TclError:
             return
-        if needed > available and not self.compact:
+        if not self.compact:
+            self._full_width = max(self._full_width, needed)
+        full = self._full_width or needed
+        if full > available and not self.compact:
             self.compact = True
             self._refresh_labels()
-        elif needed <= available - 120 and self.compact:
+            try:
+                self.control.update_idletasks()
+                self._short_width = self.control.winfo_reqwidth()
+            except tk.TclError:
+                self._short_width = 0
+        elif self.compact and full <= available - 40:
             self.compact = False
+            self._refresh_labels()
+            try:
+                self.control.update_idletasks()
+            except tk.TclError:
+                pass
+        short = self._short_width or needed
+        tight = self.compact and short > available
+        if tight != self.tight:
+            self.tight = tight
             self._refresh_labels()
 
     def _refresh_labels(self):
         for key, chip in self.chips.items():
+            chip.set_compact(self.tight)
             state = self._states.get(key)
             if state is not None:
                 chip.set_state(state, self.compact)
+        try:
+            self.control.update_idletasks()
+        except tk.TclError:
+            pass
 
-    def set_running(self, running):
-        """Кнопка запуска/остановки отражает текущее состояние сервиса."""
-        self.action_button.configure(text='Остановить' if running else 'Запустить',
-                                     fg_color='#45303a' if running else '#2869df',
-                                     hover_color='#603844' if running else '#1d55b9')
-
-    def set_busy(self, busy):
-        """На время операции кнопки управления блокируются."""
-        state = 'disabled' if busy else 'normal'
-        self.action_button.configure(state=state)
-        self.restart_button.configure(state=state)
+    # ------------------------------------------------------------------
+    # Закрытие
+    # ------------------------------------------------------------------
+    def shutdown(self):
+        """Отменить отложенные вызовы шапки и панели."""
+        self.details.shutdown()
+        self.motion.cancel_all()

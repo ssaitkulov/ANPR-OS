@@ -84,14 +84,16 @@ class StatusModelTests(unittest.TestCase):
         self.assertEqual(ui_status.service_view(None, busy=True, operation='stop')['code'],
                          ui_status.SERVICE_STOPPING)
         self.assertEqual(ui_status.service_view(None, busy=True, operation='restart', phase='start')['code'],
-                         ui_status.SERVICE_STARTING)
+                         ui_status.SERVICE_RESTARTING)
         self.assertEqual(ui_status.service_view(None, busy=True, operation='restart', phase='stop')['code'],
-                         ui_status.SERVICE_STOPPING)
+                         ui_status.SERVICE_RESTARTING)
         self.assertEqual(ui_status.service_view(None, error='порт занят')['code'], ui_status.SERVICE_ERROR)
 
     def test_camera_states(self):
         self.assertEqual(ui_status.camera_view(HEALTH, running=True)['code'], ui_status.CAMERA_CONNECTED)
-        self.assertEqual(ui_status.camera_view(HEALTH, running=False)['code'], ui_status.CAMERA_NO_LINK)
+        # Сервис остановлен — камера не опрашивается: состояние неизвестно,
+        # а не «нет связи» (подтверждённого обрыва связи у нас нет).
+        self.assertEqual(ui_status.camera_view(HEALTH, running=False)['code'], ui_status.CAMERA_UNKNOWN)
         connected = dict(HEALTH, camera_message='подключена. Ожидаю проезд автомобиля.',
                          last_camera_data='')
         self.assertEqual(ui_status.camera_view(connected, running=True)['code'], ui_status.CAMERA_CONNECTED)
@@ -105,14 +107,17 @@ class StatusModelTests(unittest.TestCase):
     def test_telegram_states(self):
         self.assertEqual(ui_status.telegram_view(HEALTH, running=True)['code'], ui_status.TELEGRAM_OK)
         failed = dict(HEALTH, telegram_delivery={'ok': False, 'delivered': 0, 'failed': 1, 'at': 'x'})
-        self.assertEqual(ui_status.telegram_view(failed, running=True)['code'],
-                         ui_status.TELEGRAM_DELIVERY_ERROR)
+        # Доступность канала и успешность доставки — разные диагнозы:
+        # индикатор в шапке показывает связь, доставка видна в панели.
+        self.assertEqual(ui_status.telegram_view(failed, running=True)['code'], ui_status.TELEGRAM_OK)
+        self.assertEqual(ui_status.telegram_delivery_view(failed)['code'],
+                         ui_status.TELEGRAM_DELIVERY_FAILED)
         waiting = dict(HEALTH, telegram_delivery={'ok': False, 'delivered': 0, 'failed': 0, 'at': ''})
         # Связь жива — значит «Нет соединения» показывать нельзя, даже если
         # отправок ещё не было: это отдельные диагнозы.
         self.assertEqual(ui_status.telegram_view(waiting, running=True)['code'], ui_status.TELEGRAM_OK)
         self.assertEqual(ui_status.telegram_view(HEALTH, running=False)['code'],
-                         ui_status.TELEGRAM_NO_CONNECTION)
+                         ui_status.TELEGRAM_UNKNOWN)
         self.assertEqual(ui_status.telegram_view(HEALTH, running=True, configured=False)['code'],
                          ui_status.TELEGRAM_NOT_CONFIGURED)
 
@@ -340,7 +345,7 @@ class ServiceControlTests(ShellTestCase):
             self.assertEqual(self.shell.header.telegram_chip.value.cget('text'), 'Работает')
             self.shell.update_status(None)
             self.assertEqual(self.shell.header.service_chip.value.cget('text'), 'Остановлен')
-            self.assertEqual(self.shell.header.camera_chip.value.cget('text'), 'Нет связи')
+            self.assertEqual(self.shell.header.camera_chip.value.cget('text'), 'Неизвестно')
 
     def test_details_panel_opens_and_closes(self):
         self.shell.update_status(HEALTH)
@@ -351,6 +356,8 @@ class ServiceControlTests(ShellTestCase):
         self.assertIn('Последняя проверка', captions)
         self.assertIn('Последняя ошибка', captions)
         self.shell.header.toggle_details('service')
+        # Панель уходит с короткой анимацией — ждём её завершения.
+        self.pump(0.4)
         self.assertEqual(self.shell.header.details.frame.winfo_manager(), '')
 
     def test_narrow_window_switches_indicators_to_short_labels(self):

@@ -39,8 +39,8 @@ class StatusTests(unittest.TestCase):
         self.panel.update_status(self.data)
         self.assertEqual(self.state('camera')['label'], 'Подключена')
         self.assertEqual(self.state('camera')['detail'], 'подключена. Ожидаю проезд автомобиля.')
-        # Обращений к Telegram ещё не было — это «проверяем», а не «нет связи».
-        self.assertEqual(self.state('telegram')['label'], 'Проверяем…')
+        # Обращений к Telegram ещё не было — это «проверка», а не «нет связи».
+        self.assertEqual(self.state('telegram')['label'], 'Проверка')
         self.assertEqual(self.state('service')['label'], 'Работает')
 
     def test_no_delivery_attempt_is_not_reported_as_failure(self):
@@ -56,7 +56,12 @@ class StatusTests(unittest.TestCase):
                                   'telegram_message': 'не удалось доставить уведомление (в очередь).',
                                   'telegram_delivery': {'ok': False, 'delivered': 0, 'failed': 1,
                                                         'at': '2026-11-18T17:05:06+05:00'}})
-        self.assertEqual(self.state('telegram')['label'], 'Ошибка доставки')
+        # Доставка и доступность канала — разные диагнозы: в шапке остаётся
+        # «Проверка» (контакта с Telegram ещё не было), ошибка доставки видна
+        # в панели управления.
+        self.assertEqual(self.state('telegram')['label'], 'Проверка')
+        self.assertEqual(ui_status.telegram_delivery_view(self.panel._health)['code'],
+                         ui_status.TELEGRAM_DELIVERY_FAILED)
 
     def test_confirmed_delivery_and_stop(self):
         self.panel.update_status(self.data)
@@ -74,8 +79,10 @@ class StatusTests(unittest.TestCase):
         self.panel.merge_events(data)
         self.assertEqual(list(self.panel.events), ['17.11 13:04:05 · 01 A 123 BC · Въезд · Полоса 1 · 20 км/ч'])
         self.panel.update_status(None)
-        self.assertEqual(self.state('camera')['label'], 'Нет связи')
-        self.assertEqual(self.state('telegram')['label'], 'Нет соединения')
+        # Сервис остановлен: состояния камеры и Telegram неизвестны —
+        # показывать устаревшие данные нельзя.
+        self.assertEqual(self.state('camera')['label'], 'Неизвестно')
+        self.assertEqual(self.state('telegram')['label'], 'Неизвестно')
         self.assertEqual(self.state('service')['label'], 'Остановлен')
         self.assertFalse(any('Система остановлена' in e for e in self.panel.events))
 

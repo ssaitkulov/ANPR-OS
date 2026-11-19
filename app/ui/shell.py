@@ -5,9 +5,11 @@ Header и Content и одним `mainloop()`. Разделы создаются 
 переключаются через `grid`/`grid_remove` — видеопоток и фоновые задачи при
 навигации не пересоздаются.
 
-Header (`app/ui/header.py`) — единственное место управления ANPR-сервисом:
-запуск, остановка, перезапуск и три индикатора состояния (сервис, камера,
-Telegram). Дублирующего StatusBar и кнопок управления в разделах нет.
+Header (`app/ui/header.py`) — постоянная верхняя панель: три независимых
+индикатора состояния (сервис, камера, Telegram) и кнопка «Управление».
+Управление ANPR-сервисом (запуск, остановка, перезапуск, журнал) живёт в
+раскрывающейся панели `app/ui/service_panel.py`. Дублирующего StatusBar и
+кнопок управления в разделах нет.
 
 Класс `AppShell` — преемник прежней `Panel`: имя `Panel` сохранено в
 `app/ui/panel.py` как алиас, поэтому `import control_panel`, подмены в
@@ -34,10 +36,12 @@ from PIL import Image
 
 from app.services import control as service
 from app.services import audit
+from app.services import process_info
 from app.core import preferences
 from app.core import window_state
 from app.core.paths import ASSETS_DIR, log_dir
 from app.ui import status as ui_status
+from app.ui import theme
 from app.ui.header import SystemHeader
 from app.ui.tklife import cancel_pending_scripts
 
@@ -53,12 +57,20 @@ HEALTH_INTERVAL = 3000
 #: Как часто читается файл настроек для проверки готовности Telegram, с.
 SETTINGS_TTL = 10.0
 
+#: Что сообщить пользователю после успешной операции управления сервисом.
+OPERATION_RESULTS = {
+    'start': 'ANPR-сервис запущен.',
+    'stop': 'ANPR-сервис остановлен.',
+    'restart': 'ANPR-сервис перезапущен.',
+}
+
 
 class AppShell:
     """Главное окно приложения."""
 
-    BG = '#101722'; TEXT = '#f2f5fa'; MUTED = '#a5b1c2'; GREEN = '#56d8a0'; RED = '#ff8792'
-    CARD = '#1a2432'; BORDER = '#303e51'; BLUE = '#2869df'; BLUE_HOVER = '#1d55b9'
+    BG = theme.BG; TEXT = theme.TEXT; MUTED = theme.MUTED
+    GREEN = theme.SUCCESS; RED = theme.DANGER
+    CARD = theme.CARD; BORDER = theme.CARD_ALT; BLUE = theme.ACCENT; BLUE_HOVER = theme.ACCENT
 
     def __init__(self, root):
         self.root, self.queue, self.busy = root, queue.Queue(), False
@@ -84,6 +96,8 @@ class AppShell:
         self._settings_cache = (0.0, {})
 
         self.message = tk.StringVar(value='')
+        self.message_tone = ''
+        self._silent_operation = False
 
         root.title('Эврика')
         root.configure(fg_color=self.BG)
@@ -103,7 +117,7 @@ class AppShell:
         self.show_section('monitor')
 
         self.schedule(100, self.process)
-        self.work(service.start, 'start')
+        self.work(service.start, 'start', silent=True)
         self.schedule(1000, self.refresh)
 
     # ------------------------------------------------------------------
@@ -139,8 +153,8 @@ class AppShell:
             header.close_details()
         for key, button in self.nav_buttons.items():
             active = key == name
-            button.configure(fg_color=self.BLUE if active else self.CARD,
-                             hover_color=self.BLUE_HOVER if active else '#34455a',
+            button.configure(fg_color=theme.ACCENT if active else 'transparent',
+                             hover_color=theme.CARD_ALT,
                              text_color='#ffffff' if active else self.TEXT)
         self.root.title('Эврика · ' + SECTION_TITLES.get(name, 'Эврика'))
 
@@ -214,9 +228,10 @@ class AppShell:
             header.set_state('camera', camera_state)
             header.set_state('telegram', telegram_state)
             header.set_running(running)
+            header.refresh_panel()
 
-    def _telegram_configured(self):
-        """Настроен ли Telegram (токен бота и разрешённые чаты в .env)."""
+    def _settings(self):
+        """Настройки из `.env` с коротким кэшем (чтение файла не на каждый кадр)."""
         stamp = time.monotonic()
         cached_stamp, cached = self._settings_cache
         if stamp - cached_stamp > SETTINGS_TTL:
@@ -226,46 +241,136 @@ class AppShell:
             except OSError:
                 cached = {}
             self._settings_cache = (stamp, cached)
-        return ui_status.telegram_configured(cached)
+        return cached
+
+    def _telegram_configured(self):
+        """Настроен ли Telegram (токен бота и разрешённые чаты в .env)."""
+        return ui_status.telegram_configured(self._settings())
 
     # ------------------------------------------------------------------
-    # Диагностика: панель подробностей
+    # Данные панели управления
     # ------------------------------------------------------------------
-    def details_data(self, key):
-        """Строки панели подробностей для выбранного индикатора."""
-        state = self._states.get(key, {})
+    def panel_data(self):
+        """Данные панели управления: три независимых раздела.
+
+        Каждый раздел собирается только из своих источников: состояние
+        сервиса не зависит от камеры, состояние камеры — от Telegram.
+        Показатели, которых нет, в панель не попадают.
+        """
         data = self._health or {}
-        rows = [('Состояние', state.get('label', '—')),
-                ('Последняя проверка', self._last_check.strftime('%H:%M:%S') if self._last_check else '—')]
-        if key == 'service':
-            started = data.get('started_at')
-            rows.append(('Запущено с', ui_status.format_time(started)))
-            if started and isinstance(started, (int, float)):
-                rows.append(('Время работы', ui_status.format_duration(time.time() - started)))
-            rows.append(('PID', str(data.get('pid') or '—')))
-            rows.append(('Адрес сервиса', service.URL))
-        elif key == 'camera':
-            rows.append(('Последние данные', str(data.get('last_camera_data') or '—')))
-            rows.append(('Сообщение сервиса', str(data.get('camera_message') or '—')))
-        elif key == 'telegram':
-            connection = ui_status.telegram_connection_view(data, self.running,
-                                                             self._telegram_configured())
-            delivery = ui_status.telegram_delivery_view(data)
-            link = data.get('telegram_connection') or {}
-            counters = data.get('telegram_delivery') or {}
-            rows.append(('Соединение', connection['label']))
-            rows.append(('Последняя связь', ui_status.format_time(link.get('at')) or '—'))
-            rows.append(('Последняя доставка', delivery['label']))
-            rows.append(('Доставлено / ошибок',
-                         f"{counters.get('delivered', 0)} / {counters.get('failed', 0)}"))
-            if link.get('error'):
-                rows.append(('Ошибка связи', str(link['error'])))
-            rows.append(('Сообщение сервиса', str(data.get('telegram_message') or '—')))
-        rows.append(('Последняя ошибка', self._last_error or '—'))
+        running = self.running
+        states = self._states or {}
+        settings = self._settings()
+
+        service_state = states.get('service') or ui_status.service_view()
+        camera_state = states.get('camera') or ui_status.camera_view(running=running)
+        telegram_state = states.get('telegram') or ui_status.telegram_view(running=running)
+
+        # --- ANPR-сервис ---
+        pid = data.get('pid')
+        started = data.get('started_at')
+        service_rows = []
+        if pid:
+            service_rows.append(('PID', str(pid)))
+        if isinstance(started, (int, float)) and started:
+            uptime = ui_status.format_duration(time.time() - started)
+            if uptime:
+                service_rows.append(('Время работы', uptime))
+        service_rows.append(('Порт сервиса', str(service.PORT)))
+        service_rows.append(('Последняя проверка',
+                              self._last_check.strftime('%H:%M:%S') if self._last_check else 'Нет данных'))
+        service_rows.append(('Последняя ошибка', self._last_error or 'Нет ошибок'))
+        process_alive = self._service_process_alive() if not running else True
+
+        # --- камера ---
+        camera_rows = []
+        name = str(settings.get('CAMERA_NAME') or '').strip()
+        if name:
+            camera_rows.append(('Название', name))
+        host = str(data.get('camera') or settings.get('DAHUA_HOST') or '').strip()
+        if host:
+            camera_rows.append(('IP-адрес', host))
+        last_data = str(data.get('last_camera_data') or '').strip()
+        if running:
+            camera_rows.append(('События ANPR', 'принимаются' if last_data else 'нет данных'))
+            camera_rows.append(('Последнее событие', last_data or 'Нет данных'))
+        else:
+            camera_rows.append(('События ANPR', 'нет данных'))
+
+        # --- Telegram ---
+        configured = self._telegram_configured()
+        connection = ui_status.telegram_connection_view(data, running, configured)
+        delivery = ui_status.telegram_delivery_view(data)
+        link = data.get('telegram_connection') or {}
+        counters = data.get('telegram_delivery') or {}
+        telegram_rows = [
+            ('Соединение', connection['label']),
+            ('Последняя связь', ui_status.format_time(link.get('at')) or 'Нет данных'),
+            ('Последняя доставка', delivery['label']),
+        ]
+        if counters.get('at'):
+            telegram_rows.append(('Время доставки', ui_status.format_time(counters.get('at'))))
+            telegram_rows.append(('Доставлено / ошибок',
+                                  f"{counters.get('delivered', 0)} / {counters.get('failed', 0)}"))
+        if link.get('error'):
+            telegram_rows.append(('Ошибка связи', str(link['error'])))
+
+        return {
+            'service': {'state': service_state, 'rows': service_rows,
+                        'running': running, 'process_alive': process_alive},
+            'camera': {'state': camera_state, 'rows': camera_rows},
+            'telegram': {'state': telegram_state, 'rows': telegram_rows},
+            'busy': self.busy,
+            'operation': self.operation,
+            'phase': self.phase,
+            'message': self.message.get(),
+            'message_tone': self.message_tone,
+        }
+
+    def details_data(self, key):
+        """Строки панели подробностей для выбранного индикатора (совместимость)."""
+        data = self.panel_data()
+        block = data.get(key) or {}
+        state = block.get('state') or {}
+        rows = [('Состояние', state.get('label', '—'))]
+        rows.extend(block.get('rows') or [])
         if state.get('detail'):
             rows.append(('Пояснение', state['detail']))
         title = {'service': 'СЕРВИС', 'camera': 'КАМЕРА', 'telegram': 'TELEGRAM'}.get(key, '')
         return title, rows
+
+    def _known_service_pid(self):
+        """PID сервиса: из ответа `/health` или из PID-файла."""
+        pid = (self._health or {}).get('pid')
+        if pid:
+            try:
+                return int(pid)
+            except (TypeError, ValueError):
+                pass
+        try:
+            path = service.pid_file()
+            if path.exists():
+                return int(path.read_text(encoding='ascii').strip())
+        except (OSError, ValueError):
+            return None
+        return None
+
+    def _service_process_alive(self):
+        """Жив ли процесс сервиса на самом деле.
+
+        Проверка нужна в состоянии «Ошибка» и «Остановлен»: сервис может
+        не отвечать, но процесс продолжать работать. Предлагать «Запустить»
+        вслепую нельзя — порт может быть занят.
+        """
+        pid = self._known_service_pid()
+        if not pid:
+            return False
+        try:
+            if not process_info.pid_alive(pid):
+                return False
+            return process_info.looks_like_service(pid)
+        except Exception:
+            return False
 
     # ------------------------------------------------------------------
     # Журнал проездов в оболочке
@@ -332,40 +437,68 @@ class AppShell:
             pass
         self.schedule(100, self.process)
 
-    def show_message(self, text):
-        """Короткое сообщение в шапке: длинный текст здесь неуместен."""
+    def show_message(self, text, tone=''):
+        """Результат операции управления сервисом.
+
+        Сообщение показывается в панели управления: в шапке нет места для
+        текста, а ошибку операции нужно увидеть сразу — панель открывается.
+
+        `tone` — оформление сообщения: `error` (ошибка операции), `ok`
+        (операция выполнена) или пустая строка (обычное уведомление).
+
+        Панель управления открывается сама только при ошибке: результат
+        успешной операции пользователь и так видит в открытой панели.
+        """
         value = (text or '').strip()
-        if len(value) > 70:
-            value = value[:67] + '…'
+        if len(value) > 140:
+            value = value[:137] + '…'
         self.message.set(value)
+        self.message_tone = tone or ''
         header = getattr(self, 'header', None)
         if header is not None:
             header.sync_message()
+            if value and self.message_tone == 'error' \
+                    and header.details is not None and not header.details.is_open:
+                header.details.open()
 
     # ------------------------------------------------------------------
     # Управление сервисом
     # ------------------------------------------------------------------
     def toggle_service(self):
-        """Запустить или остановить ANPR-сервис (одна кнопка в Header)."""
+        """Запустить или остановить ANPR-сервис (переключатель)."""
         if self.busy or self.closing:
             return
         if self.running:
-            if not self._confirm('Остановить систему',
-                                'Остановить ANPR-мониторинг?\nПроезды перестанут фиксироваться.',
-                                action='service.stop'):
-                return
-            self.work(lambda: service.stop(source='panel'), 'stop')
+            self.stop_service()
         else:
-            audit.panel('service.start.requested', 'requested', source='panel',
-                        confirmation=False)
-            self.work(lambda: service.start(source='panel'), 'start')
+            self.start_service()
 
-    def restart_service(self):
-        """Перезапустить ANPR-сервис."""
+    def start_service(self):
+        """Запустить ANPR-сервис (без подтверждения: сервис ничего не теряет)."""
         if self.busy or self.closing:
             return
-        if not self._confirm('Перезапустить систему',
-                            'Перезапустить ANPR-мониторинг?\nСбор данных прервётся на несколько секунд.',
+        audit.panel('service.start.requested', 'requested', source='panel',
+                    confirmation=False)
+        self.work(lambda: service.start(source='panel'), 'start')
+
+    def stop_service(self):
+        """Остановить ANPR-сервис (с подтверждением пользователя)."""
+        if self.busy or self.closing:
+            return
+        if not self._confirm('Остановить ANPR-сервис?',
+                            'Распознавание номеров и обработка новых событий '
+                            'будут приостановлены до повторного запуска.',
+                            action='service.stop'):
+            return
+        self.work(lambda: service.stop(source='panel'), 'stop')
+
+    def restart_service(self):
+        """Перезапустить ANPR-сервис (с подтверждением пользователя)."""
+        if self.busy or self.closing:
+            return
+        if not self._confirm('Перезапустить ANPR-сервис?',
+                            'Во время перезапуска обработка событий может быть '
+                            'временно недоступна.',
                             action='service.restart'):
             return
         self.work(self._restart_sequence, 'restart')
@@ -393,14 +526,19 @@ class AppShell:
         self.queue.put(('phase', 'start'))
         return service.start(source='panel')
 
-    def work(self, action, operation='start'):
-        """Выполнить операцию управления сервисом в фоновом потоке."""
+    def work(self, action, operation='start', silent=False):
+        """Выполнить операцию управления сервисом в фоновом потоке.
+
+        `silent` — не показывать результат операции (автоматический запуск
+        при старте приложения: сообщение пользователю ничего не даёт).
+        """
         if self.busy or self.closing:
             return
         self.busy = True
         self.operation = operation
         self.phase = None
         self._last_error = ''
+        self._silent_operation = silent
         self.show_message('')
         self._set_busy(True)
 
@@ -418,6 +556,7 @@ class AppShell:
 
     def _finish_operation(self, result):
         """Операция завершена: снимаем блокировку и обновляем индикаторы."""
+        operation_name = self.operation
         self.busy = False
         self.operation = None
         self.phase = None
@@ -425,13 +564,26 @@ class AppShell:
         error = (result or {}).get('error') or ''
         if error:
             self._last_error = error
-            self.show_message(error)
-        else:
+            self.show_message(error, tone='error')
+        elif getattr(self, '_silent_operation', False):
             self.show_message('')
+        else:
+            self.show_message(OPERATION_RESULTS.get(operation_name, ''), tone='ok')
         self.refresh_now()
 
     def _set_busy(self, busy):
+        """Занятость панели управления.
+
+        Пока идёт операция, состояние сервиса показывается сразу («Запускается»,
+        «Останавливается», «Перезапускается») — ждать следующего опроса
+        не нужно.
+        """
         header = getattr(self, 'header', None)
+        if busy:
+            state = ui_status.service_view(self._health, True, self.operation, self.phase)
+            self._states['service'] = state
+            if header is not None:
+                header.set_state('service', state)
         if header is not None:
             header.set_busy(busy)
 
@@ -522,6 +674,12 @@ class AppShell:
         except Exception:
             pass
         self._stop_sections()
+        header = getattr(self, 'header', None)
+        if header is not None:
+            try:
+                header.shutdown()
+            except Exception:
+                pass
         # Отложенные вызовы Tk (в том числе внутренние CustomTkinter)
         # отменяются до уничтожения виджетов — иначе в stderr появляется
         # «invalid command name …».
