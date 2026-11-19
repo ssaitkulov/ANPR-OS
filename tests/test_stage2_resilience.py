@@ -298,6 +298,9 @@ class GracefulShutdownTests(unittest.TestCase):
     def test_service_stops_through_the_shutdown_endpoint(self):
         calls = []
 
+        class FakeResponse:
+            status_code = 200
+
         class FakeSession:
             def __enter__(self):
                 return self
@@ -305,9 +308,9 @@ class GracefulShutdownTests(unittest.TestCase):
             def __exit__(self, *args):
                 return False
 
-            def post(self, url, timeout=None):
+            def post(self, url, timeout=None, headers=None):
                 calls.append(url)
-                return object()
+                return FakeResponse()
 
             def get(self, url, timeout=None):
                 raise requests.ConnectionError()
@@ -322,6 +325,9 @@ class GracefulShutdownTests(unittest.TestCase):
         kill.assert_not_called()
 
     def test_force_kill_only_as_a_last_resort(self):
+        class FakeResponse:
+            status_code = 200
+
         class FakeSession:
             def __enter__(self):
                 return self
@@ -329,8 +335,8 @@ class GracefulShutdownTests(unittest.TestCase):
             def __exit__(self, *args):
                 return False
 
-            def post(self, url, timeout=None):
-                return object()
+            def post(self, url, timeout=None, headers=None):
+                return FakeResponse()
 
         with safe_mode.guards_suspended(), \
              patch.object(service_control.requests, 'Session', return_value=FakeSession()), \

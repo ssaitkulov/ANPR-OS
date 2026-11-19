@@ -10,9 +10,10 @@ from pathlib import Path
 
 from app.services import logs as service_logs
 from app.services import audit
+from app.services import auth
 
 import anpr_telegram as M
-from fastapi import FastAPI, BackgroundTasks, HTTPException
+from fastapi import FastAPI, BackgroundTasks, HTTPException, Request
 from fastapi.responses import Response
 
 try:
@@ -29,6 +30,24 @@ started_at = time.time()
 _worker_started = False
 _worker = None
 _server = None   # объект uvicorn — через него выполняется мягкая остановка
+
+
+def _control_token() -> str:
+    """Токен управления сервисом (создаётся при первом запуске).
+
+    Токен живёт в памяти процесса: файл с ним нужен только клиенту.
+    Если файл удалили, он восстанавливается — иначе управление стало бы
+    невозможным до перезапуска сервиса.
+    """
+    global _token
+    if _token is None:
+        _token = auth.load_or_create_token()
+    elif not auth.token_path().exists():
+        auth.write_token(_token)
+    return _token
+
+
+_token: str | None = None
 
 
 def shutdown_service() -> None:
@@ -81,7 +100,7 @@ app = FastAPI(title="ANPR FAYZ", version="1.0", lifespan=lifespan)
 
 @app.get("/health")
 def health():
-    return {"service": "anpr-fayz", "pid": os.getpid(), "status": "ok" if _worker and _worker.is_alive() else "worker_stopped", "camera": M.DAHUA_HOST, "time": M.now_local().isoformat(), "started_at": started_at, **M.RUNTIME}
+    return {"service": "anpr-fayz", "pid": os.getpid(), "status": "ok" if _worker and _worker.is_alive() else "worker_stopped", "camera": M.DAHUA_HOST, "time": M.now_local().isoformat(), "started_at": started_at, "protocol": auth.PROTOCOL_VERSION, "shutdown_auth": "token", **M.RUNTIME}
 
 
 @app.get("/events")
@@ -157,17 +176,28 @@ def backfill_now(background_tasks: BackgroundTasks):
 
 
 @app.post("/shutdown")
-def shutdown():
+def shutdown(request: Request):
     """Мягко остановить сервис.
+
+    Запрос принимается только с секретным токеном управления: без него
+    сервис не останавливается. Отказ записывается в журнал аудита — без
+    раскрытия самого токена.
 
     Потоки дорабатывают текущую операцию, состояние пишется на диск,
     база закрывается — после этого процесс завершается сам.
     """
+    presented = request.headers.get(auth.TOKEN_HEADER, '') if request is not None else ''
+    if not auth.verify(presented, expected=_control_token()):
+        client = request.client.host if (request is not None and request.client) else ''
+        audit.control('service.shutdown', 'denied', source='service', target_pid=os.getpid(),
+                      reason='токен управления не предъявлен или неверен', client=str(client))
+        raise HTTPException(status_code=401, detail="Требуется секретный токен управления")
     if _server is None:
         audit.control('service.shutdown', 'error', source='service',
                       target_pid=os.getpid(), error='сервис запущен без управляющего сервера')
         raise HTTPException(status_code=503, detail="Сервис запущен без управляющего сервера")
-    audit.control('service.shutdown', 'ok', source='service', target_pid=os.getpid())
+    audit.control('service.shutdown', 'ok', source='service', target_pid=os.getpid(),
+                  client=str(request.client.host if request.client else ''))
     _server.should_exit = True
     return {"service": "anpr-fayz", "status": "stopping"}
 
@@ -180,6 +210,9 @@ def run() -> None:
     """
     global _server
     import uvicorn
+    # Токен управления создаётся при старте: файл с ним должен быть готов
+    # до первого запроса остановки.
+    _control_token()
     # Журналы с ротацией — весь вывод сервиса идёт в файлы, а не в консоль.
     service_logs.install()
     config = uvicorn.Config(app, host=HOST, port=PORT,

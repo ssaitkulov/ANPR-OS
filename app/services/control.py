@@ -11,6 +11,7 @@ import requests
 from app.core.paths import PROJECT_ROOT, runtime_dir, env_file
 from app.core import safe_mode
 from app.services import audit
+from app.services import auth
 
 #: Корень проекта: журналы, pid-файл и лаунчер сервиса лежат в корне.
 BASE = PROJECT_ROOT
@@ -129,9 +130,29 @@ def stop(source: str = 'cli'):
         store = pid_file()
         if not store.exists() or int(store.read_text()) != result.get('pid'):
             raise RuntimeError('Это другой экземпляр программы. Автоматическая остановка отменена.')
-        op['target_pid'] = result.get('pid')
-        stop_gracefully(result['pid'], source=source)
+        target = result.get('pid')
+        op['target_pid'] = target
+        stop_gracefully(target, source=source)
         store.unlink(missing_ok=True)
+
+
+def server_capabilities() -> dict:
+    """Что умеет сервер: версия протокола и требование токена.
+
+    Ответ старого сервиса (без полей `protocol`) — это протокол 1:
+    остановка без токена. Смешивать схемы нельзя, поэтому решение принимается
+    по версии сервера, а не по версии клиента.
+    """
+    try:
+        data = health()
+    except Exception:
+        return {'protocol': 1, 'shutdown_auth': 'none', 'reachable': False}
+    try:
+        protocol = int(data.get('protocol') or 1)
+    except (TypeError, ValueError):
+        protocol = 1
+    return {'protocol': protocol, 'shutdown_auth': str(data.get('shutdown_auth') or 'none'),
+            'reachable': True}
 
 
 def stop_gracefully(pid, source: str = 'cli') -> None:
@@ -141,12 +162,25 @@ def stop_gracefully(pid, source: str = 'cli') -> None:
     секунд (зависший поток). Обычно этого не происходит.
     """
     safe_mode.guard('Остановка сервиса ANPR')
+    capabilities = server_capabilities()
+    headers = {}
+    scheme = 'legacy'
+    if capabilities['shutdown_auth'] == 'token':
+        token = auth.read_token()
+        if not token:
+            raise RuntimeError('Файл токена управления недоступен: остановка отменена.')
+        headers[auth.TOKEN_HEADER] = token
+        scheme = 'token'
     audit.record('service.shutdown.requested', 'requested', source=source, target_pid=pid,
-                 transport='http')
+                 transport='http', scheme=scheme, protocol=capabilities['protocol'])
     try:
         with requests.Session() as session:
             session.trust_env = False
-            session.post(URL + '/shutdown', timeout=5)
+            response = session.post(URL + '/shutdown', timeout=5, headers=headers)
+            if response.status_code == 401:
+                audit.record('service.shutdown.requested', 'denied', source=source,
+                             target_pid=pid, reason='сервер не принял токен управления')
+                raise RuntimeError('Сервис не принял токен управления: остановка отменена.')
     except requests.RequestException as error:
         audit.record('service.shutdown.requested', 'error', source=source, target_pid=pid,
                      error=str(error))
