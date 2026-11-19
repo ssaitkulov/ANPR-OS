@@ -688,6 +688,10 @@ class AppShell:
             self.root.destroy()
         except Exception:
             pass
+        # Уничтожение виджетов вызывает события Configure: на них интерфейс
+        # мог запланировать новые вызовы. Их тоже отменяем — интерпретатор
+        # Tk при этом ещё жив.
+        cancel_pending_scripts(self.root)
 
     def _stop_sections(self):
         for section in getattr(self, 'section_objects', {}).values():

@@ -16,3 +16,10 @@
 Точки входа в корне проекта (`control_panel.py`, `setup_anpr.py`) — лаунчеры
 этих модулей.
 """
+
+from app.ui import schedule as _schedule
+
+# Отложенные вызовы Tkinter получают уникальные имена команд: иначе
+# переиспользование идентификаторов временных объектов приводит к
+# «invalid command name …» в stderr. Подробности — в `app/ui/schedule.py`.
+_schedule.install()

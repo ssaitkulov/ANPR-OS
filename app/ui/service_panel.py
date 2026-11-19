@@ -138,6 +138,7 @@ class ServicePanel:
         self.on_toggle = on_toggle
         self.key = None
         self.open_state = False
+        self.closed = False
         self._anchor = None
         self._progress_job = None
         self._token = object()
@@ -337,6 +338,8 @@ class ServicePanel:
     # ------------------------------------------------------------------
     def refresh(self):
         """Обновить содержимое панели по данным владельца."""
+        if self.closed:
+            return
         data = self.owner.panel_data()
         for key, section in self.sections.items():
             block = data.get(key) or {}
@@ -478,5 +481,6 @@ class ServicePanel:
     # ------------------------------------------------------------------
     def shutdown(self):
         """Отменить все отложенные вызовы панели (при закрытии окна)."""
+        self.closed = True
         self._stop_progress()
         self.motion.cancel_all()

@@ -137,6 +137,8 @@ class SystemHeader:
         self.tight = False
         self._fitting = False
         self._refit = False
+        self._refit_job = None
+        self.closed = False
         self.motion = motion.Motion(master)
 
         # --- левая часть: логотип и навигация ---
@@ -255,7 +257,7 @@ class SystemHeader:
     def set_state(self, key, state):
         """Обновить индикатор состояния."""
         chip = self.chips.get(key)
-        if chip is None or not state:
+        if chip is None or not state or self.closed:
             return
         self._states[key] = state
         chip.set_state(state, self.compact)
@@ -307,6 +309,8 @@ class SystemHeader:
         обрабатывает и события Configure, поэтому без защиты шапка
         пересчитывала бы саму себя до переполнения стека.
         """
+        if self.closed:
+            return
         if self._fitting:
             self._refit = True
             return
@@ -317,10 +321,20 @@ class SystemHeader:
             self._fitting = False
             if self._refit:
                 self._refit = False
-                try:
-                    self.overlay.after_idle(self._fit_width)
-                except tk.TclError:
-                    pass
+                self._schedule_refit()
+
+    def _schedule_refit(self):
+        """Отложенный пересчёт ширины (с защитой от рекурсии)."""
+        if self._refit_job is not None:
+            try:
+                self.overlay.after_cancel(self._refit_job)
+            except tk.TclError:
+                pass
+            self._refit_job = None
+        try:
+            self._refit_job = self.overlay.after_idle(self._fit_width)
+        except tk.TclError:
+            self._refit_job = None
 
     def _fit_width_now(self):
         """Собственно пересчёт ширины (вызывается под защитой)."""
@@ -370,6 +384,19 @@ class SystemHeader:
     # Закрытие
     # ------------------------------------------------------------------
     def shutdown(self):
-        """Отменить отложенные вызовы шапки и панели."""
+        """Отменить отложенные вызовы шапки и панели.
+
+        Шапка перестаёт реагировать на события до отмены вызовов: при
+        закрытии окна виджеты ещё Destroy-ятся, и на это приходят
+        Configure-события. Без остановки шапка успела бы запланировать
+        новые вызовы — и они сработали бы уже на закрытом окне.
+        """
+        self.closed = True
+        if self._refit_job is not None:
+            try:
+                self.overlay.after_cancel(self._refit_job)
+            except tk.TclError:
+                pass
+            self._refit_job = None
         self.details.shutdown()
         self.motion.cancel_all()

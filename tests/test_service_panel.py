@@ -143,7 +143,10 @@ class ShellTestCase(unittest.TestCase):
         """Прокрутить цикл событий Tk заданное время."""
         deadline = time.monotonic() + seconds
         while time.monotonic() < deadline:
-            self.root.update()
+            try:
+                self.root.update()
+            except tk.TclError:
+                return
             time.sleep(0.02)
 
     def click(self, widget):
@@ -478,6 +481,56 @@ class AnimationTests(ShellTestCase):
         self.pump(0.3)
         self.assertEqual(self.panel.motion.pending, 0)
         self.assertEqual(self.errors, [])
+
+    def test_header_does_not_schedule_callbacks_after_shutdown(self):
+        """Закрытая шапка не планирует новых вызовов.
+
+        При закрытии окна виджеты ещё Destroy-ятся, и на это приходят
+        Configure-события. Если шапка на них реагирует, она успевает
+        запланировать вызовы — они сработают уже на закрытом окне
+        («invalid command name …»).
+        """
+        self.shell.update_status(HEALTH)
+        self.header.toggle_panel()
+        self.pump(0.2)
+        self.header.shutdown()
+        pending = self.header.motion.pending
+        self.header.overlay.event_generate('<Configure>')
+        self.pump(0.2)
+        self.assertEqual(self.header.motion.pending, pending)
+
+    def test_closing_the_window_leaves_no_pending_callbacks(self):
+        """После закрытия окна не остаётся отложенных вызовов Tk.
+
+        Именно такие вызовы печатают «invalid command name …», когда
+        срабатывают уже на уничтоженном окне.
+        """
+        self.root.deiconify()
+        self.shell.update_status(HEALTH)
+        self.header.toggle_panel()
+        self.pump(0.5)
+        self.shell._quit()
+        self.assertEqual(tuple(self.root.tk.call('after', 'info')), ())
+
+    def test_closing_the_window_prints_no_invalid_command(self):
+        """Закрытие окна не печатает «invalid command name …»."""
+        import os
+        import tempfile
+        self.shell.update_status(HEALTH)
+        self.header.toggle_panel()
+        self.pump(0.3)
+        with tempfile.TemporaryFile(mode='w+b') as buffer:
+            saved = os.dup(2)
+            try:
+                os.dup2(buffer.fileno(), 2)
+                self.shell._quit()
+                self.pump(0.3)
+            finally:
+                os.dup2(saved, 2)
+                os.close(saved)
+            buffer.seek(0)
+            output = buffer.read().decode('utf-8', 'replace')
+        self.assertNotIn('invalid command name', output)
 
     def test_reduced_motion_opens_the_panel_without_animation(self):
         from app.ui import motion as motion_module
