@@ -74,6 +74,15 @@ class SafeModeStateTests(unittest.TestCase):
         self.assertEqual(bot.DIRECTION, '')
         self.assertEqual(bot.ALLOWED_LANES, '')
 
+    def test_journals_are_written_inside_the_isolation(self):
+        """Журналы управления не должны появляться в рабочем каталоге."""
+        from app.services import audit
+        isolation = str(safe_mode.isolation_dir())
+        self.assertTrue(str(audit.journal_path('control')).startswith(isolation))
+        self.assertTrue(str(audit.journal_path('panel')).startswith(isolation))
+        self.assertFalse((PROJECT_ROOT / 'service.control.log').exists())
+        self.assertFalse((PROJECT_ROOT / 'panel.log').exists())
+
 
 class DangerousActionTests(unittest.TestCase):
     """Опасные действия невозможны: они блокируются, а не выполняются."""
