@@ -225,6 +225,61 @@ class OutboxDeliveryTests(anpr_testenv.IsolatedTestCase):
         self.assertEqual(bot.STORE.outbox_stats()['dead'], 1)
 
 
+class DeliveryCounterTests(anpr_testenv.IsolatedTestCase):
+    """Счётчики доставки в `/health` показывают результат любой рассылки.
+
+    Рассылка идёт тремя путями — въезд, добор из архива, отчёт, — и счётчик
+    должен отражать результат любой из них: иначе панель пишет «Нет соединения»,
+    хотя сообщения доставлялись.
+    """
+
+    def _reset_counter(self):
+        bot.RUNTIME['telegram_delivery'] = {'ok': False, 'delivered': 0, 'failed': 0, 'at': ''}
+        bot.RUNTIME['telegram_message'] = 'ожидаю первую отправку.'
+
+    def test_plain_broadcast_publishes_the_delivery_counters(self):
+        """Рассылка не из `/entries` (добор, отчёт) — тоже видна в `/health`."""
+        self._reset_counter()
+        with patch.object(bot, 'TELEGRAM_BOT_TOKEN', '123:token'), \
+             patch.object(bot, 'ALLOWED_CHAT_IDS', '42'), \
+             patch.object(bot, 'get_recipients', return_value=['42']), \
+             patch.object(bot, 'telegram_send_to', return_value=True):
+            ok = bot.telegram_send('📥 Проезды из архива камеры: 3', kind='backfill')
+        self.assertTrue(ok)
+        delivery = bot.RUNTIME['telegram_delivery']
+        self.assertTrue(delivery['ok'])
+        self.assertEqual(delivery['delivered'], 1)
+        self.assertEqual(delivery['failed'], 0)
+        self.assertTrue(delivery['at'])
+        self.assertIn('доставлено', bot.RUNTIME['telegram_message'])
+
+    def test_failed_broadcast_publishes_the_failure(self):
+        """Доставка не прошла — счётчик показывает ошибку, а не «ожидание»."""
+        self._reset_counter()
+        with patch.object(bot, 'TELEGRAM_BOT_TOKEN', '123:token'), \
+             patch.object(bot, 'ALLOWED_CHAT_IDS', '42'), \
+             patch.object(bot, 'get_recipients', return_value=['42']), \
+             patch.object(bot, 'telegram_send_to', return_value=False):
+            ok = bot.telegram_send('📥 Проезды из архива камеры: 3', kind='backfill')
+        self.assertFalse(ok)
+        delivery = bot.RUNTIME['telegram_delivery']
+        self.assertFalse(delivery['ok'])
+        self.assertEqual(delivery['delivered'], 0)
+        self.assertEqual(delivery['failed'], 1)
+        self.assertTrue(delivery['at'])
+        self.assertIn('не удалось', bot.RUNTIME['telegram_message'])
+
+    def test_no_recipients_keeps_the_previous_counters(self):
+        """Получателей нет — отправки не было, прежнее значение сохраняется."""
+        self._reset_counter()
+        with patch.object(bot, 'TELEGRAM_BOT_TOKEN', '123:token'), \
+             patch.object(bot, 'get_recipients', return_value=[]):
+            bot.telegram_send('📥 Проезды из архива камеры: 3', kind='backfill')
+        self.assertEqual(bot.RUNTIME['telegram_delivery'],
+                         {'ok': False, 'delivered': 0, 'failed': 0, 'at': ''})
+        self.assertEqual(bot.RUNTIME['telegram_message'], 'ожидаю первую отправку.')
+
+
 class ConcurrentBackfillTests(anpr_testenv.IsolatedTestCase):
     """Два добора архива одновременно не должны мешать друг другу."""
 

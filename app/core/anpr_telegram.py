@@ -325,11 +325,45 @@ _LAST_DELIVERY: dict = {'delivered': [], 'failed': [], 'seq': 0}
 _DELIVERY_SEQ = {'n': 0}
 
 
+def _delivery_message(ok: bool, elapsed: float | None = None) -> str:
+    """Человеческий текст о последней рассылке — для индикатора панели."""
+    text = ('последнее уведомление доставлено хотя бы в один разрешённый чат.' if ok
+            else 'не удалось доставить уведомление (в очередь). '
+                 'Проверьте интернет, токен и ID чата.')
+    if elapsed is not None:
+        text += f' Отправка заняла {elapsed:.1f} с.'
+    return text
+
+
+def _publish_delivery(delivered: list, failed: list, elapsed: float | None = None) -> None:
+    """Отразить итог последней рассылки в `/health`.
+
+    Счётчики доставки читают панель (индикатор Telegram) и приёмка
+    (`scripts/acceptance_check.py`). Рассылка идёт тремя путями — въезд,
+    добор из архива, отчёт, — и счётчик должен показывать результат любой
+    из них, а не только въезда: иначе после успешной отправки списка из
+    архива панель писала бы «Нет соединения».
+    """
+    if not delivered and not failed:
+        # Отправки не было (получателей нет — текст ждёт в очереди):
+        # прежнее значение счётчиков сохраняется.
+        return
+    ok = bool(delivered)
+    RUNTIME['telegram_delivery'] = {
+        'ok': ok,
+        'delivered': len(delivered),
+        'failed': len(failed),
+        'at': now_local().isoformat(),
+    }
+    RUNTIME['telegram_message'] = _delivery_message(ok, elapsed)
+
+
 def _set_delivery(delivered: list, failed: list) -> None:
     """Запомнить итог рассылки по чатам (пустые списки — отправки не было)."""
     _DELIVERY_SEQ['n'] += 1
     _LAST_DELIVERY.update({'delivered': list(delivered), 'failed': list(failed),
                             'seq': _DELIVERY_SEQ['n']})
+    _publish_delivery(delivered, failed)
 
 
 def _telegram_post_message(chat_id: str, text: str) -> bool:
@@ -703,9 +737,8 @@ def send_entry_notification(rec: dict, images, dry_run: bool = False) -> None:
         EVENTS.add('telegram_ok', 'Сообщение отправлено', delivered_at)
     else:
         EVENTS.add('telegram_error', 'Ошибка отправки Telegram', delivered_at)
-    RUNTIME['telegram_message'] = ('последнее уведомление доставлено хотя бы в один разрешённый чат.' if ok else 'не удалось доставить уведомление (в очередь). Проверьте интернет, токен и ID чата.')
     elapsed = time.monotonic() - send_started
-    RUNTIME['telegram_message'] += f' Отправка заняла {elapsed:.1f} с.'
+    RUNTIME['telegram_message'] = _delivery_message(ok, elapsed)
     print(f'[delivery] started={rec.get("iso", "")} duration_seconds={elapsed:.3f} success={ok}', file=sys.stderr)
     print(f"[telegram] въезд отправлен: {ok}", file=sys.stderr)
     # Недоставленные чаты уже получили текст в очередь внутри telegram_send_* — здесь дублировать нельзя.

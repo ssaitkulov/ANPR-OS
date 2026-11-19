@@ -36,19 +36,23 @@ class SingleInstanceTests(unittest.TestCase):
         self.assertIn('EvrikaOther', other)
 
     def test_second_instance_cannot_acquire_the_mutex(self):
-        first = service_instance.ServiceInstance()
+        # Своё имя блокировки: боевой сервис может работать — тест не должен
+        # занимать его мютекс и падать из-за этого.
+        name = service_instance.mutex_name('EvrikaServiceTest')
+        first = service_instance.ServiceInstance(name)
         self.assertTrue(first.acquire(), 'первый экземпляр должен получить блокировку')
         try:
-            second = service_instance.ServiceInstance()
+            second = service_instance.ServiceInstance(name)
             self.assertFalse(second.acquire(), 'второй экземпляр не должен запускаться')
         finally:
             first.release()
 
     def test_mutex_is_released(self):
-        first = service_instance.ServiceInstance()
+        name = service_instance.mutex_name('EvrikaServiceTest')
+        first = service_instance.ServiceInstance(name)
         self.assertTrue(first.acquire())
         first.release()
-        second = service_instance.ServiceInstance()
+        second = service_instance.ServiceInstance(name)
         try:
             self.assertTrue(second.acquire(), 'после освобождения блокировка доступна')
         finally:
