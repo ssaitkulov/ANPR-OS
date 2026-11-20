@@ -332,8 +332,6 @@ class MonitoringSection:
                           command=lambda _: self.draw_chart(), width=75, height=28,
                           fg_color='#26364c', button_color='#334b6b', button_hover_color='#416087').pack(side='right')
         ctk.CTkLabel(graph_header, text='Интервал', text_color=MUTED, font=('Segoe UI', 11)).pack(side='right', padx=(0, 8))
-        self.chart_note = ctk.CTkLabel(graph, text='По часам за весь период', text_color=MUTED,
-                                       font=('Segoe UI', 10), anchor='w', height=18)
         self.graph = tk.Canvas(graph, bg=CARD, highlightthickness=0)
         self.graph.pack(fill='both', expand=True, padx=12, pady=(4, 12))
         from tkinter import font as tkfont
@@ -513,10 +511,6 @@ class MonitoringSection:
         else:
             label = f'{start:%d.%m.%Y} – {end:%d.%m.%Y}  ▾'
         self.date_button.configure(text=label, width=215 if start != end else 140)
-        if start == end:
-            self.chart_note.pack_forget()
-        else:
-            self.chart_note.pack(fill='x', padx=(58, 12), before=self.graph)
         for metric in (self.total, self.unique, self.entry_metric, self.exit_metric):
             metric.configure(text='—')
         self.hours = [0] * 24

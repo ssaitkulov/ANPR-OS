@@ -208,7 +208,7 @@ def camera_view(data=None, running=False):
     """
     if not running:
         return view(CAMERA_UNKNOWN, CAMERA_LABELS[CAMERA_UNKNOWN], MUTED,
-                    'Сервис остановлен — состояние камеры неизвестно.',
+                    'Сервис остановлен. Состояние камеры неизвестно.',
                     CAMERA_SHORT[CAMERA_UNKNOWN])
     data = data or {}
     message = str(data.get('camera_message') or '').strip()
@@ -243,14 +243,14 @@ def camera_events_view(data=None, running=False):
     """
     if not running:
         return view(CAMERA_EVENTS_NONE, CAMERA_EVENTS_LABELS[CAMERA_EVENTS_NONE], MUTED,
-                    'Сервис остановлен — события не опрашиваются.',
+                    'Сервис остановлен. События не опрашиваются.',
                     CAMERA_EVENTS_LABELS[CAMERA_EVENTS_NONE])
     data = data or {}
     message = str(data.get('camera_message') or '').strip().lower()
     if 'прервалась' in message or 'недоступна' in message or 'ошиб' in message \
             or 'не удалось' in message or 'отказ' in message:
         return view(CAMERA_EVENTS_ERROR, CAMERA_EVENTS_LABELS[CAMERA_EVENTS_ERROR], DANGER,
-                    'Камера недоступна — события не приходят.',
+                    'Камера недоступна. События не приходят.',
                     CAMERA_EVENTS_LABELS[CAMERA_EVENTS_ERROR])
     if str(data.get('last_camera_data') or '').strip():
         return view(CAMERA_EVENTS_RECEIVING, CAMERA_EVENTS_LABELS[CAMERA_EVENTS_RECEIVING],
@@ -284,7 +284,7 @@ def telegram_connection_view(data=None, running=False, configured=True):
                     'Не задан токен бота или список разрешённых чатов.', 'Не задано')
     if not running:
         return view(TELEGRAM_CONNECTION_UNKNOWN, 'Сервис остановлен', MUTED,
-                    'Сервис остановлен — обращения к Telegram не идут.', 'Остановлен')
+                    'Сервис остановлен. Обращения к Telegram не идут.', 'Остановлен')
     data = data or {}
     connection = data.get('telegram_connection') or {}
     at = str(connection.get('at') or '').strip()
@@ -301,7 +301,7 @@ def telegram_connection_view(data=None, running=False, configured=True):
         return view(TELEGRAM_CONNECTION_LOST, TELEGRAM_CONNECTION_LABELS[TELEGRAM_CONNECTION_LOST], DANGER,
                     detail, TELEGRAM_CONNECTION_SHORT[TELEGRAM_CONNECTION_LOST])
     return view(TELEGRAM_CONNECTION_UNKNOWN, TELEGRAM_CONNECTION_LABELS[TELEGRAM_CONNECTION_UNKNOWN], WARNING,
-                'Обращений к Telegram ещё не было — состояние неизвестно.',
+                'Обращений к Telegram ещё не было. Состояние неизвестно.',
                 TELEGRAM_CONNECTION_SHORT[TELEGRAM_CONNECTION_UNKNOWN])
 
 
@@ -318,7 +318,7 @@ def telegram_delivery_view(data=None):
     if not at:
         return view(TELEGRAM_DELIVERY_NONE, TELEGRAM_DELIVERY_LABELS[TELEGRAM_DELIVERY_NONE], MUTED,
                     'Сообщения ещё не отправлялись.', TELEGRAM_DELIVERY_SHORT[TELEGRAM_DELIVERY_NONE])
-    detail = f'{at}: доставлено чатов — {delivered}, не доставлено — {failed}.'
+    detail = f'{at}: доставлено {delivered}, не доставлено {failed}.'
     if not delivery.get('ok'):
         return view(TELEGRAM_DELIVERY_FAILED, TELEGRAM_DELIVERY_LABELS[TELEGRAM_DELIVERY_FAILED], DANGER,
                     detail, TELEGRAM_DELIVERY_SHORT[TELEGRAM_DELIVERY_FAILED])
@@ -342,7 +342,7 @@ def telegram_view(data=None, running=False, configured=True):
                     TELEGRAM_SHORT[TELEGRAM_NOT_CONFIGURED])
     if not running:
         return view(TELEGRAM_UNKNOWN, TELEGRAM_LABELS[TELEGRAM_UNKNOWN], MUTED,
-                    'Сервис остановлен — состояние Telegram неизвестно.',
+                    'Сервис остановлен. Состояние Telegram неизвестно.',
                     TELEGRAM_SHORT[TELEGRAM_UNKNOWN])
     connection = telegram_connection_view(data, running, configured)
     if connection['code'] == TELEGRAM_CONNECTION_LOST:
