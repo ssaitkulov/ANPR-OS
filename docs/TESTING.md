@@ -11,8 +11,8 @@
 | Показатель | Значение |
 |---|---|
 | Тестовых файлов | 35 (`tests/test_*.py`) + `tests/anpr_testenv.py` (изоляция) + `tests/ui_harness.py` (общая оснастка UI) |
-| Тестов собрано | **414** (одинаково у pytest и `unittest discover`) |
-| Уникальных имён тестов | 414 — совпадений имён нет (см. §4) |
+| Тестов собрано | **418** (одинаково у pytest и `unittest discover`) |
+| Уникальных имён тестов | 418 — совпадений имён нет (см. §4) |
 | Полный прогон | ~1 мин 35 с: `python -m pytest -q` — 94 с, `python -m unittest discover` — 96 с |
 | UI-часть | 80 с на 7 файлов (`test_service_panel.py`, `test_context_panel.py`, `test_stage2_ui.py`, `test_shell.py`, `test_dashboard.py`, `test_panel_status.py`, `test_segmented_tabs.py`) |
 | Быстрый smoke | `python -m pytest -q tests/test_stream_latency.py tests/test_setup_anpr.py` — 0,3 с |
@@ -36,7 +36,7 @@
 | Класс | Что проверяет | Граница | Файлов | Тестов |
 |---|---|---|---|---|
 | **UNIT** | одну функцию или модуль в отрыве от системы | нет сети, нет живого сервиса, нет боевой базы; только временные каталоги | 14 | 61 |
-| **INTEGRATION** | несколько модулей вместе: ядро + SQLite + очередь, HTTP-сервис + токен, интерфейс без окна | сеть замкана, потоки и процессы — заглушки | 19 | 327 |
+| **INTEGRATION** | несколько модулей вместе: ядро + SQLite + очередь, HTTP-сервис + токен, интерфейс без окна | сеть замкана, потоки и процессы — заглушки | 19 | 331 |
 | **ACCEPTANCE** | соответствие боевому регламенту: сверка источников, инструменты приёмки | идёт по рабочим данным, код возврата важен | 2 | 25 |
 
 ### 2.1 UNIT (14 файлов, 61 тест)
@@ -58,7 +58,7 @@
 | `test_ai_and_photo_archive.py` | 1 | `app/storage/photo_archive.py` + путь фото в базе |
 | `test_passages.py` | 1 | проезды: ключ и нормализация номера |
 
-### 2.2 INTEGRATION (19 файлов, 327 тестов)
+### 2.2 INTEGRATION (19 файлов, 331 тест)
 
 | Файл | Тестов | Предмет |
 |---|---|---|
@@ -71,7 +71,7 @@
 | `test_audit_log.py` | 22 | `app/services/audit.py`: журналы управления, маскирование секретов, чтение битых строк |
 | `test_passage_storage.py` | 19 | `app/storage/database.py`: проезды, миграции схемы, фото |
 | `test_shell.py` | 18 | `app/ui/shell.py`: оболочка окна, разделы, состояние |
-| `test_service_instance.py` | 18 | один экземпляр сервиса и панели, владелец порта, `describe` процесса |
+| `test_service_instance.py` | 22 | один экземпляр сервиса и панели, владелец порта, `describe` процесса, запуск сервиса |
 | `test_control_auth.py` | 15 | `app/services/auth.py` + `POST /shutdown`: токен, `401`, защита процесса |
 | `test_dashboard.py` | 13 | `app/ui/dashboard.py`: загрузка данных, лента проездов, график |
 | `test_stage4_polish.py` | 12 | боевой режим: отчёт, фотоархив, получатели |
@@ -185,9 +185,9 @@ UI-тестов и зависимость результатов от поряд
 | `process_info.port_owner_pid` и `describe` | `test_service_instance.py::PortOwnerTests` |
 | Чтение журнала аудита при битых строках | `test_audit_log.py::JournalReadTests` |
 | График и лента «Мониторинга» | `test_dashboard.py::MonitoringWidgetsTests` |
+| Запуск сервиса: занятый порт, нет `.env`, процесс упал | `test_service_instance.py::StartTests` |
 
-Не закрыты (план — в аудите): запуск сервиса при занятом порте и без `.env`
-(`app/services/control.py`), низкий приоритет: `app/ui/motion.py`,
+Не закрыты (план — в аудите): низкий приоритет — `app/ui/motion.py`,
 `app/ui/widgets.py`, `app/ui/settings.py`.
 
 ## 6. Правила, которые нельзя ослаблять

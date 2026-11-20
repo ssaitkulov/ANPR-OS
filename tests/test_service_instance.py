@@ -18,6 +18,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import requests
+
 from app.core.paths import PROJECT_ROOT
 from app.core import safe_mode
 from app.services import control as service_control
@@ -231,6 +233,55 @@ class StopSafetyTests(unittest.TestCase):
         self.assertIn('ANPR_RUNTIME_DIR', os.environ)
         self.assertNotEqual(service_control.pid_file(),
                             PROJECT_ROOT / 'data' / 'runtime' / 'service.pid')
+
+
+class StartTests(unittest.TestCase):
+    """Запуск сервиса: занятый порт, отсутствие настроек, готовность процесса."""
+
+    def test_already_running_service_is_returned_without_spawning(self):
+        running = {'service': 'anpr-fayz', 'pid': 4242, 'status': 'ok'}
+        with safe_mode.guards_suspended(), \
+             patch.object(service_control, 'health', return_value=running), \
+             patch.object(service_control.subprocess, 'Popen') as popen:
+            result = service_control.start(source='test')
+        self.assertEqual(result, running)
+        popen.assert_not_called()
+
+    def test_busy_port_is_reported_without_spawning(self):
+        with safe_mode.guards_suspended(), \
+             patch.object(service_control, 'health', side_effect=requests.ConnectionError()), \
+             patch.object(service_control.socket, 'socket') as fake_socket, \
+             patch.object(service_control.subprocess, 'Popen') as popen:
+            fake_socket.return_value.__enter__.return_value.bind.side_effect = OSError('in use')
+            with self.assertRaisesRegex(RuntimeError, 'Порт занят'):
+                service_control.start(source='test')
+        popen.assert_not_called()
+
+    def test_missing_env_points_to_settings(self):
+        with tempfile.TemporaryDirectory() as folder:
+            with safe_mode.guards_suspended(), \
+                 patch.object(service_control, 'health', side_effect=requests.ConnectionError()), \
+                 patch.object(service_control.socket, 'socket'), \
+                 patch.object(service_control, 'env_file', return_value=Path(folder) / '.env'), \
+                 patch.object(service_control.subprocess, 'Popen') as popen:
+                with self.assertRaisesRegex(RuntimeError, 'Настройки'):
+                    service_control.start(source='test')
+        popen.assert_not_called()
+
+    def test_process_that_dies_on_startup_is_reported(self):
+        process = SimpleNamespace(pid=4242, poll=lambda: 1)
+        with tempfile.TemporaryDirectory() as folder:
+            (Path(folder) / '.env').write_text('', encoding='utf-8')
+            with safe_mode.guards_suspended(), \
+                 patch.object(service_control, 'health', side_effect=requests.ConnectionError()), \
+                 patch.object(service_control.socket, 'socket'), \
+                 patch.object(service_control, 'env_file', return_value=Path(folder) / '.env'), \
+                 patch.object(service_control, 'boot_log',
+                              return_value=Path(folder) / 'boot.log'), \
+                 patch.object(service_control.subprocess, 'Popen', return_value=process) as popen:
+                with self.assertRaisesRegex(RuntimeError, 'Не удалось запустить'):
+                    service_control.start(source='test')
+        popen.assert_called_once()
 
 
 if __name__ == '__main__':

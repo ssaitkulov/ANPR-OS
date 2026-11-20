@@ -287,6 +287,7 @@ smoke (`tests.test_stream_latency tests.test_setup_anpr`, 0,3 с), полный 
 | №7 `paths.legacy_data()` и `ensure_data_dirs()` | `tests/test_paths.py::LegacyDataTests` |
 | №8 ветка `ANPR_SAFE_MODE=0` | `tests/test_safe_mode.py::SafeModeFlagTests` — отдельный экземпляр модуля, защита рабочего процесса не трогается |
 | №9 `panel_lock` | `tests/test_service_instance.py::PanelInstanceTests` |
+| №10 запуск сервиса: занятый порт, нет `.env`, готовность процесса | `tests/test_service_instance.py::StartTests` — 4 проверки через подмену `health`, `socket` и `Popen`; реальный процесс не запускается |
 | №11 `port_owner_pid` и `describe` | `tests/test_service_instance.py::PortOwnerTests` |
 | №13 график и лента «Мониторинга» | `tests/test_dashboard.py::MonitoringWidgetsTests` |
 | №14 чтение журнала при битых строках | `tests/test_audit_log.py::JournalReadTests` |
@@ -294,8 +295,8 @@ smoke (`tests.test_stream_latency tests.test_setup_anpr`, 0,3 с), полный 
 | Пункт 2 плана (документация по факту) | `docs/TESTING.md` §1–§3 обновлены |
 | Пункт 3 плана (общая оснастка UI) | `tests/ui_harness.py`; `test_stage2_ui.py` переведён на неё |
 
-Не закрыто: №10 (запуск сервиса при занятом порте и без `.env`) и низкий
-приоритет — `app/ui/motion.py`, `app/ui/widgets.py`, `app/ui/settings.py`.
+Не закрыт только низкий приоритет — `app/ui/motion.py`, `app/ui/widgets.py`,
+`app/ui/settings.py`.
 
 Отдельно: дубли имён между `test_service_panel.py` и `test_stage2_ui.py`
 (§3.1) устранены — сценарии различаются, тесты переименованы; совпадений имён
