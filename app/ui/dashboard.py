@@ -303,7 +303,8 @@ class MonitoringSection:
         self.graph.pack(fill='both', expand=True, padx=12, pady=(4, 12))
         from tkinter import font as tkfont
         self.chart_axis_font = tkfont.Font(root=self.graph, family='Segoe UI', size=9)
-        self.graph.bind('<Configure>', lambda _: self.draw_chart())
+        self._chart_redraw = None
+        self.graph.bind('<Configure>', self._on_graph_configure)
         self._feed_content = None
         self.threads = [threading.Thread(target=self.data_worker, daemon=True),
                         threading.Thread(target=self.video_worker, daemon=True)]
@@ -1015,6 +1016,11 @@ class MonitoringSection:
                     self.frames.put_nowait((generation, 'error', 'Нет видеосигнала · повторное подключение…'))
                 except (queue.Empty, queue.Full): pass
                 self.stream_changed.wait(3)
+
+    def _on_graph_configure(self, _event=None):
+        """Одна перерисовка графика на пакет Configure при ресайзе."""
+        self.cancel_after(self._chart_redraw)
+        self._chart_redraw = self.schedule_idle(self.draw_chart)
 
     def draw_chart(self):
         canvas = self.graph

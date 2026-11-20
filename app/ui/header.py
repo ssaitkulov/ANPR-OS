@@ -500,6 +500,7 @@ class SystemHeader:
         self._fitting = False
         self._refit = False
         self._refit_job = None
+        self._tabs_sync_job = None
         self.closed = False
         self.motion = motion.Motion(master)
 
@@ -676,7 +677,20 @@ class SystemHeader:
                 self._schedule_refit()
         # Подложка вкладок живёт по реальным координатам окна: после
         # перерисовки её нужно поставить на место.
-        self.tabs.sync()
+        self._schedule_tabs_sync()
+
+    def _schedule_tabs_sync(self):
+        """Одна подгонка подложки на пакет Configure."""
+        if self._tabs_sync_job is not None:
+            try:
+                self.overlay.after_cancel(self._tabs_sync_job)
+            except tk.TclError:
+                pass
+            self._tabs_sync_job = None
+        try:
+            self._tabs_sync_job = self.overlay.after_idle(self.tabs.sync)
+        except tk.TclError:
+            self._tabs_sync_job = None
 
     def _schedule_refit(self):
         """Отложенный пересчёт ширины (с защитой от рекурсии)."""
@@ -753,6 +767,12 @@ class SystemHeader:
             except tk.TclError:
                 pass
             self._refit_job = None
+        if self._tabs_sync_job is not None:
+            try:
+                self.overlay.after_cancel(self._tabs_sync_job)
+            except tk.TclError:
+                pass
+            self._tabs_sync_job = None
         for chip in self.chips.values():
             chip.shutdown()
         self.details.shutdown()

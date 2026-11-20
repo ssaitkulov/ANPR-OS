@@ -397,8 +397,11 @@ class ServicePanel:
         x, y = self._position()
         if y + height > overlay_height - PANEL_GAP:
             y = max(PANEL_GAP, overlay_height - height - PANEL_GAP)
+        if getattr(self, '_placed_at', None) == (x, y):
+            return
         try:
             self.frame.place_configure(x=x, y=y)
+            self._placed_at = (x, y)
         except tk.TclError:
             pass
 

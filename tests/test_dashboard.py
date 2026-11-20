@@ -420,6 +420,19 @@ class MonitoringWidgetsTests(unittest.TestCase):
         section = self._poll_with_hours([0] * 24)
         self.assertEqual(section._scheduled[0], 50)
 
+    def test_graph_redraw_is_debounced_on_resize(self):
+        section = MonitoringSection.__new__(MonitoringSection)
+        section._chart_redraw = None
+        calls = []
+        section.cancel_after = lambda ident: calls.append(('cancel', ident))
+        section.schedule_idle = lambda cb: (calls.append(('schedule', cb)), 'id')[1]
+        section._on_graph_configure()
+        section._on_graph_configure()
+        self.assertEqual([call[0] for call in calls],
+                         ['cancel', 'schedule', 'cancel', 'schedule'])
+        self.assertEqual([call[1] for call in calls if call[0] == 'cancel'],
+                         [None, 'id'])
+
     def test_already_fitted_video_is_not_resized_again(self):
         image = SimpleNamespace(size=(320, 180))
         with patch.object(dashboard.ImageOps, 'contain') as contain:

@@ -150,6 +150,14 @@ class StatusModelTests(unittest.TestCase):
 class ServiceControlTests(ShellTestCase):
     """Управление сервисом в шапке: путь переключателя и подтверждения."""
 
+    def test_tabs_sync_is_debounced_on_resize(self):
+        header = self.shell.header
+        with patch.object(header.tabs, 'sync') as sync:
+            header._schedule_tabs_sync()
+            header._schedule_tabs_sync()
+            self.settle()
+        self.assertEqual(sync.call_count, 1)
+
     def test_set_state_does_not_force_a_tk_idle_flush(self):
         header = self.shell.header
         chip = header.chips['service']

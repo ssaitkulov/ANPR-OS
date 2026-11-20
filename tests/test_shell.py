@@ -395,5 +395,19 @@ class HealthPollingTests(unittest.TestCase):
         self.assertTrue(shell._start_health_check())
 
 
+class ResizeTests(unittest.TestCase):
+    """Один отложенный пересчёт геометрии на пакет Configure."""
+
+    def test_geometry_is_debounced(self):
+        shell = AppShell.__new__(AppShell)
+        shell._geometry_job = None
+        calls = []
+        shell.cancel_after = lambda ident: calls.append(('cancel', ident))
+        shell.schedule_idle = lambda cb: (calls.append('schedule'), 'id')[1]
+        shell._remember_geometry()
+        shell._remember_geometry()
+        self.assertEqual(calls, [('cancel', None), 'schedule', ('cancel', 'id'), 'schedule'])
+
+
 if __name__ == '__main__':
     unittest.main()

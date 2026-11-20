@@ -88,6 +88,7 @@ class AppShell:
         self.section_objects = {}
         self.current_section = None
         self._normal_geometry = None
+        self._geometry_job = None
         self._after_ids = set()
         self._health = None
         self._health_inflight = threading.Event()
@@ -789,6 +790,11 @@ class AppShell:
                 self.root.winfo_vrootwidth(), self.root.winfo_vrootheight())
 
     def _remember_geometry(self, _event=None):
+        """Запомнить геометрию один раз после пакета Configure."""
+        self.cancel_after(self._geometry_job)
+        self._geometry_job = self.schedule_idle(self._save_normal_geometry)
+
+    def _save_normal_geometry(self):
         try:
             if self.root.state() == 'normal':
                 self._normal_geometry = self.root.geometry()
