@@ -54,6 +54,17 @@ def ease_out(fraction: float) -> float:
     return 1 - (1 - value) ** 3
 
 
+def ease_in_out(fraction: float) -> float:
+    """Плавное ускорение и торможение: в середине пути быстрее всего.
+
+    Нужен для перемещения подложки сегментированного переключателя:
+    резкое начало и резкая остановка выглядят рывком, а мягкое
+    движение читается как один жест.
+    """
+    value = max(0.0, min(1.0, float(fraction)))
+    return value * value * (3 - 2 * value)
+
+
 class Motion:
     """Планировщик анимаций одного виджета.
 
@@ -128,12 +139,13 @@ class Motion:
     # ------------------------------------------------------------------
     # Анимации
     # ------------------------------------------------------------------
-    def tween(self, duration: int, step, on_complete=None, guard=None) -> None:
+    def tween(self, duration: int, step, on_complete=None, guard=None, easing=None) -> None:
         """Плавно провести значение от 0 до 1.
 
         `step(fraction)` вызывается с долей прохождения; `on_complete` — после
         завершения. `guard()` может остановить анимацию на ходу (например,
-        если панель успели закрыть, пока она показывалась).
+        если панель успели закрыть, пока она показывалась). `easing` — функция
+        кривой (по умолчанию `ease_out`).
 
         При включённом `REDUCED_MOTION` значение сразу равно 1.
         """
@@ -149,6 +161,7 @@ class Motion:
                     pass
             return
         frames = max(1, int(duration / FRAME))
+        curve = easing or ease_out
 
         def advance(remaining: int):
             stopped = guard is not None and not guard()
@@ -159,7 +172,7 @@ class Motion:
                     except tk.TclError:
                         pass
                 return
-            fraction = ease_out(1 - remaining / frames)
+            fraction = curve(1 - remaining / frames)
             try:
                 step(fraction)
             except tk.TclError:

@@ -154,9 +154,10 @@ class AppShell:
             header.close_details()
         for key, button in self.nav_buttons.items():
             active = key == name
-            button.configure(fg_color=theme.ACCENT if active else 'transparent',
-                             hover_color=theme.CARD_ALT,
-                             text_color='#ffffff' if active else self.TEXT)
+            # Активную вкладку красит подложка сегментированного
+            # переключателя, поэтому сюда передаётся только признак
+            # активности.
+            button.configure(fg_color=theme.ACCENT if active else 'transparent')
         self.root.title('Эврика · ' + SECTION_TITLES.get(name, 'Эврика'))
 
     def _ensure_section(self, name):

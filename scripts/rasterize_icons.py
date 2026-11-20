@@ -41,6 +41,7 @@ ICONS = [
     'alert-triangle',      # error
     'circle-check',        # ok
     'settings',            # settings
+    'dashboard',           # monitoring
 ]
 
 #: Size of the resulting PNG, px (24x24 source, 4x reserve).
