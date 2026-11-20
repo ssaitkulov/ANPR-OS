@@ -157,7 +157,61 @@ class DashboardTests(unittest.TestCase):
             finally:
                 store.close()
 
+    def test_closed_period_aggregates_are_cached(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / 'events.sqlite3'
+            store = Store(path)
+            self.addCleanup(dashboard._AGG_CACHE.clear)
+            dashboard._AGG_CACHE.clear()
+            try:
+                store.add_event('a', {'iso': '2026-11-17T12:00:00+05:00',
+                                      'plate': 'A 123', 'direction': 'entry'})
+                with patch.object(dashboard, '_aggregate_stats',
+                                  wraps=dashboard._aggregate_stats) as stats:
+                    first = load_dashboard(path, '2026-11-17')
+                    second = load_dashboard(path, '2026-11-17', plate_query='A123')
+                self.assertEqual(stats.call_count, 1)
+                self.assertEqual(first['total'], second['total'])
+                self.assertEqual(first['hours'], second['hours'])
+                self.assertEqual(first['directions'], second['directions'])
+            finally:
+                store.close()
+
+    def test_new_rows_invalidate_the_closed_period_cache(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / 'events.sqlite3'
+            store = Store(path)
+            self.addCleanup(dashboard._AGG_CACHE.clear)
+            dashboard._AGG_CACHE.clear()
+            try:
+                store.add_event('a', {'iso': '2026-11-17T12:00:00+05:00',
+                                      'plate': 'A', 'direction': 'entry'})
+                self.assertEqual(load_dashboard(path, '2026-11-17')['total'], 1)
+                store.add_event('b', {'iso': '2026-11-17T13:00:00+05:00',
+                                      'plate': 'B', 'direction': 'exit'})
+                self.assertEqual(load_dashboard(path, '2026-11-17')['total'], 2)
+            finally:
+                store.close()
+
+    def test_today_is_not_cached(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / 'events.sqlite3'
+            store = Store(path)
+            self.addCleanup(dashboard._AGG_CACHE.clear)
+            dashboard._AGG_CACHE.clear()
+            try:
+                stamp = date.today().isoformat() + 'T12:00:00+05:00'
+                store.add_event('a', {'iso': stamp, 'plate': 'A', 'direction': 'entry'})
+                with patch.object(dashboard, '_aggregate_stats',
+                                  wraps=dashboard._aggregate_stats) as stats:
+                    load_dashboard(path, date.today().isoformat())
+                    load_dashboard(path, date.today().isoformat())
+                self.assertEqual(stats.call_count, 2)
+            finally:
+                store.close()
+
     def test_recent_limit_does_not_change_the_aggregates(self):
+
         with tempfile.TemporaryDirectory() as folder:
             path = Path(folder) / 'events.sqlite3'
             store = Store(path)
@@ -322,7 +376,9 @@ class MonitoringWidgetsTests(unittest.TestCase):
         self.section.chart_interval = _FakeVar('1 ч')
         self.section.chart_axis_font = _FakeFont()
         self.section.hours = [0] * 24
-        self.section.display_period = None
+        # Исторический период: график строит все 24 часа независимо от
+        # текущего времени (иначе после полуночи остаётся одна точка).
+        self.section.display_period = (date(2026, 11, 1), date(2026, 11, 30))
         self.section.tz = ZoneInfo('Europe/Moscow')
 
     def _texts(self):

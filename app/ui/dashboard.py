@@ -59,6 +59,13 @@ def open_database(path):
 
 FEED_PAGE = 30
 
+#: Агрегаты закрытого периода не меняются, пока не появятся новые строки.
+#: Ключ: (путь БД, начало, конец) -> (MAX(id), момент, агрегаты).
+_AGG_CACHE = {}
+_AGG_CACHE_LOCK = threading.Lock()
+_AGG_CACHE_MAX = 16
+_AGG_CACHE_TTL = 300.0
+
 
 def _iso_hour(value):
     """Час из ISO-метки; невалидные значения не попадают в график."""
@@ -68,12 +75,54 @@ def _iso_hour(value):
         return None
 
 
+def _aggregate_stats(conn, day, end_day):
+    """Показатели за весь период: один скан таблицы, без фильтра по номеру."""
+    # shortcut: NOT INDEXED — на диапазоне дней индекс (day, captured_at)
+    # вызывает случайные чтения и замедляет скан в ~7 раз; убрать, если
+    # запросы станут точечными по одному дню.
+    grouped = conn.execute(
+        'SELECT iso_hour(captured_at), direction, COUNT(*) FROM events NOT INDEXED '
+        'WHERE day BETWEEN ? AND ? GROUP BY 1, 2', (day, end_day)).fetchall()
+    unique = conn.execute(
+        "SELECT COUNT(DISTINCT plate) FROM events NOT INDEXED WHERE day BETWEEN ? AND ? "
+        "AND plate <> '' AND plate NOT IN ('—', 'UNKNOWN', 'unknown')",
+        (day, end_day)).fetchone()[0]
+    hours = [0] * 24
+    counts = {'Въезд': 0, 'Выезд': 0, 'Неизвестно': 0}
+    total = 0
+    for hour, direct, count in grouped:
+        total += count
+        if hour is not None:
+            hours[hour] += count
+        counts[direction(direct)] += count
+    return total, unique, hours, counts
+
+
+def _cached_aggregates(conn, path, day, end_day):
+    """Кэш для закрытого периода; новые строки (MAX(id)) его сбрасывают."""
+    key = (str(path), day, end_day)
+    version = conn.execute('SELECT MAX(id) FROM events').fetchone()[0] or 0
+    now = time.monotonic()
+    with _AGG_CACHE_LOCK:
+        cached = _AGG_CACHE.get(key)
+        if cached and cached[0] == version and now - cached[1] < _AGG_CACHE_TTL:
+            total, unique, hours, counts = cached[2]
+            return total, unique, list(hours), dict(counts)
+    stats = _aggregate_stats(conn, day, end_day)
+    with _AGG_CACHE_LOCK:
+        if len(_AGG_CACHE) >= _AGG_CACHE_MAX:
+            oldest = min(_AGG_CACHE, key=lambda item: _AGG_CACHE[item][1])
+            _AGG_CACHE.pop(oldest, None)
+        _AGG_CACHE[key] = (version, now, stats)
+    total, unique, hours, counts = stats
+    return total, unique, list(hours), dict(counts)
+
+
 def load_dashboard(path, day, end_day=None, plate_query='', recent_limit=200):
     """Показатели за весь период + ограниченная выборка для ленты.
 
-    Агрегаты считаются одним сканом таблицы: отдельные COUNT/GROUP BY
-    проходили бы по ней несколько раз и были бы медленнее полной выборки.
-    Поиск по номеру влияет только на `recent`, как и раньше.
+    Агрегаты закрытого периода кэшируются и пересчитываются только при
+    появлении новых строк; поиск по номеру влияет лишь на `recent`.
     """
     end_day = end_day or day
     if end_day < day:
@@ -81,16 +130,10 @@ def load_dashboard(path, day, end_day=None, plate_query='', recent_limit=200):
     with closing(open_database(path)) as conn:
         conn.create_function('iso_hour', 1, _iso_hour)
         conn.create_function('normplate', 1, normalize_plate)
-        # shortcut: NOT INDEXED — на диапазоне дней индекс (day, captured_at)
-        # вызывает случайные чтения и замедляет скан в ~7 раз; убрать, если
-        # запросы станут точечными по одному дню.
-        grouped = conn.execute(
-            'SELECT iso_hour(captured_at), direction, COUNT(*) FROM events NOT INDEXED '
-            'WHERE day BETWEEN ? AND ? GROUP BY 1, 2', (day, end_day)).fetchall()
-        unique = conn.execute(
-            "SELECT COUNT(DISTINCT plate) FROM events NOT INDEXED WHERE day BETWEEN ? AND ? "
-            "AND plate <> '' AND plate NOT IN ('—', 'UNKNOWN', 'unknown')",
-            (day, end_day)).fetchone()[0]
+        if end_day < date.today().isoformat():
+            total, unique, hours, counts = _cached_aggregates(conn, path, day, end_day)
+        else:
+            total, unique, hours, counts = _aggregate_stats(conn, day, end_day)
         query = normalize_plate(plate_query)
         sql = ('SELECT id, captured_at, plate, direction, backfill FROM events NOT INDEXED '
                'WHERE day BETWEEN ? AND ?')
@@ -101,14 +144,6 @@ def load_dashboard(path, day, end_day=None, plate_query='', recent_limit=200):
         sql += ' ORDER BY captured_at DESC, id DESC LIMIT ?'
         params.append(recent_limit)
         recent = conn.execute(sql, params).fetchall()
-    hours = [0] * 24
-    counts = {'Въезд': 0, 'Выезд': 0, 'Неизвестно': 0}
-    total = 0
-    for hour, direct, count in grouped:
-        total += count
-        if hour is not None:
-            hours[hour] += count
-        counts[direction(direct)] += count
     return {'total': total, 'unique': unique, 'hours': hours,
             'directions': counts, 'recent': recent}
 
