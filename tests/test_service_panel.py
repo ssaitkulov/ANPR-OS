@@ -167,12 +167,36 @@ class HeaderIndicatorTests(ShellTestCase):
         self.assertEqual(sorted(self.header.chips), ['camera', 'service', 'telegram'])
         for chip in self.header.chips.values():
             self.assertTrue(chip.frame.winfo_exists())
-            self.assertTrue(chip.caption.winfo_exists())
-            self.assertTrue(chip.dot.winfo_exists())
+            self.assertTrue(chip.icon.label.winfo_exists())
+            self.assertTrue(chip.value.winfo_exists())
 
     def test_indicators_have_no_borders(self):
         for chip in self.header.chips.values():
             self.assertEqual(int(chip.frame.cget('border_width')), 0)
+
+    def test_header_has_no_manage_button_and_no_dots(self):
+        """Кнопки «Управление» и отдельных цветных точек больше нет."""
+        self.assertFalse(hasattr(self.header, 'manage_button'))
+        for chip in self.header.chips.values():
+            self.assertFalse(hasattr(chip, 'dot'))
+
+    def test_indicator_shows_icon_and_status_only(self):
+        """Индикатор — это иконка и краткий статус, без названий."""
+        self.shell.update_status(HEALTH)
+        chip = self.header.camera_chip
+        self.assertEqual(chip.value.cget('text'), 'Подключена')
+        self.assertEqual(chip.icon.label.cget('text'), '')
+
+    def test_tooltip_follows_the_state(self):
+        self.shell.update_status(HEALTH)
+        self.assertEqual(self.header.service_chip.tooltip.text, 'ANPR-сервис: Работает')
+        self.assertEqual(self.header.camera_chip.tooltip.text, 'Камера: Подключена')
+        self.assertEqual(self.header.telegram_chip.tooltip.text, 'Telegram: Работает')
+        broken = dict(HEALTH, camera_message='связь прервалась. Программа попробует снова.')
+        with patch('app.ui.settings.read_settings', return_value={
+                'TELEGRAM_BOT_TOKEN': 'example', 'ALLOWED_CHAT_IDS': '42'}):
+            self.shell.update_status(broken)
+        self.assertEqual(self.header.camera_chip.tooltip.text, 'Камера: Нет связи')
 
     def test_camera_failure_does_not_change_the_service_indicator(self):
         """Сломанная камера не должна красить сервис в другой цвет."""
@@ -217,7 +241,7 @@ class HeaderIndicatorTests(ShellTestCase):
 class ServicePanelTests(ShellTestCase):
     """Раскрывающаяся панель управления."""
 
-    def test_panel_opens_with_the_manage_button(self):
+    def test_panel_opens_with_the_manage_toggle(self):
         self.shell.update_status(HEALTH)
         self.header.toggle_panel()
         self.root.update()
@@ -230,10 +254,11 @@ class ServicePanelTests(ShellTestCase):
         self.assertTrue(self.panel.is_open)
         self.assertEqual(self.panel.key, 'camera')
 
-    def test_second_click_on_the_button_closes_the_panel(self):
-        self.header.toggle_panel()
+    def test_second_click_on_the_indicator_closes_the_panel(self):
+        self.click(self.header.service_chip.frame)
         self.root.update()
-        self.header.toggle_panel()
+        self.assertTrue(self.panel.is_open)
+        self.click(self.header.service_chip.frame)
         self.pump(0.4)
         self.assertFalse(self.panel.is_open)
         self.assertEqual(self.panel.frame.winfo_manager(), '')
@@ -265,7 +290,7 @@ class ServicePanelTests(ShellTestCase):
     def test_click_inside_the_panel_keeps_it_open(self):
         self.header.toggle_panel()
         self.root.update()
-        self.click(self.panel.sections['service'].title)
+        self.click(self.panel.title)
         self.pump(0.2)
         self.assertTrue(self.panel.is_open)
 

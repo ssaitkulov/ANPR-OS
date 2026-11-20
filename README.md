@@ -426,14 +426,17 @@ PID целевого процесса, результат (`requested` / `ok` / 
 
 ## Состав репозитория
 
-Код приложения лежит в пакете `app/`:
+Код приложения лежит в пакете `app/` (ниже — назначение каждого модуля одной
+строкой; подробная навигация по функциям, связям и тестам — в
+[docs/CODEMAP.md](docs/CODEMAP.md), правила работы ИИ-агентов с проектом — в
+[AGENTS.md](AGENTS.md)):
 
 ```
 app/
 ├── core/       ядро: anpr_telegram.py (сбор проездов), paths.py (пути),
 │               system_events.py (журнал событий), preferences.py (автозапуск
 │               Windows и настройки панели), safe_mode.py (безопасный
-│               тестовый режим)
+│               тестовый режим), window_state.py (положение и размер окна)
 ├── services/   http_api.py (HTTP-сервис), control.py (запуск и остановка),
 │               logs.py (журналы с ротацией), audit.py (журналы управления
 │               в JSONL), auth.py (токен управления), instance.py (один
@@ -441,8 +444,11 @@ app/
 │               panel_lock.py (один экземпляр панели)
 ├── storage/    database.py (SQLite), photo_archive.py, passage_photos.py,
 │               event_images.py
-└── ui/         panel.py (панель управления), dashboard.py (мониторинг),
-                settings.py (настройки)
+└── ui/         shell.py (единое окно), header.py (шапка с индикаторами),
+                service_panel.py (панель управления), status.py (состояния),
+                dashboard.py (мониторинг), settings.py (настройки),
+                widgets.py, motion.py, icons.py, theme.py, tklife.py,
+                schedule.py (отложенные вызовы Tk)
 ```
 
 - В корне — совместимые точки входа: `app.py` (HTTP-сервис), `control_panel.py`

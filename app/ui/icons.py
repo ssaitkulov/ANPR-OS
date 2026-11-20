@@ -26,6 +26,9 @@ from app.core.paths import ASSETS_DIR
 #: Каталог с растеризованными иконками.
 ICON_DIR = ASSETS_DIR / 'icons'
 
+#: Шаг плавной перекраски иконки (кадров на переход).
+BLEND_STEPS = 8
+
 #: Кэш: (интерпретатор, имя, цвет, размер, поворот) → (ссылка, CTkImage).
 _cache: dict = {}
 #: Кэш исходных силуэтов: имя → Image.
@@ -86,6 +89,33 @@ def icon(name: str, color: str = '#F2F9FF', size: int = 16, master=None,
             reference = lambda interpreter=interpreter: interpreter
     _cache[key] = (reference, image)
     return image
+
+
+def blend_frames(name: str, start: str, end: str, size: int = 19,
+                 steps: int = BLEND_STEPS) -> list:
+    """Кадры плавной перекраски иконки: список пар «цвет, изображение».
+
+    Цвет иконки — это состояние компонента, и он должен меняться плавно:
+    резкая перекраска читается как мигание. Кадры собираются один раз на
+    переход и намеренно не попадают в общий кэш — иначе кэш накапливал бы
+    промежуточные оттенки и рос без ограничений.
+
+    Переход выполняется только при реальном изменении цвета: обычный
+    опрос состояния (раз в несколько секунд) картинок не создаёт.
+    """
+    from app.ui import theme
+
+    picture = source(name)
+    frames = []
+    for index in range(1, max(1, int(steps)) + 1):
+        color = theme.blend(start, end, index / max(1, int(steps)))
+        red, green, blue = theme._channels(color)
+        frame = Image.new('RGBA', picture.size, (red, green, blue, 255))
+        frame.putalpha(picture.getchannel('A'))
+        frame = frame.resize((int(size), int(size)), Image.LANCZOS)
+        frames.append((color, ctk.CTkImage(light_image=frame, dark_image=frame,
+                                            size=(int(size), int(size)))))
+    return frames
 
 
 def available() -> list:

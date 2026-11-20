@@ -1,36 +1,36 @@
 """Постоянная верхняя панель приложения «Эврика».
 
-Header — единственное место, где видно состояние системы и где управляют
-ANPR-сервисом.
+Header — единственное место, где видно состояние системы.
 
 Устройство шапки:
 
 * слева — логотип и навигация («Мониторинг», «Настройки»);
-* справа — три независимых индикатора (сервис, камера, Telegram) и кнопка
-  «Управление», которая раскрывает панель управления сервисом.
+* справа — три компактных индикатора: ANPR-сервис, камера, Telegram.
 
-Индикаторы не связаны между собой: неисправная камера не красит сервис в
-красный, а недоступный Telegram не мешает управлять сервисом. Общего
+Индикатор — это цветная Filled-иконка и краткая подпись состояния
+(«Работает», «Подключена», «Проверка»). Цвет иконки и есть состояние
+компонента: отдельных цветных точек, названий и кнопки «Управление» нет,
+поэтому шапка не перегружена и не растёт в высоту.
+
+Нажатие на индикатор открывает контекстную панель
+(`app/ui/service_panel.py`) с диагностикой только этого компонента.
+Индикаторы не связаны между собой: неисправная камера не красит сервис
+в красный, а недоступный Telegram не мешает управлять сервисом. Общего
 индикатора «система неисправна» нет и не появится.
-
-Управление сервисом (запуск, остановка, перезапуск, журнал) живёт в
-раскрывающейся панели `app/ui/service_panel.py` — она показывается поверх
-содержимого окна и не сдвигает разделы.
 """
 import tkinter as tk
 
 import customtkinter as ctk
 
-from app.ui import icons
 from app.ui import motion
 from app.ui import status as ui_status
 from app.ui import theme
-from app.ui.widgets import animated_hover, focusable
+from app.ui.widgets import TintedIcon, Tooltip, bind_widget, focusable
 from app.ui.service_panel import ServicePanel
 
-#: Подписи индикаторов шапки.
+#: Подписи индикаторов шапки (в подсказках и заголовках панели).
 INDICATOR_CAPTIONS = {
-    'service': 'Сервис',
+    'service': 'ANPR-сервис',
     'camera': 'Камера',
     'telegram': 'Telegram',
 }
@@ -42,87 +42,132 @@ INDICATOR_ICONS = {
     'telegram': 'brand-messenger',
 }
 
+#: Размер иконки индикатора, px.
+ICON_SIZE = 19
+#: Высота интерактивной области индикатора, px.
+CHIP_HEIGHT = 37
+
 
 class StatusChip:
-    """Компактный индикатор: иконка, название, точка состояния и подпись.
+    """Компактный индикатор компонента: цветная иконка и краткий статус.
 
-    Индикатор — небольшая горизонтальная группа без обводки: фон прозрачный,
-    при наведении слегка подсвечивается. Нажатие открывает панель
-    управления, клавиатура — тоже (Enter и пробел).
+    Индикатор — небольшая горизонтальная группа без обводки: фон
+    прозрачный, при наведении слегка подсвечивается, у активного
+    (раскрытая панель этого компонента) фон становится `CARD_ALT`.
+    Нажатие открывает панель, клавиатура — тоже (Enter и пробел).
     """
 
-    def __init__(self, parent, key, caption, icon_name, on_click, motion_manager):
+    def __init__(self, parent, key, caption, icon_name, on_click, motion_manager,
+                 tooltip_parent=None):
         self.key = key
-        self.state = None
+        self.caption = caption
+        self.icon_name = icon_name
         self.on_click = on_click
         self.motion = motion_manager
-        self.icon_name = icon_name
-        self.frame = ctk.CTkFrame(parent, fg_color=theme.BG, corner_radius=10,
-                                  border_width=0)
-        self.icon = ctk.CTkLabel(self.frame, text='',
-                                 image=icons.icon(icon_name, theme.MUTED, 15, master=self.frame),
-                                 width=17, height=17)
-        self.icon.pack(side='left', padx=(6, 4), pady=(9, 9))
-        self.caption = ctk.CTkLabel(self.frame, text=caption, text_color=theme.TEXT,
-                                    font=theme.FONT_CAPTION_BOLD, anchor='w')
-        self.caption.pack(side='left', padx=(0, 6), pady=(9, 9))
-        self.dot = ctk.CTkFrame(self.frame, width=9, height=9, corner_radius=5,
-                                fg_color=theme.MUTED)
-        self.dot.pack(side='left', pady=1)
-        self.value = ctk.CTkLabel(self.frame, text='—', text_color=theme.MUTED,
+        self.state = None
+        self._hovered = False
+        self._active = False
+
+        self.frame = ctk.CTkFrame(parent, fg_color=theme.BG, corner_radius=9,
+                                  border_width=0, height=CHIP_HEIGHT)
+        self.icon = TintedIcon(self.frame, icon_name, size=ICON_SIZE,
+                               color=theme.MUTED, motion_manager=motion_manager)
+        self.icon.label.pack(side='left', padx=(10, 6), pady=(9, 9))
+        self.value = ctk.CTkLabel(self.frame, text='—', text_color=theme.TEXT,
                                   font=theme.FONT_CAPTION, anchor='w')
-        self.value.pack(side='left', padx=(5, 4), pady=(9, 9))
-        self._bind(self.frame)
-        self._bind(self.icon)
-        self._bind(self.caption)
-        self._bind(self.value)
-        self._bind(self.dot)
-        for widget in (self.icon, self.caption, self.value, self.dot):
+        self.value.pack(side='left', padx=(0, 10), pady=(9, 9))
+        self.tooltip = Tooltip(self.frame, parent=tooltip_parent)
+
+        for widget in (self.frame, self.icon.label, self.value):
+            self._bind(widget)
             widget.bind('<Enter>', lambda _event: self._hover(True), add='+')
             widget.bind('<Leave>', lambda _event: self._hover(False), add='+')
-        self.frame.bind('<Enter>', lambda _event: self._hover(True), add='+')
-        self.frame.bind('<Leave>', lambda _event: self._hover(False), add='+')
-        self.frame.bind('<FocusIn>', lambda _event: self._hover(True), add='+')
-        self.frame.bind('<FocusOut>', lambda _event: self._hover(False), add='+')
+        # Фокус приходит на окно самого виджета: у CustomTkinter `bind`
+        # уходит на внутренний холст, где события фокуса не возникают.
+        bind_widget(self.frame, '<FocusIn>', lambda _event: self._hover(True))
+        bind_widget(self.frame, '<FocusOut>', lambda _event: self._hover(False))
         focusable(self.frame)
 
+    # ------------------------------------------------------------------
     def _bind(self, widget):
+        """Нажатие мышью и клавиатурой открывают панель.
+
+        Мышь: событие приходит на внутренний холст CustomTkinter, туда и
+        вешается обработчик. Клавиатура: событие приходит на окно самого
+        виджета (оно получает фокус), поэтому нужен прямой `bind`.
+        """
         widget.bind('<Button-1>', lambda _event: self.on_click(self.key), add='+')
-        widget.bind('<Return>', lambda _event: self.on_click(self.key), add='+')
-        widget.bind('<space>', lambda _event: self.on_click(self.key), add='+')
+        bind_widget(widget, '<Return>', lambda _event: self.on_click(self.key))
+        bind_widget(widget, '<space>', lambda _event: self.on_click(self.key))
+
+    def _background(self) -> str:
+        """Фон индикатора: активный, наведение, обычный."""
+        if self._active:
+            return theme.CARD_ALT
+        if self._hovered:
+            return theme.CARD
+        return theme.BG
+
+    def _refresh_background(self):
+        """Мягко перекрасить фон индикатора (без рамок)."""
+        self.motion.animate_color(self.frame, 'fg_color', self._background(), duration=140)
 
     def _hover(self, active: bool):
-        """Мягкая подсветка при наведении — без рамок и теней."""
-        self.motion.animate_color(self.frame, 'fg_color',
-                                  theme.CARD_ALT if active else theme.BG)
+        """Подсветка при наведении и при фокусе с клавиатуры."""
+        if self._hovered == active:
+            return
+        self._hovered = active
+        self._refresh_background()
+        if active:
+            self.tooltip.schedule()
+        else:
+            self.tooltip.hide()
 
+    # ------------------------------------------------------------------
     def set_state(self, state, compact=False):
-        """Показать состояние индикатора (словарь из `app.ui.status`)."""
+        """Показать состояние индикатора (словарь из `app.ui.status`).
+
+        Цвет иконки — это состояние компонента; подпись рядом нужна для
+        доступности (цвет всегда дополнен текстом). Подсказка обновляется
+        вместе с состоянием.
+        """
         if not state:
             return
         self.state = state
         color = state.get('color') or theme.MUTED
-        self.value.configure(text=state.get('short') if compact else state.get('label', '—'),
-                             text_color=color)
-        self.motion.animate_color(self.dot, 'fg_color', color)
-        try:
-            self.icon.configure(image=icons.icon(self.icon_name, color, 15, master=self.icon))
-        except tk.TclError:
-            pass
+        text = state.get('short') or state.get('label', '—')
+        self.value.configure(text=text or '—')
+        self.icon.set_color(color)
+        self.tooltip.set_text(f'{self.caption}: {state.get("label", "—")}')
+
+    def set_active(self, active: bool):
+        """Отметить индикатор активным (раскрыта его панель)."""
+        if self._active == active:
+            return
+        self._active = active
+        self._refresh_background()
 
     def set_compact(self, tight: bool):
-        """В очень узком окне вторичный текст скрывается, название остаётся."""
+        """В очень узком окне подпись скрывается, иконка остаётся видна."""
         try:
             if tight and self.value.winfo_manager():
                 self.value.pack_forget()
             elif not tight and not self.value.winfo_manager():
-                self.value.pack(side='left', padx=(6, 10))
+                self.value.pack(side='left', padx=(0, 10), pady=(9, 9))
         except tk.TclError:
+            pass
+
+    def shutdown(self):
+        """Остановить анимации индикатора."""
+        self.tooltip.hide()
+        try:
+            self.icon.shutdown()
+        except Exception:
             pass
 
 
 class SystemHeader:
-    """Верхняя панель: навигация слева, индикаторы и управление справа."""
+    """Верхняя панель: навигация слева, три индикатора справа."""
 
     def __init__(self, master, overlay, owner):
         self.owner = owner
@@ -157,30 +202,21 @@ class SystemHeader:
             button.pack(side='left', padx=(6, 0))
             self.nav_buttons[key] = button
 
-        # --- правая часть: индикаторы и кнопка управления ---
+        # --- правая часть: три компактных индикатора ---
         self.control = ctk.CTkFrame(self.frame, fg_color='transparent', corner_radius=10)
         self.control.pack(side='right')
         for key in ('service', 'camera', 'telegram'):
-            chip = StatusChip(self.control, key, INDICATOR_CAPTIONS[key], INDICATOR_ICONS[key],
-                              self.toggle_details, self.motion)
-            chip.frame.pack(side='left', padx=(0, theme.GROUP_GAP))
+            chip = StatusChip(self.control, key, INDICATOR_CAPTIONS[key],
+                              INDICATOR_ICONS[key], self.toggle_details, self.motion,
+                              tooltip_parent=master)
+            chip.frame.pack(side='left', padx=(0, theme.GROUP_GAP - 2))
             self.chips[key] = chip
         self.service_chip = self.chips['service']
         self.camera_chip = self.chips['camera']
         self.telegram_chip = self.chips['telegram']
 
-        self.manage_button = ctk.CTkButton(self.control, text='Управление', width=118, height=34,
-                                           corner_radius=10, fg_color=theme.CARD,
-                                           hover_color=theme.CARD, text_color=theme.TEXT,
-                                           font=theme.FONT_CAPTION_BOLD,
-                                           image=icons.icon('chevron-down', theme.MUTED, 14, master=self.control),
-                                           command=self.toggle_panel)
-        focusable(self.manage_button)
-        animated_hover(self.manage_button, self.motion, theme.CARD, theme.CARD_ALT)
-        self.manage_button.pack(side='left', padx=(2, 0))
-
-        # Панель управления сервисом (раскрывающаяся).
-        self.details = ServicePanel(overlay, owner, on_toggle=self._update_manage_button)
+        # Контекстная панель диагностики (одна на все три компонента).
+        self.details = ServicePanel(overlay, owner, on_toggle=self._on_panel_toggle)
         self.panel = self.details
 
         overlay.bind('<Button-1>', self._on_overlay_click, add='+')
@@ -188,7 +224,7 @@ class SystemHeader:
         overlay.bind('<Configure>', self._fit_width, add='+')
 
     # ------------------------------------------------------------------
-    # Панель управления
+    # Панель диагностики
     # ------------------------------------------------------------------
     @property
     def action_button(self):
@@ -200,24 +236,24 @@ class SystemHeader:
         """Кнопка перезапуска сервиса."""
         return self.details.restart_button
 
-    def _update_manage_button(self, opened: bool):
-        """Стрелка кнопки «Управление» показывает направление панели."""
-        try:
-            self.manage_button.configure(
-                image=icons.icon('chevron-down', theme.MUTED, 14, master=self.control, flip=opened))
-        except tk.TclError:
-            pass
+    def _on_panel_toggle(self, opened, key=None):
+        """Активный индикатор отмечается подсветкой, остальные — нет."""
+        for chip_key, chip in self.chips.items():
+            chip.set_active(bool(opened) and chip_key == key)
 
     def toggle_details(self, key):
-        """Открыть панель управления (нажатие на индикатор)."""
-        self.details.toggle(anchor=self.manage_button, section=key)
+        """Нажатие на индикатор: открыть, переключить или закрыть панель."""
+        chip = self.chips.get(key)
+        if chip is not None:
+            chip.tooltip.hide()
+        self.details.toggle(anchor=self.control, section=key)
 
     def toggle_panel(self):
-        """Кнопка «Управление»: открыть или закрыть панель."""
-        self.details.toggle(anchor=self.manage_button)
+        """Совместимое переключение панели (без кнопки «Управление»)."""
+        self.details.toggle(anchor=self.control)
 
     def close_details(self):
-        """Закрыть панель управления."""
+        """Закрыть панель диагностики."""
         self.details.close()
 
     def _on_escape(self, _event=None):
@@ -234,8 +270,6 @@ class SystemHeader:
         if widget is None:
             return
         if self._within(widget, self.details.frame):
-            return
-        if self._within(widget, self.manage_button):
             return
         for chip in self.chips.values():
             if self._within(widget, chip.frame):
@@ -269,11 +303,11 @@ class SystemHeader:
             self._full_width = self.control.winfo_reqwidth()
 
     def refresh_panel(self):
-        """Обновить содержимое панели управления (один раз за цикл опроса)."""
+        """Обновить содержимое панели диагностики (один раз за цикл опроса)."""
         self.details.refresh()
 
     def set_running(self, running):
-        """Учесть состояние сервиса в панели управления."""
+        """Учесть состояние сервиса в панели диагностики."""
         self.details.refresh()
 
     def set_busy(self, busy):
@@ -291,7 +325,7 @@ class SystemHeader:
         self.details.refresh()
 
     def sync_message(self):
-        """Передать результат операции в панель управления."""
+        """Передать результат операции в панель диагностики."""
         self.details.refresh()
 
     # ------------------------------------------------------------------
@@ -300,10 +334,10 @@ class SystemHeader:
     def _fit_width(self, _event=None):
         """Подогнать шапку под ширину окна.
 
-        Названия компонентов («Сервис», «Камера», «Telegram») не исчезают
-        никогда: сначала сокращается вторичный текст (короткая подпись
-        состояния), и только в самом узком окне он прячется, а цвет точки —
-        критический статус — остаётся виден.
+        Шапка компактна по построению: у индикаторов нет названий и
+        цветных точек, отдельной кнопки «Управление» тоже нет. Если
+        окно всё же слишком узкое, первой скрывается краткая подпись
+        состояния — иконка (носитель состояния) остаётся видна.
 
         Пересчёт защищён от повторного входа: `update_idletasks()` внутри
         обрабатывает и события Configure, поэтому без защиты шапка
@@ -345,33 +379,33 @@ class SystemHeader:
             needed = self.control.winfo_reqwidth()
         except tk.TclError:
             return
-        if not self.compact:
-            self._full_width = max(self._full_width, needed)
+        self._full_width = max(self._full_width, needed) if not self.compact \
+            else self._full_width
         full = self._full_width or needed
+        # Подпись состояния скрывается первой: иконка — носитель
+        # состояния, и она должна остаться видимой всегда.
         if full > available and not self.compact:
             self.compact = True
+            self.tight = True
             self._refresh_labels()
             try:
                 self.control.update_idletasks()
                 self._short_width = self.control.winfo_reqwidth()
             except tk.TclError:
                 self._short_width = 0
-        elif self.compact and full <= available - 40:
+        elif self.compact and full <= available - 24:
             self.compact = False
+            self.tight = False
             self._refresh_labels()
             try:
                 self.control.update_idletasks()
+                self._short_width = 0
             except tk.TclError:
                 pass
-        short = self._short_width or needed
-        tight = self.compact and short > available
-        if tight != self.tight:
-            self.tight = tight
-            self._refresh_labels()
 
     def _refresh_labels(self):
         for key, chip in self.chips.items():
-            chip.set_compact(self.tight)
+            chip.set_compact(self.compact)
             state = self._states.get(key)
             if state is not None:
                 chip.set_state(state, self.compact)
@@ -398,5 +432,7 @@ class SystemHeader:
             except tk.TclError:
                 pass
             self._refit_job = None
+        for chip in self.chips.values():
+            chip.shutdown()
         self.details.shutdown()
         self.motion.cancel_all()

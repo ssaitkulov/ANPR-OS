@@ -5,11 +5,12 @@ Header и Content и одним `mainloop()`. Разделы создаются 
 переключаются через `grid`/`grid_remove` — видеопоток и фоновые задачи при
 навигации не пересоздаются.
 
-Header (`app/ui/header.py`) — постоянная верхняя панель: три независимых
-индикатора состояния (сервис, камера, Telegram) и кнопка «Управление».
-Управление ANPR-сервисом (запуск, остановка, перезапуск, журнал) живёт в
-раскрывающейся панели `app/ui/service_panel.py`. Дублирующего StatusBar и
-кнопок управления в разделах нет.
+Header (`app/ui/header.py`) — постоянная верхняя панель: три компактных
+индикатора состояния (сервис, камера, Telegram). Нажатие на индикатор
+открывает контекстную панель `app/ui/service_panel.py` с диагностикой
+только этого компонента. Управление ANPR-сервисом (запуск, остановка,
+перезапуск, журнал) живёт в режиме «сервис» этой панели. Дублирующего
+StatusBar и кнопок управления в разделах нет.
 
 Класс `AppShell` — преемник прежней `Panel`: имя `Panel` сохранено в
 `app/ui/panel.py` как алиас, поэтому `import control_panel`, подмены в
@@ -290,28 +291,27 @@ class AppShell:
         host = str(data.get('camera') or settings.get('DAHUA_HOST') or '').strip()
         if host:
             camera_rows.append(('IP-адрес', host))
+        # Приём ANPR-событий — отдельный диагноз от работоспособности
+        # RTSP: камера может быть подключена, а события не приходят.
+        events = ui_status.camera_events_view(data, running)
+        camera_rows.append(('События ANPR', events['label']))
         last_data = str(data.get('last_camera_data') or '').strip()
-        if running:
-            camera_rows.append(('События ANPR', 'принимаются' if last_data else 'нет данных'))
-            camera_rows.append(('Последнее событие', last_data or 'Нет данных'))
-        else:
-            camera_rows.append(('События ANPR', 'нет данных'))
+        if last_data and camera_state.get('code') != ui_status.CAMERA_CONNECTED:
+            # Камера недоступна — её последние данные верны только
+            # исторически, и это обязательно отмечается.
+            last_data = ui_status.mark_stale(last_data)
+        camera_rows.append(('Последнее событие', last_data or 'Нет данных'))
 
         # --- Telegram ---
         configured = self._telegram_configured()
         connection = ui_status.telegram_connection_view(data, running, configured)
         delivery = ui_status.telegram_delivery_view(data)
         link = data.get('telegram_connection') or {}
-        counters = data.get('telegram_delivery') or {}
         telegram_rows = [
             ('Соединение', connection['label']),
             ('Последняя связь', ui_status.format_time(link.get('at')) or 'Нет данных'),
             ('Последняя доставка', delivery['label']),
         ]
-        if counters.get('at'):
-            telegram_rows.append(('Время доставки', ui_status.format_time(counters.get('at'))))
-            telegram_rows.append(('Доставлено / ошибок',
-                                  f"{counters.get('delivered', 0)} / {counters.get('failed', 0)}"))
         if link.get('error'):
             telegram_rows.append(('Ошибка связи', str(link['error'])))
 
@@ -459,7 +459,7 @@ class AppShell:
             header.sync_message()
             if value and self.message_tone == 'error' \
                     and header.details is not None and not header.details.is_open:
-                header.details.open()
+                header.details.open(section='service')
 
     # ------------------------------------------------------------------
     # Управление сервисом

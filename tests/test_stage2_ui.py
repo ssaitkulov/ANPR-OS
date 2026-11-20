@@ -360,17 +360,20 @@ class ServiceControlTests(ShellTestCase):
         self.pump(0.4)
         self.assertEqual(self.shell.header.details.frame.winfo_manager(), '')
 
-    def test_narrow_window_switches_indicators_to_short_labels(self):
+    def test_narrow_window_keeps_the_header_compact(self):
+        """Шапка компактна по построению: ни названий, ни цветных точек."""
         self.shell.update_status(HEALTH)
         self.root.geometry('1024x650+20+20')
         self.pump(0.5)
         self.shell.header._fit_width()
         self.pump(0.2)
-        self.assertTrue(self.shell.header.compact)
+        header = self.shell.header
         # Полная подпись остаётся в данных состояния.
         self.assertEqual(self.shell._states['service']['label'], 'Работает')
-        # Блок управления не выходит за пределы окна.
-        control = self.shell.header.control
+        # Группа индикаторов узкая: три иконки с короткими подписями.
+        self.assertLess(header.control.winfo_reqwidth(), 320)
+        # Блок индикаторов не выходит за пределы окна.
+        control = header.control
         self.assertLessEqual(control.winfo_rootx() + control.winfo_width(),
                              self.root.winfo_rootx() + self.root.winfo_width())
         self.root.geometry('1500x940+20+20')

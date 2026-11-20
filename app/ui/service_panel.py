@@ -1,15 +1,18 @@
-"""Раскрывающаяся панель управления сервисом.
+"""Контекстная панель диагностики.
 
-Панель живёт внутри основного окна (`CTkFrame`, а не новое окно): она
-показывается поверх содержимого, не сдвигая Dashboard и не перекрывая
-кнопки управления окном.
+Одна физическая панель с тремя режимами: `service`, `camera`, `telegram`.
+Панель раскрывается по нажатию на соответствующий индикатор шапки и
+показывает данные только выбранного компонента: сломанная камера не
+превращает панель сервиса в красную, а недоступный Telegram не мешает
+управлять ANPR-сервисом.
 
-Содержимое — три независимых блока (сервис, камера, Telegram) и строка
-управления сервисом. Каждый блок показывает только своё состояние: сломанная
-камера не красит сервис в красный, а недоступный Telegram не мешает
-управлять сервисом.
+Управление ANPR-сервисом (запуск, остановка, перезапуск, журнал) есть
+только в режиме «сервис» — в режимах камеры и Telegram его нет.
 
-Виджеты создаются один раз; при обновлении меняются только тексты и цвета.
+Содержимое каждого режима создаётся один раз. При переключении режима
+меняется только видимый блок: сама панель не пересоздаётся и не закрывается,
+поэтому переключение не мерцает, не сдвигает Dashboard и не меняет
+горизонтальное положение панели.
 """
 from __future__ import annotations
 
@@ -20,51 +23,35 @@ import customtkinter as ctk
 from app.ui import icons
 from app.ui import motion
 from app.ui import theme
-from app.ui.widgets import animated_hover, focusable
+from app.ui.widgets import TintedIcon, animated_hover, focusable
 
-#: Ширина панели, px.
-PANEL_WIDTH = 440
+#: Ширина панели, px (одинаковая для всех режимов).
+PANEL_WIDTH = 420
 #: Правое поле панели относительно окна, px.
 PANEL_MARGIN = 20
-#: Отступ панели от шапки, px.
+#: Отступ панели от группы индикаторов, px.
 PANEL_GAP = 8
+#: Внутренние отступы панели, px.
+PANEL_PADDING = 18
 
-#: Подписи разделов панели.
-SECTION_TITLES = {
+#: Режимы панели.
+MODES = ('service', 'camera', 'telegram')
+#: Режим по умолчанию (открывается, когда режим не задан).
+DEFAULT_MODE = 'service'
+
+#: Заголовки режимов.
+MODE_TITLES = {
     'service': 'ANPR-сервис',
     'camera': 'Камера',
     'telegram': 'Telegram',
 }
 
-#: Иконки разделов (Tabler Filled).
-SECTION_ICONS = {
+#: Иконки режимов (Tabler Filled).
+MODE_ICONS = {
     'service': 'device-desktop',
     'camera': 'device-cctv',
     'telegram': 'brand-messenger',
 }
-
-
-class StateBadge:
-    """Точка и подпись состояния раздела."""
-
-    def __init__(self, parent, motion_manager):
-        self.motion = motion_manager
-        self.frame = ctk.CTkFrame(parent, fg_color='transparent')
-        self.dot = ctk.CTkFrame(self.frame, width=9, height=9, corner_radius=5,
-                                fg_color=theme.MUTED)
-        self.dot.pack(side='left', padx=(0, 6))
-        self.label = ctk.CTkLabel(self.frame, text='—', text_color=theme.MUTED,
-                                  font=theme.FONT_CAPTION, anchor='w')
-        self.label.pack(side='left')
-
-    def set_state(self, state, short=False):
-        """Обновить цвет и подпись состояния (цвет меняется плавно)."""
-        if not state:
-            return
-        color = state.get('color') or theme.MUTED
-        text = state.get('short') if short and state.get('short') else state.get('label', '—')
-        self.label.configure(text=text, text_color=color)
-        self.motion.animate_color(self.dot, 'fg_color', color)
 
 
 class DetailRows:
@@ -88,8 +75,8 @@ class DetailRows:
             pair = self._ensure(index)
             pair[0].configure(text=caption)
             pair[1].configure(text=value or '—')
-            pair[0].grid(row=index, column=0, sticky='w', padx=(0, 10))
-            pair[1].grid(row=index, column=1, sticky='ew')
+            pair[0].grid(row=index, column=0, sticky='w', padx=(0, 10), pady=(6, 4))
+            pair[1].grid(row=index, column=1, sticky='ew', pady=(6, 4))
         for index in range(len(rows), len(self._rows)):
             for widget in self._rows[index]:
                 widget.grid_forget()
@@ -104,33 +91,53 @@ class DetailRows:
             self._rows.append((caption, value))
         return self._rows[index]
 
+    def captions(self):
+        """Подписи видимых строк (для проверок и тестов)."""
+        visible = []
+        for caption, _value in self._rows:
+            try:
+                if not caption.grid_info():
+                    continue
+            except tk.TclError:
+                continue
+            visible.append(caption.cget('text'))
+        return visible
 
-class Section:
-    """Один раздел панели: иконка, название, состояние и подробности."""
 
-    def __init__(self, parent, key, motion_manager):
+class ModeBlock:
+    """Содержимое одного режима панели.
+
+    Блок создаётся один раз и переиспользуется: при переключении режима
+    меняются только тексты и цвета, поэтому переключение не мерцает.
+
+    Раскладка — через `grid`: упаковка переставляет элементы при повторном
+    показе, а `grid` сохраняет порядок строк. Пустые контейнеры
+    CustomTkinter не создаются: такой контейнер занимает 200×200 px и
+    растягивает панель.
+    """
+
+    def __init__(self, parent, key, width):
         self.key = key
         self.frame = ctk.CTkFrame(parent, fg_color='transparent')
-        top = ctk.CTkFrame(self.frame, fg_color='transparent')
-        top.pack(fill='x')
-        self.icon = ctk.CTkLabel(top, text='', width=20, height=20)
-        self.icon.pack(side='left', padx=(0, 8))
-        self.title = ctk.CTkLabel(top, text=SECTION_TITLES.get(key, ''), text_color=theme.TEXT,
-                                  font=theme.FONT_BODY_BOLD, anchor='w')
-        self.title.pack(side='left')
-        self.badge = StateBadge(top, motion_manager)
-        self.badge.frame.pack(side='right')
-        self.rows = DetailRows(self.frame, PANEL_WIDTH - 56)
-        self.rows.frame.pack(fill='x', pady=(4, 0))
+        self.frame.grid_columnconfigure(0, weight=0)
+        self.frame.grid_columnconfigure(1, weight=1)
+        self.rows = DetailRows(self.frame, width)
+        self.rows.frame.grid(row=0, column=0, columnspan=2, sticky='ew', pady=(2, 0))
+        # Управление сервисом есть только в режиме «сервис».
+        self.actions = None
+        if key == 'service':
+            # Высота задана явно: у пустого контейнера CustomTkinter
+            # остаётся собственная высота (200 px), и он растянул бы панель.
+            self.actions = ctk.CTkFrame(self.frame, fg_color='transparent', height=34)
+            self.actions.grid(row=1, column=0, columnspan=2, sticky='ew', pady=(16, 0))
 
-    def update(self, state, rows):
-        """Обновить состояние и подробности раздела."""
-        self.badge.set_state(state)
+    def update(self, rows):
+        """Обновить строки показателей."""
         self.rows.update(rows)
 
 
 class ServicePanel:
-    """Раскрывающаяся панель управления под правой частью шапки."""
+    """Контекстная панель: одна панель, три режима."""
 
     def __init__(self, overlay, owner, on_toggle=None):
         self.overlay = overlay
@@ -145,40 +152,59 @@ class ServicePanel:
 
         self.motion = motion.Motion(overlay)
         self.frame = ctk.CTkFrame(overlay, fg_color=theme.CARD, corner_radius=12,
-                                   border_width=0, width=PANEL_WIDTH)
+                                  border_width=0, width=PANEL_WIDTH)
 
         body = ctk.CTkFrame(self.frame, fg_color='transparent')
-        body.pack(fill='both', expand=True, padx=18, pady=(14, 16))
+        body.pack(fill='both', expand=True, padx=PANEL_PADDING, pady=(14, 16))
+        # Размеры панели задаются явно: иначе ширина определяется
+        # содержимым (и режимы разной длины давали бы разную ширину),
+        # а высота — пустыми контейнерами CustomTkinter.
+        body.pack_propagate(False)
+        self.body = body
 
+        # --- заголовок: название режима, состояние и закрытие ---
         head = ctk.CTkFrame(body, fg_color='transparent')
-        head.pack(fill='x')
-        ctk.CTkLabel(head, text='Управление сервисом', text_color=theme.TEXT,
-                     font=theme.FONT_TITLE, anchor='w').pack(side='left')
+        head.pack(fill='x', pady=(0, 6))
+        self.head = head
+        self.title = ctk.CTkLabel(head, text='', text_color=theme.TEXT,
+                                  font=theme.FONT_TITLE, anchor='w')
+        self.title.pack(side='left')
         self.close_button = ctk.CTkButton(head, text='', width=28, height=28, corner_radius=8,
-                                           fg_color=theme.CARD, hover_color=theme.CARD,
-                                           image=icons.icon('x', theme.MUTED, 14, master=head),
-                                           command=self.close)
+                                          fg_color=theme.CARD, hover_color=theme.CARD,
+                                          image=icons.icon('x', theme.MUTED, 14, master=head),
+                                          command=self.close)
         focusable(self.close_button)
         animated_hover(self.close_button, self.motion, theme.CARD, theme.CARD_ALT)
-        self.close_button.pack(side='right')
+        self.close_button.pack(side='right', padx=(10, 0))
+        self.status_label = ctk.CTkLabel(head, text='—', text_color=theme.MUTED,
+                                         font=theme.FONT_CAPTION, anchor='e')
+        self.status_label.pack(side='right')
+        self.status_icon = TintedIcon(head, MODE_ICONS[DEFAULT_MODE], size=18,
+                                      color=theme.MUTED, motion_manager=self.motion)
+        self.status_icon.label.pack(side='right', padx=(0, 6))
 
-        self.sections = {}
-        for key in ('service', 'camera', 'telegram'):
-            section = Section(body, key, self.motion)
-            section.frame.pack(fill='x', pady=(16, 0))
-            self.sections[key] = section
+        # --- содержимое режимов ---
+        self.content = ctk.CTkFrame(body, fg_color='transparent', height=0)
+        self.content.pack(fill='x')
+        # Высота содержимого задаётся вручную: блоки режимов размещаются
+        # через `place`, а высота панели должна точно соответствовать
+        # выбранному режиму.
+        self.content.pack_propagate(False)
+        self.modes = {}
+        for key in MODES:
+            block = ModeBlock(self.content, key, PANEL_WIDTH - 2 * PANEL_PADDING)
+            self.modes[key] = block
+        #: Совместимое имя: разделы панели = блоки режимов.
+        self.sections = self.modes
 
-        # --- строка выполнения операции ---
-        self.progress_track = ctk.CTkFrame(body, fg_color=theme.CARD_ALT, height=4,
-                                           corner_radius=2)
-        self.progress_bar = ctk.CTkFrame(self.progress_track, fg_color=theme.ACCENT,
-                                         width=48, height=4, corner_radius=2)
-        self.progress_label = ctk.CTkLabel(body, text='', text_color=theme.ACCENT,
-                                           font=theme.FONT_CAPTION, anchor='w')
+        self._build_service_actions(self.modes['service'])
 
-        # --- кнопки управления ---
-        actions = ctk.CTkFrame(body, fg_color='transparent')
-        actions.pack(fill='x', pady=(18, 0))
+    # ------------------------------------------------------------------
+    # Сборка (управление сервисом — только в режиме «сервис»)
+    # ------------------------------------------------------------------
+    def _build_service_actions(self, mode):
+        """Кнопки управления сервисом, индикатор операции и сообщение."""
+        actions = mode.actions
         self.start_button = self._button(actions, 'Запустить', 'player-play', theme.CTA,
                                          '#101827', '#E0C85A', self.owner.start_service)
         self.restart_button = self._button(actions, 'Перезапустить', 'player-skip-back',
@@ -189,14 +215,25 @@ class ServicePanel:
         self.log_button = self._button(actions, 'Журнал', 'file-text', theme.CARD,
                                        theme.MUTED, theme.CARD_ALT, self.owner.open_log)
 
-        self.message_label = ctk.CTkLabel(body, text='', text_color=theme.MUTED,
+        self.progress_track = ctk.CTkFrame(mode.frame, fg_color=theme.CARD_ALT, height=4,
+                                           corner_radius=2)
+        self.progress_bar = ctk.CTkFrame(self.progress_track, fg_color=theme.ACCENT,
+                                         width=48, height=4, corner_radius=2)
+        self.progress_label = ctk.CTkLabel(mode.frame, text='', text_color=theme.ACCENT,
+                                           font=theme.FONT_CAPTION, anchor='w')
+        self.message_label = ctk.CTkLabel(mode.frame, text='', text_color=theme.MUTED,
                                           font=theme.FONT_CAPTION, anchor='w', justify='left',
-                                          wraplength=PANEL_WIDTH - 60)
-        self.message_icon = ctk.CTkLabel(body, text='', width=18, height=18)
+                                          wraplength=PANEL_WIDTH - 2 * PANEL_PADDING - 26)
+        self.message_icon = ctk.CTkLabel(mode.frame, text='', width=18, height=18)
+        self._layout_footer(mode)
 
-    # ------------------------------------------------------------------
-    # Сборка
-    # ------------------------------------------------------------------
+    def _layout_footer(self, mode):
+        """Разместить индикатор операции и сообщение под управлением."""
+        self.progress_track.grid(row=2, column=0, columnspan=2, sticky='ew', pady=(14, 0))
+        self.progress_label.grid(row=3, column=0, columnspan=2, sticky='ew', pady=(6, 0))
+        self.message_icon.grid(row=4, column=0, sticky='w', pady=(12, 0))
+        self.message_label.grid(row=4, column=1, sticky='ew', pady=(12, 0))
+
     def _button(self, parent, text, icon_name, color, text_color, hover, command):
         button = ctk.CTkButton(parent, text=text, width=0, height=34, corner_radius=10,
                                fg_color=color, hover_color=color, text_color=text_color,
@@ -229,23 +266,31 @@ class ServicePanel:
     # Открытие и закрытие
     # ------------------------------------------------------------------
     def open(self, anchor=None, section=None):
-        """Показать панель (с лёгким сдвигом сверху)."""
+        """Показать панель в нужном режиме.
+
+        Если панель уже открыта, содержимое переключается: сама панель
+        остаётся на месте, поэтому переключение не мерцает и не сдвигает
+        Dashboard.
+        """
         if anchor is not None:
             self._anchor = anchor
-        self.key = section or self.key
+        key = section or self.key or DEFAULT_MODE
+        switching = self.open_state and key != self.key
+        self.key = key
+        self.open_state = True
         self.refresh()
         self.frame.lift()
-        self.open_state = True
         self._token = object()
         token = self._token
         x, y = self._position()
-        self.motion.slide(self.frame, x, y, on_complete=None,
-                          guard=lambda: token is self._token and self.open_state)
+        if switching:
+            # Панель уже на экране: меняется только содержимое.
+            self.frame.place_configure(x=x, y=y)
+            self._animate_content()
+        else:
+            self.motion.slide(self.frame, x, y, duration=200,
+                              guard=lambda: token is self._token and self.open_state)
         self._notify()
-        try:
-            self.frame.focus_set()
-        except tk.TclError:
-            pass
 
     def close(self):
         """Скрыть панель (короткая анимация ухода)."""
@@ -271,27 +316,49 @@ class ServicePanel:
                               guard=lambda: token is self._token)
         self._notify()
 
-    def _notify(self):
-        """Сообщить владельцу о смене состояния панели."""
-        if self.on_toggle is None:
-            return
-        try:
-            self.on_toggle(self.open_state)
-        except Exception:
-            pass
-
     def toggle(self, anchor=None, section=None):
-        """Открыть или закрыть панель."""
+        """Открыть, переключить или закрыть панель.
+
+        Повторное нажатие на активный индикатор закрывает панель, нажатие
+        на другой — переключает содержимое, не закрывая её.
+        """
         if self.open_state and (section is None or section == self.key):
             self.close()
             return
         self.open(anchor=anchor, section=section)
 
+    def _notify(self):
+        """Сообщить владельцу о смене состояния панели."""
+        if self.on_toggle is None:
+            return
+        try:
+            self.on_toggle(self.open_state, self.key)
+        except TypeError:
+            try:
+                self.on_toggle(self.open_state)
+            except Exception:
+                pass
+        except Exception:
+            pass
+
     # ------------------------------------------------------------------
     # Геометрия
     # ------------------------------------------------------------------
+    def _panel_width(self) -> int:
+        """Фактическая ширина панели в пикселях экрана.
+
+        CustomTkinter масштабирует размеры под DPI, поэтому берётся
+        реальная ширина окна панели, а не номинальная константа: иначе
+        при 125 % панель выходила бы за правый край окна.
+        """
+        try:
+            width = self.frame.winfo_width()
+        except tk.TclError:
+            width = 0
+        return width if width > 1 else PANEL_WIDTH
+
     def _position(self):
-        """Положение панели: под правой частью шапки, по правому краю."""
+        """Положение панели: под группой индикаторов, по правому краю."""
         try:
             overlay_width = self.overlay.winfo_width()
             overlay_height = self.overlay.winfo_height()
@@ -301,7 +368,7 @@ class ServicePanel:
             overlay_width = self.overlay.winfo_screenwidth()
         if overlay_height <= 1:
             overlay_height = self.overlay.winfo_screenheight()
-        x = max(PANEL_MARGIN, overlay_width - PANEL_WIDTH - PANEL_MARGIN)
+        x = max(PANEL_MARGIN, overlay_width - self._panel_width() - PANEL_MARGIN)
         y = PANEL_GAP + 4
         anchor = self._anchor
         if anchor is not None:
@@ -341,12 +408,76 @@ class ServicePanel:
         if self.closed:
             return
         data = self.owner.panel_data()
-        for key, section in self.sections.items():
-            block = data.get(key) or {}
-            section.update(block.get('state'), block.get('rows') or [])
-        self._update_actions(data)
-        self._update_message(data.get('message') or '', data.get('message_tone') or '')
+        key = self.key or DEFAULT_MODE
+        block = data.get(key) or {}
+        state = block.get('state') or {}
+        rows = block.get('rows') or []
+
+        self._update_head(key, state)
+        mode = self.modes[key]
+        mode.update(rows)
+        if key == 'service':
+            self._update_actions(data)
+            self._update_message(data.get('message') or '', data.get('message_tone') or '')
+        else:
+            # Управление ANPR-сервисом в режимах камеры и Telegram не
+            # показывается: чужой компонент не должен выглядеть сломанным.
+            self._hide_actions()
+            self._stop_progress()
+            self._hide_message()
+        self._layout_content(key)
         self._fit()
+
+    def _update_head(self, key, state):
+        """Заголовок: название режима, цветная иконка состояния и статус."""
+        self.title.configure(text=MODE_TITLES.get(key, ''))
+        color = (state or {}).get('color') or theme.MUTED
+        self.status_icon.set_icon(MODE_ICONS.get(key, MODE_ICONS[DEFAULT_MODE]))
+        self.status_icon.set_color(color)
+        label = (state or {}).get('short') or (state or {}).get('label') or '—'
+        self.status_label.configure(text=label)
+
+    def _layout_content(self, key):
+        """Показать блок выбранного режима и задать размеры панели."""
+        for other_key, other in self.modes.items():
+            if other_key != key and other.frame.winfo_manager():
+                other.frame.place_forget()
+        mode = self.modes[key]
+        try:
+            self.frame.update_idletasks()
+        except tk.TclError:
+            pass
+        content_height = mode.frame.winfo_reqheight()
+        head_height = self.head.winfo_reqheight()
+        try:
+            self.content.configure(height=content_height)
+            self.body.configure(width=PANEL_WIDTH - 2 * PANEL_PADDING,
+                                height=head_height + content_height + 6)
+        except tk.TclError:
+            pass
+        if not mode.frame.winfo_manager():
+            mode.frame.place(x=0, y=0, relwidth=1)
+
+    def _animate_content(self):
+        """Короткое появление содержимого при переключении режима.
+
+        Панель при этом не пересоздаётся и не меняет положение: меняется
+        только содержимое и высота.
+        """
+        key = self.key or DEFAULT_MODE
+        mode = self.modes.get(key)
+        if mode is None or self.motion.reduced:
+            return
+        offset = 10
+
+        def step(fraction: float):
+            try:
+                mode.frame.place_configure(y=int(offset * (1 - fraction)))
+            except tk.TclError:
+                pass
+
+        self.motion.tween(140, step,
+                          guard=lambda: self.open_state and self.key == key)
 
     def _update_actions(self, data):
         """Показать только те действия, что соответствуют текущему состоянию."""
@@ -389,6 +520,12 @@ class ServicePanel:
         except tk.TclError:
             pass
 
+    def _hide_actions(self):
+        """Убрать управление сервисом (режимы камеры и Telegram)."""
+        for button in (self.start_button, self.restart_button,
+                       self.stop_button, self.log_button):
+            self._toggle(button, False)
+
     def _update_message(self, text, tone=''):
         """Показать сообщение операции (с знаком ошибки или успеха)."""
         value = str(text or '').strip()
@@ -412,19 +549,28 @@ class ServicePanel:
         except tk.TclError:
             pass
 
+    def _hide_message(self):
+        """Убрать строку сообщения (в режимах без управления сервисом)."""
+        try:
+            self.message_label.configure(text='')
+        except tk.TclError:
+            pass
+        self._pack_message(False)
+
     def _pack_message(self, visible: bool, icon=False):
         """Показать или убрать строку сообщения."""
-        if visible:
-            if icon:
-                self.message_icon.pack(side='left', padx=(0, 6), pady=(12, 0))
-                self.message_label.pack(side='left', fill='x', expand=True, pady=(12, 0))
+        try:
+            if visible:
+                if icon:
+                    self.message_icon.grid(row=4, column=0, sticky='w', pady=(12, 0))
+                else:
+                    self.message_icon.grid_remove()
+                self.message_label.grid(row=4, column=1, sticky='ew', pady=(12, 0))
             else:
-                self.message_label.pack(fill='x', pady=(12, 0))
-        else:
-            if self.message_icon.winfo_manager():
-                self.message_icon.pack_forget()
-            if self.message_label.winfo_manager():
-                self.message_label.pack_forget()
+                self.message_icon.grid_remove()
+                self.message_label.grid_remove()
+        except tk.TclError:
+            pass
 
     # ------------------------------------------------------------------
     # Индикатор выполнения операции
@@ -440,9 +586,8 @@ class ServicePanel:
             self._stop_progress()
             return
         try:
-            if not self.progress_track.winfo_manager():
-                self.progress_track.pack(fill='x', pady=(14, 0))
-                self.progress_label.pack(fill='x', pady=(6, 0))
+            self.progress_track.grid(row=2, column=0, columnspan=2, sticky='ew', pady=(14, 0))
+            self.progress_label.grid(row=3, column=0, columnspan=2, sticky='ew', pady=(6, 0))
             self.progress_label.configure(text=labels.get(operation, 'Выполняется операция…'))
         except tk.TclError:
             return
@@ -455,10 +600,8 @@ class ServicePanel:
             self.motion.cancel(self._progress_job)
             self._progress_job = None
         try:
-            if self.progress_track.winfo_manager():
-                self.progress_track.pack_forget()
-            if self.progress_label.winfo_manager():
-                self.progress_label.pack_forget()
+            self.progress_track.grid_remove()
+            self.progress_label.grid_remove()
         except tk.TclError:
             pass
 
@@ -483,4 +626,8 @@ class ServicePanel:
         """Отменить все отложенные вызовы панели (при закрытии окна)."""
         self.closed = True
         self._stop_progress()
+        try:
+            self.status_icon.shutdown()
+        except Exception:
+            pass
         self.motion.cancel_all()

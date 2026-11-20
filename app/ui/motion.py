@@ -169,10 +169,15 @@ class Motion:
         advance(frames)
 
     def slide_out(self, frame, x: int, y: int, duration: int = 150, on_complete=None,
-                  guard=None) -> None:
+                  guard=None, width=None, height=None) -> None:
         """Убрать `frame` вниз и спрятать по завершении."""
+        extra = {}
+        if width:
+            extra['width'] = int(width)
+        if height:
+            extra['height'] = int(height)
         try:
-            frame.place_configure(x=x, y=y)
+            frame.place_configure(x=x, y=y, **extra)
         except tk.TclError:
             return
 
@@ -185,16 +190,25 @@ class Motion:
         self.tween(duration, move, on_complete, guard)
 
     def slide(self, frame, x: int, y: int, duration: int = 200, on_complete=None,
-              guard=None) -> None:
+              guard=None, width=None, height=None) -> None:
         """Показать `frame` в точке (x, y) с лёгким вертикальным сдвигом.
 
         Прозрачность в CustomTkinter недоступна, поэтому имитировать её
         дорогой перерисовкой нельзя: вместо этого кадр «выезжает» сверху
         на несколько пикселей.
+
+        `width`/`height` задают размер кадра явно: контейнеры
+        CustomTkinter иначе подстраиваются под своё содержимое, а панель
+        должна быть одинаковой ширины во всех режимах.
         """
         offset = 8
+        extra = {}
+        if width:
+            extra['width'] = int(width)
+        if height:
+            extra['height'] = int(height)
         try:
-            frame.place(x=x, y=y + offset)
+            frame.place(x=x, y=y + offset, **extra)
         except tk.TclError:
             return
 
@@ -244,8 +258,18 @@ class Motion:
         frames = max(1, int(duration / FRAME))
 
         def advance(remaining: int, origin: str):
-            if remaining <= 0 or not self.alive:
+            if not self.alive:
                 self._colors.pop(key, None)
+                return
+            if remaining <= 0:
+                # Последний кадр — ровно целевой цвет: иначе анимация
+                # останавливается на доли процента раньше и цвет не
+                # совпадает с целевым.
+                self._colors.pop(key, None)
+                try:
+                    widget.configure(**{option: target})
+                except tk.TclError:
+                    pass
                 return
             fraction = ease_out(1 - remaining / frames)
             color = theme.blend(origin, target, fraction)

@@ -52,6 +52,18 @@ TELEGRAM_NOT_CONFIGURED = 'not_configured'
 TELEGRAM_CHECKING = 'checking'
 TELEGRAM_UNKNOWN = 'unknown'
 
+#: Состояния приёма ANPR-событий — отдельный диагноз от RTSP.
+CAMERA_EVENTS_RECEIVING = 'receiving'
+CAMERA_EVENTS_NONE = 'none'
+CAMERA_EVENTS_ERROR = 'error'
+
+#: Подписи приёма ANPR-событий.
+CAMERA_EVENTS_LABELS = {
+    CAMERA_EVENTS_RECEIVING: 'принимаются',
+    CAMERA_EVENTS_NONE: 'нет данных',
+    CAMERA_EVENTS_ERROR: 'ошибка',
+}
+
 #: Состояния связи с Telegram — доступен ли API сейчас.
 TELEGRAM_CONNECTED = 'connected'
 TELEGRAM_CONNECTION_LOST = 'connection_lost'
@@ -220,6 +232,44 @@ def camera_view(data=None, running=False):
                     CAMERA_SHORT[CAMERA_ERROR])
     return view(CAMERA_UNKNOWN, CAMERA_LABELS[CAMERA_UNKNOWN], MUTED,
                 message or 'Нет данных о состоянии камеры.', CAMERA_SHORT[CAMERA_UNKNOWN])
+
+
+def camera_events_view(data=None, running=False):
+    """Принимаются ли ANPR-события — отдельный диагноз от RTSP.
+
+    Камера может быть подключена, но события не приходить: это разные
+    вещи, и путать их нельзя. Если сервис остановлен, камера не
+    опрашивается — событий нет, но и обрыва связи не зафиксировано.
+    """
+    if not running:
+        return view(CAMERA_EVENTS_NONE, CAMERA_EVENTS_LABELS[CAMERA_EVENTS_NONE], MUTED,
+                    'Сервис остановлен — события не опрашиваются.',
+                    CAMERA_EVENTS_LABELS[CAMERA_EVENTS_NONE])
+    data = data or {}
+    message = str(data.get('camera_message') or '').strip().lower()
+    if 'прервалась' in message or 'недоступна' in message or 'ошиб' in message \
+            or 'не удалось' in message or 'отказ' in message:
+        return view(CAMERA_EVENTS_ERROR, CAMERA_EVENTS_LABELS[CAMERA_EVENTS_ERROR], DANGER,
+                    'Камера недоступна — события не приходят.',
+                    CAMERA_EVENTS_LABELS[CAMERA_EVENTS_ERROR])
+    if str(data.get('last_camera_data') or '').strip():
+        return view(CAMERA_EVENTS_RECEIVING, CAMERA_EVENTS_LABELS[CAMERA_EVENTS_RECEIVING],
+                    SUCCESS, 'События ANPR приходят.', CAMERA_EVENTS_LABELS[CAMERA_EVENTS_RECEIVING])
+    return view(CAMERA_EVENTS_NONE, CAMERA_EVENTS_LABELS[CAMERA_EVENTS_NONE], MUTED,
+                'События ANPR ещё не приходили.', CAMERA_EVENTS_LABELS[CAMERA_EVENTS_NONE])
+
+
+def mark_stale(value) -> str:
+    """Пометить последние известные данные как устаревшие.
+
+    Когда компонент недоступен, его последние данные правдивы только
+    исторически — показывать их без отметки нельзя, иначе они читаются
+    как актуальные.
+    """
+    text = str(value or '').strip()
+    if not text or text in ('Нет данных', '—'):
+        return text or 'Нет данных'
+    return f'{text} (устарело)'
 
 
 def telegram_connection_view(data=None, running=False, configured=True):
