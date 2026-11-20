@@ -442,6 +442,30 @@ class PanelClosingTests(ShellTestCase):
         self.root.withdraw()
 
 
+class ScalingTests(ShellTestCase):
+    """Масштабирование интерфейса (125 %): панель остаётся в окне."""
+
+    def test_panel_stays_inside_the_window_at_125_percent(self):
+        import customtkinter as ctk
+        self.root.deiconify()
+        self.root.geometry('1280x800+10+10')
+        self.pump(0.5)
+        self.shell.update_status(HEALTH)
+        try:
+            ctk.set_widget_scaling(1.25)
+            self.pump(0.4)
+            self.click(self.header.camera_chip.frame)
+            self.pump(0.5)
+            frame = self.panel.frame
+            self.assertGreater(frame.winfo_width(), 400)
+            self.assertGreaterEqual(frame.winfo_x(), 0)
+            self.assertLessEqual(frame.winfo_x() + frame.winfo_width(),
+                                 self.root.winfo_width())
+        finally:
+            ctk.set_widget_scaling(1.0)
+            self.pump(0.2)
+
+
 class PanelAnimationTests(ShellTestCase):
     """Анимации не оставляют «висящих» вызовов."""
 

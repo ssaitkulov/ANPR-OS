@@ -344,18 +344,17 @@ class ServicePanel:
     # ------------------------------------------------------------------
     # Геометрия
     # ------------------------------------------------------------------
-    def _panel_width(self) -> int:
-        """Фактическая ширина панели в пикселях экрана.
+    def _unscaled(self, value) -> float:
+        """Перевести экранные пиксели в систему координат CustomTkinter.
 
-        CustomTkinter масштабирует размеры под DPI, поэтому берётся
-        реальная ширина окна панели, а не номинальная константа: иначе
-        при 125 % панель выходила бы за правый край окна.
+        `place` у CustomTkinter масштабирует координаты под DPI, поэтому
+        положение панели нужно считать в той же системе, что и её
+        размеры: иначе при 125 % панель вышла бы за правый край окна.
         """
         try:
-            width = self.frame.winfo_width()
-        except tk.TclError:
-            width = 0
-        return width if width > 1 else PANEL_WIDTH
+            return float(self.frame._reverse_widget_scaling(value))
+        except Exception:
+            return float(value)
 
     def _position(self):
         """Положение панели: под группой индикаторов, по правому краю."""
@@ -368,26 +367,29 @@ class ServicePanel:
             overlay_width = self.overlay.winfo_screenwidth()
         if overlay_height <= 1:
             overlay_height = self.overlay.winfo_screenheight()
-        x = max(PANEL_MARGIN, overlay_width - self._panel_width() - PANEL_MARGIN)
+        width = self._unscaled(overlay_width)
+        height = self._unscaled(overlay_height)
+        x = max(PANEL_MARGIN, width - PANEL_WIDTH - PANEL_MARGIN)
         y = PANEL_GAP + 4
         anchor = self._anchor
         if anchor is not None:
             try:
-                bottom = (anchor.winfo_rooty() - self.overlay.winfo_rooty()
-                          + anchor.winfo_height())
+                bottom = (self._unscaled(anchor.winfo_rooty())
+                          - self._unscaled(self.overlay.winfo_rooty())
+                          + self._unscaled(anchor.winfo_height()))
                 y = bottom + PANEL_GAP
             except tk.TclError:
                 pass
-        y = max(PANEL_GAP, min(y, max(PANEL_GAP, overlay_height - 40)))
-        return x, y
+        y = max(PANEL_GAP, min(y, max(PANEL_GAP, height - 40)))
+        return int(x), int(y)
 
     def _fit(self):
         """Подогнать панель под окно: при нехватке места она сдвигается вверх."""
         if not self.open_state:
             return
         try:
-            height = self.frame.winfo_reqheight()
-            overlay_height = self.overlay.winfo_height()
+            height = self._unscaled(self.frame.winfo_reqheight())
+            overlay_height = self._unscaled(self.overlay.winfo_height())
         except tk.TclError:
             return
         if height <= 0:
