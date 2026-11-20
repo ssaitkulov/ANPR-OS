@@ -2,7 +2,8 @@
 
 Проверяются:
 * управление сервисом существует только в Header;
-* остановка и перезапуск требуют подтверждения;
+* переключатель в шапке спрашивает подтверждение перед остановкой и не
+  спрашивает его перед запуском; перезапуск спрашивает всегда;
 * повторные команды блокируются, параллельные операции невозможны;
 * индикаторы показывают фактические данные `/health`;
 * разделы не пересоздаются при переключении;
@@ -10,66 +11,40 @@
 * остановка ANPR и отключение RTSP — разные операции;
 * отложенные вызовы Tk отменяются при закрытии окна.
 
+Диалог подтверждения (заголовок, текст, отсутствие запроса без ответа)
+проверяется в `tests/test_service_panel.py`; здесь — путь переключателя
+в шапке: отказ от подтверждения ничего не делает, согласие запускает
+операцию.
+
 Живой сервис, камера и база не затрагиваются: `service.*`, `cv2` и
-`load_dashboard` подменяются заглушками.
+`load_dashboard` подменяются заглушками (общая оснастка —
+`tests/ui_harness.py`).
 """
 from tests import anpr_testenv  # noqa: F401  — изоляция тестов от боевой БД
 import queue
-import time
 import unittest
-from pathlib import Path
-from unittest.mock import MagicMock, patch
-
-import customtkinter as ctk
+from unittest.mock import patch
 
 from app.ui import status as ui_status
-from app.ui.dashboard import MonitoringSection
-from app.ui.shell import AppShell
 
-#: Ответ сервиса, как его отдаёт `/health`.
-HEALTH = {
-    'service': 'anpr-fayz', 'pid': 4242, 'status': 'ok', 'camera': '192.168.100.249',
-    'started_at': 1700000000, 'camera_message': 'подключена, получаю данные.',
-    'telegram_message': 'последнее уведомление доставлено хотя бы в один разрешённый чат.',
-    'last_camera_data': '18.11.2026 13:00:00',
-    'telegram_delivery': {'ok': True, 'delivered': 2, 'failed': 0, 'at': '2026-11-18T13:04:05+05:00'},
-    'telegram_connection': {'ok': True, 'at': '2026-11-18T13:04:06+05:00',
-                            'failed_at': '', 'error': ''},
-}
+from tests.ui_harness import HEALTH, FAKE_SERVICE, FakeCapture, reset_calls
+from tests.ui_harness import ShellTestCase as UiShellTestCase
 
-EMPTY_DASHBOARD = {'total': 0, 'unique': 0, 'hours': [0] * 24,
-                   'directions': {'Въезд': 0, 'Выезд': 0, 'Неизвестно': 0}, 'recent': []}
 
-#: Подменённый сервис. Держится на всё время модуля: фоновые потоки
-#: не успевают завершиться до конца теста, и обращение к настоящему сервису
-#: (остановка живого ANPR) недопустимо.
-FAKE_SERVICE = MagicMock()
-FAKE_SERVICE.URL = 'http://127.0.0.1:18749'
-FAKE_SERVICE.BASE = Path(__file__).resolve().parent.parent
+class ShellTestCase(UiShellTestCase):
+    """Окно без синтетических нажатий: карту виджетов рисовать незачем."""
+
+    MAP_WINDOW = False
 
 
 def setUpModule():
     global _service_patch
-    FAKE_SERVICE.reset_mock()
-    FAKE_SERVICE.health.return_value = HEALTH
-    FAKE_SERVICE.start.return_value = HEALTH
-    FAKE_SERVICE.stop.return_value = None
-    _service_patch = patch('app.ui.shell.service', FAKE_SERVICE)
-    _service_patch.start()
+    from tests import ui_harness
+    _service_patch = ui_harness.patch_service()
 
 
 def tearDownModule():
     _service_patch.stop()
-
-
-def wait_for(predicate, timeout=3.0):
-    """Подождать выполнения условия (результат фонового потока)."""
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        if predicate():
-            return True
-        time.sleep(0.02)
-    return predicate()
 
 
 # ----------------------------------------------------------------------
@@ -142,7 +117,7 @@ class StatusModelTests(unittest.TestCase):
         self.assertEqual(ui_status.telegram_view(lost, running=True)['code'],
                          ui_status.TELEGRAM_NO_CONNECTION)
 
-        # Связь жива, но доставка сорвалась.
+        # Отправка сорвалась — канал доступен.
         broken = dict(HEALTH, telegram_delivery={'ok': False, 'delivered': 0, 'failed': 1, 'at': 'x'})
         self.assertEqual(ui_status.telegram_connection_view(broken, running=True)['code'],
                          ui_status.TELEGRAM_CONNECTED)
@@ -172,94 +147,9 @@ class StatusModelTests(unittest.TestCase):
 # ----------------------------------------------------------------------
 # Оболочка с настоящим окном Tk
 # ----------------------------------------------------------------------
-class FakeCapture:
-    """Заглушка cv2.VideoCapture: подключение «висит», кадров нет."""
-
-    instances = []
-
-    def __init__(self):
-        self.opened = False
-        self.released = False
-        FakeCapture.instances.append(self)
-
-    def open(self, *args, **kwargs):
-        self.opened = True
-        return True
-
-    def isOpened(self):
-        return self.opened
-
-    def read(self):
-        time.sleep(0.05)
-        return False, None
-
-    def release(self):
-        self.released = True
-
-
-class ShellTestCase(unittest.TestCase):
-    """Оболочка с подменённым сервисом, камерой и базой."""
-
-    def setUp(self):
-        try:
-            self.root = ctk.CTk()
-        except Exception as error:  # нет графической подсистемы
-            self.skipTest(f'Tk недоступен: {error}')
-        self.root.withdraw()
-        self.errors = []
-        self.root.report_callback_excepter = self._report_error
-        self.patches = [
-            patch.object(AppShell, '_start_tray'),                       # без иконки в трее
-            patch('app.ui.shell.window_state.save_state', return_value=True),
-            patch('app.ui.dashboard.load_dashboard', return_value=EMPTY_DASHBOARD),
-            patch.dict('sys.modules', {'cv2': type('FakeCv2', (), {
-                'VideoCapture': FakeCapture, 'CAP_FFMPEG': 1,
-                'CAP_PROP_OPEN_TIMEOUT_MSEC': 2, 'CAP_PROP_READ_TIMEOUT_MSEC': 3})}),
-        ]
-        for item in self.patches:
-            item.start()
-        self.shell = AppShell(self.root)
-        # Дать завершиться стартовой операции (сервис подменён заглушкой).
-        self.pump(0.4)
-        self.wait(lambda: not self.shell.busy)
-
-    def tearDown(self):
-        try:
-            self.shell._quit()
-        except Exception:
-            pass
-        try:
-            self.root.destroy()
-        except Exception:
-            pass
-        for item in self.patches:
-            item.stop()
-
-    def _report_error(self, exc, value, tb):
-        self.errors.append((exc, value))
-
-    def wait(self, predicate, timeout=3.0):
-        """Подождать условия, прокачивая цикл событий Tk."""
-        deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
-            try:
-                self.root.update()
-            except Exception:
-                break
-            if predicate():
-                return True
-            time.sleep(0.02)
-        return predicate()
-
-    def pump(self, seconds=0.4):
-        """Прокрутить цикл событий Tk заданное время."""
-        deadline = time.monotonic() + seconds
-        while time.monotonic() < deadline:
-            self.root.update()
-            time.sleep(0.02)
-
-
 class ServiceControlTests(ShellTestCase):
+    """Управление сервисом в шапке: путь переключателя и подтверждения."""
+
     def test_service_control_exists_only_in_the_header(self):
         header = self.shell.header
         self.assertTrue(header.action_button.winfo_exists())
@@ -273,37 +163,39 @@ class ServiceControlTests(ShellTestCase):
         self.assertFalse(hasattr(self.shell, 'more'))
         self.assertFalse(hasattr(self.shell, '_connection_labels'))
 
-    def test_stop_requires_confirmation(self):
+    def test_toggle_to_stop_asks_confirmation(self):
+        """Переключатель у работающего сервиса спрашивает подтверждение."""
         with patch('app.ui.shell.messagebox.askyesno', return_value=False):
             self.shell.running = True
             self.shell.toggle_service()
         self.assertFalse(self.shell.busy)
-        FAKE_SERVICE.reset_mock()
+        reset_calls()
         with patch('app.ui.shell.messagebox.askyesno', return_value=True):
             self.shell.running = True
             self.shell.toggle_service()
-            self.assertTrue(wait_for(lambda: FAKE_SERVICE.stop.called))
+            self.assertTrue(self.pump_until(lambda: FAKE_SERVICE.stop.called))
         FAKE_SERVICE.stop.assert_called_once()
 
-    def test_start_does_not_ask_confirmation(self):
-        FAKE_SERVICE.reset_mock()
+    def test_toggle_to_start_asks_no_confirmation(self):
+        """Запуск сервиса ничего не теряет — подтверждение не спрашивается."""
+        reset_calls()
         with patch('app.ui.shell.messagebox.askyesno', return_value=False) as confirm:
             self.shell.running = False
             self.shell.toggle_service()
             confirm.assert_not_called()
-            self.assertTrue(wait_for(lambda: FAKE_SERVICE.start.called))
+            self.assertTrue(self.pump_until(lambda: FAKE_SERVICE.start.called))
         FAKE_SERVICE.start.assert_called_once()
 
-    def test_restart_requires_confirmation(self):
-        FAKE_SERVICE.reset_mock()
+    def test_restart_asks_confirmation(self):
+        reset_calls()
         with patch('app.ui.shell.messagebox.askyesno', return_value=False):
             self.shell.restart_service()
-            self.pump(0.3)
         FAKE_SERVICE.stop.assert_not_called()
         FAKE_SERVICE.start.assert_not_called()
         with patch('app.ui.shell.messagebox.askyesno', return_value=True):
             self.shell.restart_service()
-            self.assertTrue(self.wait(lambda: FAKE_SERVICE.stop.called and FAKE_SERVICE.start.called))
+            self.assertTrue(self.pump_until(
+                lambda: FAKE_SERVICE.stop.called and FAKE_SERVICE.start.called))
         FAKE_SERVICE.start.assert_called_once()
 
     def test_controls_are_blocked_during_operation(self):
@@ -312,7 +204,7 @@ class ServiceControlTests(ShellTestCase):
         self.assertEqual(str(self.shell.header.action_button.cget('state')), 'disabled')
         self.assertEqual(str(self.shell.header.restart_button.cget('state')), 'disabled')
         # Повторная команда при занятом сервисе игнорируется.
-        FAKE_SERVICE.reset_mock()
+        reset_calls()
         self.shell.toggle_service()
         self.shell.restart_service()
         FAKE_SERVICE.stop.assert_not_called()
@@ -329,10 +221,10 @@ class ServiceControlTests(ShellTestCase):
 
         self.shell.work(slow_action, 'start')
         self.shell.work(slow_action, 'start')
-        self.assertTrue(wait_for(lambda: len(started) == 1))
+        self.assertTrue(self.pump_until(lambda: len(started) == 1))
         self.assertEqual(len(started), 1)
         release.put(1)
-        self.assertTrue(self.wait(lambda: self.shell.busy is False))
+        self.assertTrue(self.pump_until(lambda: self.shell.busy is False))
 
     def test_indicators_show_factual_data(self):
         # Настройки Telegram задаются явно: индикатор не зависит от боевого `.env`.
@@ -357,17 +249,18 @@ class ServiceControlTests(ShellTestCase):
         self.assertIn('Последняя ошибка', captions)
         self.shell.header.toggle_details('service')
         # Панель уходит с короткой анимацией — ждём её завершения.
-        self.pump(0.4)
+        self.pump_until(lambda: self.shell.header.details.frame.winfo_manager() == '',
+                        timeout=1.0)
         self.assertEqual(self.shell.header.details.frame.winfo_manager(), '')
 
     def test_narrow_window_keeps_the_header_compact(self):
         """Шапка компактна по построению: ни названий, ни цветных точек."""
         self.shell.update_status(HEALTH)
         self.root.geometry('1024x650+20+20')
-        self.pump(0.5)
-        self.shell.header._fit_width()
-        self.pump(0.2)
+        self.pump_until(lambda: self.root.winfo_width() == 1024, timeout=2.0)
         header = self.shell.header
+        header._fit_width()
+        self.root.update()
         # Полная подпись остаётся в данных состояния.
         self.assertEqual(self.shell._states['service']['label'], 'Работает')
         # Группа индикаторов узкая: три иконки с короткими подписями.
@@ -377,7 +270,6 @@ class ServiceControlTests(ShellTestCase):
         self.assertLessEqual(control.winfo_rootx() + control.winfo_width(),
                              self.root.winfo_rootx() + self.root.winfo_width())
         self.root.geometry('1500x940+20+20')
-        self.pump(0.4)
 
 
 class SectionLifecycleTests(ShellTestCase):
@@ -391,18 +283,18 @@ class SectionLifecycleTests(ShellTestCase):
 
     def test_switching_does_not_duplicate_polling(self):
         monitor = self.shell.section_objects['monitor']
-        self.pump(0.3)
+        self.root.update()
         scheduled = len(monitor._after_ids)
         self.assertEqual(scheduled, 1)  # только цикл опроса раздела
         for _ in range(5):
             self.shell.show_section('settings')
             self.shell.show_section('monitor')
-        self.pump(0.3)
+        self.root.update()
         self.assertEqual(len(monitor._after_ids), 1)
 
     def test_video_and_anpr_are_independent(self):
         monitor = self.shell.section_objects['monitor']
-        FAKE_SERVICE.reset_mock()
+        reset_calls()
         monitor.video_enabled.toggle()      # пользователь выключил видео
         FAKE_SERVICE.start.assert_not_called()
         FAKE_SERVICE.stop.assert_not_called()
@@ -461,15 +353,16 @@ class LifecycleTests(ShellTestCase):
         self.assertFalse(self.errors)
 
     def test_closing_during_polling_is_clean(self):
-        self.pump(0.5)                      # раздел «Мониторинг» опрашивает видео и базу
+        self.settle()                      # раздел «Мониторинг» опрашивает видео и базу
         self.shell._quit()
-        self.pump(0.3)                      # события Tk после уничтожения окна
+        self.pump(0.1)                     # события Tk после уничтожения окна
         self.assertEqual(self.errors, [])
 
     def test_closing_during_rtsp_connection_releases_capture(self):
-        self.pump(0.5)
+        self.settle()
         self.shell._quit()
-        self.assertTrue(wait_for(lambda: any(item.released for item in FakeCapture.instances)))
+        self.assertTrue(self.pump_until(
+            lambda: any(item.released for item in FakeCapture.instances), timeout=3.0))
         self.assertEqual(self.errors, [])
 
     def test_sections_are_shutdown(self):

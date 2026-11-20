@@ -7,7 +7,11 @@ from datetime import date, datetime
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
-from app.ui.dashboard import MonitorWindow, aggregate_hours, archived_photo, chart_last_hour, direction, load_dashboard
+from zoneinfo import ZoneInfo
+
+from app.ui import dashboard
+from app.ui.dashboard import (MonitorWindow, MonitoringSection, aggregate_hours,
+                              archived_photo, chart_last_hour, direction, load_dashboard)
 from app.storage.database import Store
 
 class DashboardTests(unittest.TestCase):
@@ -150,5 +154,158 @@ class DashboardTests(unittest.TestCase):
                 self.assertEqual(direction('unrecognized'), 'Неизвестно')
             finally:
                 store.close()
+
+class _FakeWidget:
+    """Заглушка виджета CustomTkinter: запоминает, что на нём нарисовали."""
+
+    created = []
+
+    def __init__(self, *args, **kwargs):
+        self.kwargs = kwargs
+        _FakeWidget.created.append(self)
+
+    def winfo_children(self):
+        return []
+
+    def destroy(self):
+        pass
+
+    def grid(self, **kwargs):
+        pass
+
+    def pack(self, **kwargs):
+        pass
+
+    def pack_forget(self):
+        pass
+
+    def configure(self, **kwargs):
+        self.kwargs.update(kwargs)
+
+    def cget(self, option):
+        return self.kwargs.get(option)
+
+
+class _FakeCanvas:
+    """Холст графика: считает нарисованные линии, тексты и области."""
+
+    def __init__(self, width=640, height=260):
+        self.size = (width, height)
+        self.lines = []
+        self.texts = []
+        self.polygons = []
+        self.ovals = []
+
+    def delete(self, _what):
+        self.lines.clear()
+        self.texts.clear()
+        self.polygons.clear()
+        self.ovals.clear()
+
+    def winfo_width(self):
+        return self.size[0]
+
+    def winfo_height(self):
+        return self.size[1]
+
+    def create_line(self, *args, **kwargs):
+        self.lines.append((args, kwargs))
+
+    def create_text(self, *args, **kwargs):
+        self.texts.append((args, kwargs))
+
+    def create_polygon(self, *args, **kwargs):
+        self.polygons.append((args, kwargs))
+
+    def create_oval(self, *args, **kwargs):
+        self.ovals.append((args, kwargs))
+
+
+class _FakeVar:
+    def __init__(self, value):
+        self.value = value
+
+    def get(self):
+        return self.value
+
+
+class _FakeFont:
+    def measure(self, text):
+        return 7 * len(text)
+
+
+class MonitoringWidgetsTests(unittest.TestCase):
+    """График и лента «Мониторинга»: что именно на них попадает."""
+
+    def setUp(self):
+        _FakeWidget.created = []
+        # Настоящие окна не нужны: лента и график проверяются без Tk.
+        for name in ('CTkLabel', 'CTkFrame', 'CTkButton'):
+            patcher = patch.object(dashboard.ctk, name, _FakeWidget)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        self.section = MonitoringSection.__new__(MonitoringSection)
+        self.section.visible_count = 30
+        self.section.photo_bytes = {}
+        self.section.photo_buttons = {}
+        self.section.search_selection = (0, '')
+        self.section.feed = _FakeWidget()
+        self.section.graph = _FakeCanvas()
+        self.section.chart_interval = _FakeVar('1 ч')
+        self.section.chart_axis_font = _FakeFont()
+        self.section.hours = [0] * 24
+        self.section.display_period = None
+        self.section.tz = ZoneInfo('Europe/Moscow')
+
+    def _texts(self):
+        return [widget.kwargs.get('text') for widget in _FakeWidget.created]
+
+    def test_feed_shows_the_plate_and_the_time_of_a_passage(self):
+        stamp = '2026-11-17T12:34:00+05:00'
+        self.section.render_passages([(7, stamp, '01 D 555 AA', 'Въезд', False)])
+        texts = self._texts()
+        self.assertIn('№  01 D 555 AA', texts)
+        self.assertIn('◷  17.11.2026  12:34:00', texts)
+        self.assertIn('Въезд', texts)
+
+    def test_feed_reports_an_empty_period(self):
+        self.section.render_passages([])
+        self.assertIn('Проездов за выбранный период нет', self._texts())
+
+    def test_feed_reports_a_failed_load(self):
+        self.section.render_passages(None, error=True)
+        self.assertIn('Не удалось загрузить данные', self._texts())
+
+    def test_feed_cuts_the_list_and_offers_more(self):
+        rows = [(index, '2026-11-17T12:00:00+05:00', 'A', 'Въезд', False)
+                for index in range(35)]
+        self.section.render_passages(rows)
+        self.assertIn('Показать ещё', self._texts())
+        cards = [widget for widget in _FakeWidget.created
+                 if widget.kwargs.get('fg_color') == '#202d40']
+        self.assertEqual(len(cards), 30, 'лента показала больше карточек, чем видно')
+
+    def test_chart_draws_the_curve_and_the_axis(self):
+        self.section.hours[13] = 4
+        self.section.draw_chart()
+        # Сетка по вертикали, подписи оси времени и область под кривой.
+        self.assertGreaterEqual(len(self.section.graph.lines), 5)
+        self.assertGreaterEqual(len(self.section.graph.texts), 9)
+        self.assertTrue(self.section.graph.polygons)
+        self.assertTrue(self.section.graph.ovals)
+
+    def test_chart_draws_nothing_in_a_too_small_area(self):
+        self.section.graph = _FakeCanvas(width=40, height=20)
+        self.section.draw_chart()
+        self.assertEqual(self.section.graph.lines, [])
+        self.assertEqual(self.section.graph.texts, [])
+
+    def test_chart_of_an_empty_day_is_flat(self):
+        self.section.draw_chart()
+        self.assertTrue(self.section.graph.polygons)
+        # Все точки графика — на одной высоте: за день проездов не было.
+        heights = {args[1] for args, _ in self.section.graph.ovals}
+        self.assertEqual(len(heights), 1, 'пустой день должен давать ровную линию')
+
 
 if __name__ == '__main__': unittest.main()

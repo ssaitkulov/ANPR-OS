@@ -39,19 +39,15 @@ class ModeSwitchTests(ShellTestCase):
         self.shell.update_status(HEALTH)
         for key in ('service', 'camera', 'telegram'):
             self.click(self.header.chips[key].frame)
-            self.pump(0.2)
             self.assertTrue(self.panel.is_open)
             self.assertEqual(self.panel.key, key)
             self.header.close_details()
-            self.pump(0.3)
 
     def test_click_on_another_indicator_switches_the_content(self):
         self.shell.update_status(HEALTH)
         self.click(self.header.service_chip.frame)
-        self.pump(0.2)
         self.assertEqual(self.panel.key, 'service')
         self.click(self.header.camera_chip.frame)
-        self.pump(0.2)
         # Панель не закрылась — содержимое сменилось.
         self.assertTrue(self.panel.is_open)
         self.assertEqual(self.panel.key, 'camera')
@@ -61,11 +57,11 @@ class ModeSwitchTests(ShellTestCase):
     def test_second_click_on_the_active_indicator_closes_the_panel(self):
         self.shell.update_status(HEALTH)
         self.click(self.header.camera_chip.frame)
-        self.pump(0.2)
         self.assertTrue(self.panel.is_open)
         self.click(self.header.camera_chip.frame)
-        self.pump(0.4)
         self.assertFalse(self.panel.is_open)
+        # Панель убирается после анимации ухода.
+        self.pump_until(lambda: self.panel.frame.winfo_manager() == '', timeout=1.0)
         self.assertEqual(self.panel.frame.winfo_manager(), '')
 
     def test_rapid_switching_between_modes_is_stable(self):
@@ -75,7 +71,7 @@ class ModeSwitchTests(ShellTestCase):
             for key in ('service', 'camera', 'telegram'):
                 self.click(self.header.chips[key].frame)
                 self.root.update()
-        self.pump(0.6)
+        self.settle()
         self.assertTrue(self.panel.is_open)
         self.assertEqual(self.panel.key, 'telegram')
         self.assertEqual(self.errors, [])
@@ -85,10 +81,10 @@ class ModeSwitchTests(ShellTestCase):
     def test_switching_does_not_change_the_panel_position(self):
         self.shell.update_status(HEALTH)
         self.click(self.header.service_chip.frame)
-        self.pump(0.4)
+        self.settle()
         x = self.panel.frame.winfo_x()
         self.click(self.header.camera_chip.frame)
-        self.pump(0.4)
+        self.settle()
         self.assertEqual(self.panel.frame.winfo_x(), x)
 
     def test_panel_width_is_the_same_in_every_mode(self):
@@ -96,7 +92,7 @@ class ModeSwitchTests(ShellTestCase):
         widths = []
         for key in ('service', 'camera', 'telegram'):
             self.click(self.header.chips[key].frame)
-            self.pump(0.3)
+            self.pump_until(lambda: self.panel.frame.winfo_width() > 0, timeout=1.0)
             widths.append(self.panel.frame.winfo_width())
         self.assertEqual(len(set(widths)), 1)
         self.assertTrue(400 <= widths[0] <= 440)
@@ -105,7 +101,6 @@ class ModeSwitchTests(ShellTestCase):
         """Панель одна: три режима — три блока одного окна."""
         self.shell.update_status(HEALTH)
         self.click(self.header.service_chip.frame)
-        self.pump(0.2)
         panels = [widget for widget in self.root.winfo_children()
                   if isinstance(widget, ctk.CTkFrame)
                   and widget.winfo_manager() == 'place']
@@ -114,11 +109,11 @@ class ModeSwitchTests(ShellTestCase):
     def test_active_indicator_is_highlighted(self):
         self.shell.update_status(HEALTH)
         self.click(self.header.telegram_chip.frame)
-        self.pump(0.6)
+        self.settle()
         self.assertEqual(str(self.header.telegram_chip.frame.cget('fg_color')).lower(),
                          '#26364c')
         self.header.close_details()
-        self.pump(0.6)
+        self.settle()
         self.assertNotEqual(str(self.header.telegram_chip.frame.cget('fg_color')).lower(),
                             '#26364c')
 
@@ -129,7 +124,6 @@ class ModeContentTests(ShellTestCase):
     def test_service_mode_shows_service_rows_only(self):
         self.shell.update_status(HEALTH)
         self.click(self.header.service_chip.frame)
-        self.pump(0.2)
         rows = self.rows_of('service')
         self.assertEqual(rows, ['PID', 'Время работы', 'Порт сервиса',
                                 'Последняя проверка', 'Последняя ошибка'])
@@ -139,7 +133,6 @@ class ModeContentTests(ShellTestCase):
     def test_camera_mode_shows_camera_rows_only(self):
         self.shell.update_status(HEALTH)
         self.click(self.header.camera_chip.frame)
-        self.pump(0.2)
         rows = self.rows_of('camera')
         self.assertEqual(rows, ['Название', 'IP-адрес', 'События ANPR',
                                 'Последнее событие'])
@@ -149,7 +142,6 @@ class ModeContentTests(ShellTestCase):
     def test_telegram_mode_shows_telegram_rows_only(self):
         self.shell.update_status(HEALTH)
         self.click(self.header.telegram_chip.frame)
-        self.pump(0.2)
         rows = self.rows_of('telegram')
         self.assertEqual(rows, ['Соединение', 'Последняя связь', 'Последняя доставка'])
         self.assertNotIn('PID', rows)
@@ -158,7 +150,6 @@ class ModeContentTests(ShellTestCase):
     def test_camera_mode_has_no_service_controls(self):
         self.shell.update_status(HEALTH)
         self.click(self.header.camera_chip.frame)
-        self.pump(0.2)
         for button in (self.panel.start_button, self.panel.restart_button,
                        self.panel.stop_button, self.panel.log_button):
             self.assertFalse(button.winfo_manager())
@@ -166,7 +157,6 @@ class ModeContentTests(ShellTestCase):
     def test_telegram_mode_has_no_service_controls(self):
         self.shell.update_status(HEALTH)
         self.click(self.header.telegram_chip.frame)
-        self.pump(0.2)
         for button in (self.panel.start_button, self.panel.restart_button,
                        self.panel.stop_button, self.panel.log_button):
             self.assertFalse(button.winfo_manager())
@@ -174,7 +164,6 @@ class ModeContentTests(ShellTestCase):
     def test_service_mode_keeps_the_controls(self):
         self.shell.update_status(HEALTH)
         self.click(self.header.service_chip.frame)
-        self.pump(0.2)
         self.assertTrue(self.panel.restart_button.winfo_manager())
         self.assertTrue(self.panel.stop_button.winfo_manager())
         self.assertTrue(self.panel.log_button.winfo_manager())
@@ -184,7 +173,6 @@ class ModeContentTests(ShellTestCase):
         self.service_offline()
         self.shell.update_status(None)
         self.click(self.header.service_chip.frame)
-        self.pump(0.2)
         self.assertTrue(self.panel.start_button.winfo_manager())
         self.assertFalse(self.panel.stop_button.winfo_manager())
         self.assertTrue(self.panel.log_button.winfo_manager())
@@ -193,7 +181,6 @@ class ModeContentTests(ShellTestCase):
         broken = dict(HEALTH, camera_message='связь прервалась. Программа попробует снова.')
         self.set_health(broken)
         self.click(self.header.camera_chip.frame)
-        self.pump(0.2)
         data = self.shell.panel_data()
         camera = dict(data['camera']['rows'])
         self.assertEqual(camera.get('События ANPR'), 'ошибка')
@@ -206,7 +193,6 @@ class ModeContentTests(ShellTestCase):
                                                  'error': 'Connection refused'})
         self.set_health(lost)
         self.click(self.header.telegram_chip.frame)
-        self.pump(0.2)
         data = self.shell.panel_data()
         telegram = dict(data['telegram']['rows'])
         self.assertEqual(telegram.get('Соединение'), 'Нет')
@@ -220,7 +206,6 @@ class StatusWhileOpenTests(ShellTestCase):
         """Индикатор и заголовок панели показывают новое состояние."""
         self.shell.update_status(HEALTH)
         self.click(self.header.camera_chip.frame)
-        self.pump(0.2)
         broken = dict(HEALTH, camera_message='связь прервалась. Программа попробует снова.')
         self.set_health(broken)
         self.assertEqual(self.header.camera_chip.value.cget('text'), 'Нет связи')
@@ -231,10 +216,8 @@ class StatusWhileOpenTests(ShellTestCase):
     def test_service_stopped_while_the_panel_is_open(self):
         self.shell.update_status(HEALTH)
         self.click(self.header.service_chip.frame)
-        self.pump(0.2)
         self.service_offline()
         self.shell.update_status(None)
-        self.pump(0.3)
         self.assertEqual(self.header.service_chip.value.cget('text'), 'Остановлен')
         self.assertTrue(self.panel.start_button.winfo_manager())
         self.assertFalse(self.panel.stop_button.winfo_manager())
@@ -249,10 +232,8 @@ class PanelLifecycleTests(ShellTestCase):
         """Сворачивание в трей закрывает панель."""
         self.shell.update_status(HEALTH)
         self.click(self.header.service_chip.frame)
-        self.pump(0.2)
         self.assertTrue(self.panel.is_open)
         self.shell.hide()
-        self.pump(0.4)
         self.assertFalse(self.panel.is_open)
 
     def test_panel_stays_inside_the_window_at_125_percent(self):
@@ -260,11 +241,10 @@ class PanelLifecycleTests(ShellTestCase):
         try:
             self.root.deiconify()
             self.root.geometry('1280x800+10+10')
-            self.pump(0.5)
+            self.pump_until(lambda: self.root.winfo_width() == 1280, timeout=2.0)
             self.shell.update_status(HEALTH)
-            self.pump(0.3)
             self.click(self.header.camera_chip.frame)
-            self.pump(0.5)
+            self.settle()
             frame = self.panel.frame
             self.assertGreater(frame.winfo_width(), 400)
             self.assertGreaterEqual(frame.winfo_x(), 0)
@@ -272,7 +252,6 @@ class PanelLifecycleTests(ShellTestCase):
                                  self.root.winfo_width())
         finally:
             ctk.set_widget_scaling(1.0)
-            self.pump(0.2)
 
     def test_mode_switch_without_animation_under_reduced_motion(self):
         from app.ui import motion as motion_module
@@ -293,8 +272,8 @@ class PanelLifecycleTests(ShellTestCase):
         for _ in range(5):
             for key in ('service', 'camera', 'telegram'):
                 self.click(self.header.chips[key].frame)
-                self.pump(0.05)
-        self.pump(0.5)
+                self.root.update()
+        self.settle()
         self.assertLessEqual(self.panel.motion.pending, 4)
         self.assertLessEqual(self.header.motion.pending, 4)
 

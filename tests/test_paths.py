@@ -15,6 +15,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from app.core import paths as app_paths
 from app.core.paths import PROJECT_ROOT, DATA_DIR
@@ -142,6 +143,40 @@ class PortabilityTests(unittest.TestCase):
             self.assertNotIn(':', value, f'{key} — путь с указанием диска')
             self.assertFalse(value.startswith(str(PROJECT_ROOT)),
                              f'{key} — вписан абсолютный путь проекта')
+
+
+class LegacyDataTests(unittest.TestCase):
+    """Прежние места рабочих данных: о них нужно сказать, а не промолчать."""
+
+    def test_legacy_files_in_the_project_root_are_reported(self):
+        """База в корне — признак «тихой» потери данных: её надо увидеть."""
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            (root / 'anpr.sqlite3').write_bytes(b'')
+            (root / 'anpr_state.json').write_text('{}', encoding='utf-8')
+            with patch.object(app_paths, 'PROJECT_ROOT', root):
+                legacy = app_paths.legacy_data()
+            self.assertEqual(legacy['db'], root / 'anpr.sqlite3')
+            self.assertEqual(legacy['state'], root / 'anpr_state.json')
+            self.assertNotIn('subscribers', legacy)
+
+    def test_clean_root_has_no_legacy_data(self):
+        with tempfile.TemporaryDirectory() as folder:
+            with patch.object(app_paths, 'PROJECT_ROOT', Path(folder)):
+                self.assertEqual(app_paths.legacy_data(), {})
+
+    def test_data_directories_are_created(self):
+        """Каталоги рабочих данных создаются — иначе сервис не стартует."""
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            data, runtime, logs = root / 'data', root / 'runtime', root / 'logs'
+            with patch.object(app_paths, 'DATA_DIR', data), \
+                 patch.object(app_paths, 'RUNTIME_DIR', runtime), \
+                 patch.object(app_paths, 'LOG_DIR', logs):
+                app_paths.ensure_data_dirs()
+            self.assertTrue(data.is_dir())
+            self.assertTrue(runtime.is_dir())
+            self.assertTrue(logs.is_dir())
 
 
 class SingleSourceOfTruthTests(unittest.TestCase):

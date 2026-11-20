@@ -204,6 +204,29 @@ class PanelJournalTests(unittest.TestCase):
                           if item['action'] == 'panel.exit'])
 
 
+class JournalReadTests(unittest.TestCase):
+    """Чтение журнала обратно: битые строки не должны ломать разбор."""
+
+    def test_broken_lines_are_skipped_and_good_ones_kept(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / 'panel.log'
+            path.write_text(
+                '{"ts": "2026-11-18T13:04:05+05:00", "action": "service.start.confirm"}\n'
+                '\n'
+                '{"ts": "2026-11-18T13:04:06+05:00", "action": "truncated\n'
+                'не json вовсе\n'
+                '{"ts": "2026-11-18T13:04:07+05:00", "action": "service.stop.confirm"}\n',
+                encoding='utf-8')
+            records = audit.JournalWriter(path).read()
+        self.assertEqual([item['action'] for item in records],
+                         ['service.start.confirm', 'service.stop.confirm'])
+
+    def test_missing_journal_reads_as_empty(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / 'missing.log'
+            self.assertEqual(audit.JournalWriter(path).read(), [])
+
+
 class RotationTests(unittest.TestCase):
     """Журналы и файлы журналов сервиса ротируются."""
 

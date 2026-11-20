@@ -26,7 +26,7 @@ import unittest
 from unittest.mock import patch
 
 from app.ui import status as ui_status
-from tests.ui_harness import HEALTH, FAKE_SERVICE, ShellTestCase
+from tests.ui_harness import HEALTH, FAKE_SERVICE, ShellTestCase, reset_calls
 
 
 def setUpModule():
@@ -141,21 +141,18 @@ class ServicePanelTests(ShellTestCase):
         except tk.TclError:
             pass
         self.root.event_generate('<Escape>')
-        self.pump(0.4)
         self.assertFalse(self.panel.is_open)
 
     def test_click_outside_closes_the_panel(self):
         self.header.toggle_panel()
         self.root.update()
         self.click(self.shell.root)      # клик по пустому месту окна
-        self.pump(0.4)
         self.assertFalse(self.panel.is_open)
 
     def test_click_inside_the_panel_keeps_it_open(self):
         self.header.toggle_panel()
         self.root.update()
         self.click(self.panel.title)
-        self.pump(0.2)
         self.assertTrue(self.panel.is_open)
 
     def test_switching_section_closes_the_panel(self):
@@ -166,10 +163,10 @@ class ServicePanelTests(ShellTestCase):
 
     def test_panel_does_not_move_the_dashboard(self):
         self.shell.update_status(HEALTH)
-        self.pump(0.2)
+        self.settle()
         before = self.shell.content.winfo_rooty()
         self.header.toggle_panel()
-        self.pump(0.3)
+        self.settle()
         self.assertEqual(self.shell.content.winfo_rooty(), before)
 
     def test_panel_stays_inside_the_window(self):
@@ -177,9 +174,9 @@ class ServicePanelTests(ShellTestCase):
         # размеры ещё не применены.
         self.root.deiconify()
         self.root.geometry('1280x800+10+10')
-        self.pump(0.4)
+        self.pump_until(lambda: self.root.winfo_width() == 1280, timeout=1.0)
         self.header.toggle_panel()
-        self.pump(0.3)
+        self.settle()
         frame = self.panel.frame
         self.assertGreaterEqual(frame.winfo_x(), 0)
         self.assertLessEqual(frame.winfo_x() + frame.winfo_reqwidth(),
@@ -189,7 +186,6 @@ class ServicePanelTests(ShellTestCase):
     def test_panel_shows_service_details(self):
         self.shell.update_status(HEALTH)
         self.header.toggle_panel()
-        self.pump(0.2)
         rows = dict(self.shell.panel_data()['service']['rows'])
         self.assertEqual(rows.get('PID'), '4242')
         self.assertEqual(rows.get('Порт сервиса'), '18749')
@@ -199,7 +195,6 @@ class ServicePanelTests(ShellTestCase):
     def test_panel_shows_camera_and_telegram_details(self):
         self.shell.update_status(HEALTH)
         self.header.toggle_panel()
-        self.pump(0.2)
         data = self.shell.panel_data()
         camera = dict(data['camera']['rows'])
         telegram = dict(data['telegram']['rows'])
@@ -226,7 +221,6 @@ class PanelActionsTests(ShellTestCase):
     def test_running_service_offers_restart_stop_and_log(self):
         self.shell.update_status(HEALTH)
         self.header.toggle_panel()
-        self.pump(0.2)
         self.assertTrue(self.panel.restart_button.winfo_manager())
         self.assertTrue(self.panel.stop_button.winfo_manager())
         self.assertFalse(self.panel.start_button.winfo_manager())
@@ -236,7 +230,6 @@ class PanelActionsTests(ShellTestCase):
         self.service_offline()
         self.shell.update_status(None)
         self.header.toggle_panel()
-        self.pump(0.2)
         self.assertFalse(self.panel.restart_button.winfo_manager())
         self.assertFalse(self.panel.stop_button.winfo_manager())
         self.assertTrue(self.panel.start_button.winfo_manager())
@@ -248,7 +241,6 @@ class PanelActionsTests(ShellTestCase):
         self.shell.operation = 'restart'
         self.header.refresh_panel()
         self.header.toggle_panel()
-        self.pump(0.2)
         for button in (self.panel.start_button, self.panel.restart_button, self.panel.stop_button):
             self.assertEqual(str(button.cget('state')), 'disabled')
         self.assertTrue(self.panel.progress_track.winfo_manager())
@@ -271,17 +263,14 @@ class PanelActionsTests(ShellTestCase):
         self.shell.update_status(None, error='сервис не отвечает')
         with patch('app.ui.shell.process_info.pid_alive', return_value=False):
             self.header.toggle_panel()
-            self.pump(0.2)
             self.assertTrue(self.panel.start_button.winfo_manager())
             self.assertFalse(self.panel.restart_button.winfo_manager())
             self.header.close_details()
-            self.pump(0.3)
         with patch('app.ui.shell.process_info.pid_alive', return_value=True), \
                 patch('app.ui.shell.process_info.looks_like_service', return_value=True):
             self.shell._health = {'pid': 4242, 'status': 'worker_stopped'}
             self.shell.update_status(self.shell._health)
             self.header.toggle_panel()
-            self.pump(0.2)
             self.assertTrue(self.panel.restart_button.winfo_manager())
             self.assertFalse(self.panel.start_button.winfo_manager())
 
@@ -290,7 +279,7 @@ class ConfirmationTests(ShellTestCase):
     """Подтверждения остановки и перезапуска."""
 
     def test_stop_requires_confirmation(self):
-        FAKE_SERVICE.reset_mock()
+        reset_calls()
         with patch('app.ui.shell.messagebox.askyesno', return_value=False) as confirm:
             self.shell.stop_service()
             confirm.assert_called_once()
@@ -300,7 +289,7 @@ class ConfirmationTests(ShellTestCase):
         FAKE_SERVICE.stop.assert_not_called()
 
     def test_restart_requires_confirmation(self):
-        FAKE_SERVICE.reset_mock()
+        reset_calls()
         with patch('app.ui.shell.messagebox.askyesno', return_value=False) as confirm:
             self.shell.restart_service()
             confirm.assert_called_once()
@@ -311,7 +300,7 @@ class ConfirmationTests(ShellTestCase):
         FAKE_SERVICE.start.assert_not_called()
 
     def test_start_does_not_ask_confirmation(self):
-        FAKE_SERVICE.reset_mock()
+        reset_calls()
         with patch('app.ui.shell.messagebox.askyesno') as confirm:
             self.shell.start_service()
             confirm.assert_not_called()
@@ -326,17 +315,16 @@ class OperationMessageTests(ShellTestCase):
     def test_successful_operation_reports_the_result(self):
         with patch('app.ui.shell.messagebox.askyesno', return_value=True):
             self.shell.stop_service()
-            self.pump(0.3)
+            self.wait_idle()
         data = self.shell.panel_data()
         self.assertEqual(data['message'], 'ANPR-сервис остановлен.')
         self.assertEqual(data['message_tone'], 'ok')
 
     def test_failed_operation_reports_the_reason_and_opens_the_panel(self):
         self.header.close_details()
-        self.pump(0.3)
         with patch('app.ui.shell.service.start', side_effect=RuntimeError('порт занят')):
             self.shell.start_service()
-            self.pump(0.3)
+            self.wait_idle()
         data = self.shell.panel_data()
         self.assertIn('порт занят', data['message'])
         self.assertEqual(data['message_tone'], 'error')
@@ -345,7 +333,6 @@ class OperationMessageTests(ShellTestCase):
 
     def test_error_is_shown_without_fake_details(self):
         self.shell.show_message('сервис не отвечает', tone='error')
-        self.pump(0.2)
         self.assertEqual(str(self.panel.message_label.cget('text')), 'сервис не отвечает')
         self.assertTrue(self.panel.message_icon.winfo_manager())
 
@@ -357,17 +344,16 @@ class AnimationTests(ShellTestCase):
         self.shell.update_status(HEALTH)
         for _ in range(6):
             self.header.toggle_panel()
-            self.pump(0.25)
+            self.settle()
             self.header.toggle_panel()
-            self.pump(0.25)
+            self.settle()
         self.assertLessEqual(self.panel.motion.pending, 4)
         self.assertLessEqual(self.header.motion.pending, 4)
 
     def test_closing_the_window_cancels_panel_callbacks(self):
         self.header.toggle_panel()
-        self.pump(0.2)
+        self.settle()
         self.shell._quit()
-        self.pump(0.3)
         self.assertEqual(self.panel.motion.pending, 0)
         self.assertEqual(self.errors, [])
 
@@ -381,11 +367,11 @@ class AnimationTests(ShellTestCase):
         """
         self.shell.update_status(HEALTH)
         self.header.toggle_panel()
-        self.pump(0.2)
+        self.settle()
         self.header.shutdown()
         pending = self.header.motion.pending
         self.header.overlay.event_generate('<Configure>')
-        self.pump(0.2)
+        self.settle()
         self.assertEqual(self.header.motion.pending, pending)
 
     def test_closing_the_window_leaves_no_pending_callbacks(self):
@@ -397,7 +383,7 @@ class AnimationTests(ShellTestCase):
         self.root.deiconify()
         self.shell.update_status(HEALTH)
         self.header.toggle_panel()
-        self.pump(0.5)
+        self.settle()
         self.shell._quit()
         self.assertEqual(tuple(self.root.tk.call('after', 'info')), ())
 
@@ -407,13 +393,13 @@ class AnimationTests(ShellTestCase):
         import tempfile
         self.shell.update_status(HEALTH)
         self.header.toggle_panel()
-        self.pump(0.3)
+        self.settle()
         with tempfile.TemporaryFile(mode='w+b') as buffer:
             saved = os.dup(2)
             try:
                 os.dup2(buffer.fileno(), 2)
                 self.shell._quit()
-                self.pump(0.3)
+                self.pump(0.05)
             finally:
                 os.dup2(saved, 2)
                 os.close(saved)

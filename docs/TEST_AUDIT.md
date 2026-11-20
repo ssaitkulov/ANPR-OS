@@ -273,3 +273,32 @@ smoke (`tests.test_stream_latency tests.test_setup_anpr`, 0,3 с), полный 
   (ветки `detect_test_run`), на выводы это не влияет.
 - Полный прогон выполнялся дважды (`unittest discover`, `pytest -q`) — оба
   зелёные, рабочие данные не тронуты.
+
+## 9. Статус после аудита (обновлено)
+
+Аудит остаётся историческим отчётом: измерения §0 и списки §3–§6 — это состояние
+набора на момент проверки. Правила набора живут в [`TESTING.md`](TESTING.md).
+
+Закрыто:
+
+| Пробел из §4 | Чем закрыт |
+|---|---|
+| №6 HTTP-эндпоинты | `tests/test_http_api.py` — 8 проверок через `TestClient` |
+| №7 `paths.legacy_data()` и `ensure_data_dirs()` | `tests/test_paths.py::LegacyDataTests` |
+| №8 ветка `ANPR_SAFE_MODE=0` | `tests/test_safe_mode.py::SafeModeFlagTests` — отдельный экземпляр модуля, защита рабочего процесса не трогается |
+| №9 `panel_lock` | `tests/test_service_instance.py::PanelInstanceTests` |
+| №11 `port_owner_pid` и `describe` | `tests/test_service_instance.py::PortOwnerTests` |
+| №13 график и лента «Мониторинга» | `tests/test_dashboard.py::MonitoringWidgetsTests` |
+| №14 чтение журнала при битых строках | `tests/test_audit_log.py::JournalReadTests` |
+| Пункт 1 плана (один раннер в CI) | `.github/workflows/ci.yml`: полный прогон под `pytest` + быстрая выборка под `unittest` |
+| Пункт 2 плана (документация по факту) | `docs/TESTING.md` §1–§3 обновлены |
+| Пункт 3 плана (общая оснастка UI) | `tests/ui_harness.py`; `test_stage2_ui.py` переведён на неё |
+
+Не закрыто: №10 (запуск сервиса при занятом порте и без `.env`) и низкий
+приоритет — `app/ui/motion.py`, `app/ui/widgets.py`, `app/ui/settings.py`.
+
+Отдельно: дубли имён между `test_service_panel.py` и `test_stage2_ui.py`
+(§3.1) устранены — сценарии различаются, тесты переименованы; совпадений имён
+в наборе больше нет. Ожидание в UI-тестах переведено с фиксированных пауз на
+ожидание по состоянию (`pump_until`, `wait_idle`, `settle`), см.
+[`TESTING.md`](TESTING.md) §4.2.

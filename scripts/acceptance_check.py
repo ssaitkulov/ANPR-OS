@@ -222,7 +222,7 @@ def expected_recipients(env: dict) -> list:
         chat_ids.append(str(env['TELEGRAM_CHAT_ID']))
     subscribers_file = Path(env.get('SUBSCRIBERS_FILE') or app_paths.subscribers_file())
     if not subscribers_file.is_absolute():
-        subscribers_file = BASE_DIR / subscribers_file
+        subscribers_file = PROJECT_ROOT / subscribers_file
     subscribers = []
     if subscribers_file.exists():
         try:

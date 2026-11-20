@@ -24,12 +24,42 @@ import os
 import shutil
 import sqlite3
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
 from app.core import safe_mode
 from app.core import paths as app_paths
+
+
+def _patch_photoimage_release() -> None:
+    """Освобождать снимки Tk из фонового потока нельзя.
+
+    PIL удаляет снимок вызовом в Tk, а такой вызов из чужого потока ждёт,
+    пока главное окно обработает события: фоновый поток (добор архива,
+    опрос панели) виснет намертво, и падает уже следующий тест.
+
+    В фоновом потоке освобождение снимка пропускается — его удалит
+    интерпретатор вместе с окном. В главном потоке поведение прежнее.
+    """
+    try:
+        from PIL import ImageTk
+    except ImportError:  # pragma: no cover — Pillow есть всегда
+        return
+    original = ImageTk.PhotoImage.__del__
+    if getattr(original, '_anpr_thread_safe', False):
+        return
+
+    def __del__(self):  # noqa: N807 — имя как у PIL
+        if threading.current_thread() is threading.main_thread():
+            original(self)
+
+    __del__._anpr_thread_safe = True
+    ImageTk.PhotoImage.__del__ = __del__
+
+
+_patch_photoimage_release()
 
 #: Безопасный тестовый режим: включается здесь, если пакет `tests` импортирован
 #: первым (обычный случай), и уже включён — если первым был `conftest.py`.

@@ -11,6 +11,7 @@ import tempfile
 import unittest
 from datetime import datetime, timedelta
 from pathlib import Path
+from unittest.mock import patch
 
 BASE_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(BASE_DIR / 'scripts'))
@@ -158,6 +159,17 @@ class AcceptanceToolTests(unittest.TestCase):
         expected = acceptance_check.expected_recipients(env)
         self.assertEqual(expected, ['111', '999'])
 
+    def test_relative_subscribers_path_is_resolved_from_the_project_root(self):
+        """Относительный путь из .env считается от корня проекта, а не от CWD."""
+        subscribers = self.root / 'data' / 'subscribers.json'
+        subscribers.parent.mkdir(parents=True)
+        subscribers.write_text(json.dumps(['111', '222']), encoding='utf-8')
+        env = {'TELEGRAM_CHAT_ID': '999', 'SUBSCRIBERS_FILE': 'data/subscribers.json',
+               'ALLOWED_CHAT_IDS': ''}
+        with patch.object(acceptance_check, 'PROJECT_ROOT', self.root):
+            expected = acceptance_check.expected_recipients(env)
+        self.assertEqual(expected, ['111', '222', '999'])
+
     def test_failed_delivery_is_reported_from_health(self):
         env = {'TELEGRAM_CHAT_ID': '999', 'SUBSCRIBERS_FILE': str(self.root / 'нет.json'),
                'ALLOWED_CHAT_IDS': ''}
@@ -166,6 +178,49 @@ class AcceptanceToolTests(unittest.TestCase):
         self.assertTrue(any(check['status'] == acceptance_check.WARN
                             for check in self.report.checks))
         self.assertEqual(self.report.failed, 0)
+
+
+class TestSelectionTests(unittest.TestCase):
+    """Выбор тестов по изменённым файлам (хук и CI).
+
+    Ошибка здесь опаснее лишнего прогона: неполный набор даёт ложный
+    успех, а лишний — просто тратит время.
+    """
+
+    def setUp(self):
+        import test_select
+        self.select = test_select
+
+    def plan(self, *paths):
+        return self.select.collect(list(paths))
+
+    def test_documentation_change_does_not_run_the_full_suite(self):
+        self.assertEqual(self.plan('docs/TESTING.md', 'README.md'), ['DOCS'])
+
+    def test_ui_component_runs_the_related_tests(self):
+        plan = self.plan('app/ui/header.py')
+        self.assertIn('tests/test_stage2_ui.py', plan)
+        self.assertIn('tests/test_service_panel.py', plan)
+        self.assertIn('tests/test_segmented_tabs.py', plan)
+
+    def test_service_module_runs_its_tests(self):
+        plan = self.plan('app/services/http_api.py')
+        self.assertIn('tests/test_http_api.py', plan)
+
+    def test_shared_test_infrastructure_runs_everything(self):
+        for name in ('app/core/safe_mode.py', 'tests/conftest.py',
+                     'tests/__init__.py', 'tests/anpr_testenv.py',
+                     'tests/ui_harness.py'):
+            self.assertEqual(self.plan(name), ['FULL'], name)
+
+    def test_unmapped_file_runs_the_full_suite(self):
+        """Файл, которому нет соответствия, не должен остаться без проверки."""
+        self.assertEqual(self.plan('assets/evrika-logo-ru.png'), ['FULL'])
+        # А файл приложения всегда отображается в свою область.
+        self.assertIn('tests/test_shell.py', self.plan('app/ui/icons.py'))
+
+    def test_changed_test_module_runs_itself(self):
+        self.assertEqual(self.plan('tests/test_http_api.py'), ['tests/test_http_api.py'])
 
 
 if __name__ == '__main__':

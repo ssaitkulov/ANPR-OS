@@ -11,13 +11,18 @@
 from tests import anpr_testenv  # noqa: F401  — изоляция тестов от боевой БД
 
 import os
+import tempfile
+import threading
 import unittest
+from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from app.core.paths import PROJECT_ROOT
 from app.core import safe_mode
 from app.services import control as service_control
 from app.services import instance as service_instance
+from app.services import panel_lock
 from app.services import process_info
 
 
@@ -57,6 +62,89 @@ class SingleInstanceTests(unittest.TestCase):
             self.assertTrue(second.acquire(), 'после освобождения блокировка доступна')
         finally:
             second.release()
+
+
+class PanelInstanceTests(unittest.TestCase):
+    """Один экземпляр окна панели управления."""
+
+    def _instance(self, folder):
+        """Экземпляр панели со своим именем блокировки.
+
+        Имя выводится из корня проекта: подмена корня оставляет боевую
+        блокировку панели нетронутой — тест не должен мешать открытой
+        панели оператора.
+        """
+        with patch.object(panel_lock, 'PROJECT_ROOT', Path(folder)):
+            return panel_lock.PanelInstance()
+
+    def test_second_panel_asks_the_first_one_to_close(self):
+        with tempfile.TemporaryDirectory() as folder:
+            first = self._instance(folder)
+            try:
+                first.acquire(timeout_ms=100)
+                second = self._instance(folder)
+                # Блокировку Windows держит поток: проверять её надо из
+                # другого потока, иначе он войдёт в свою же блокировку.
+                errors = []
+
+                def acquire():
+                    try:
+                        second.acquire(timeout_ms=100)
+                    except Exception as error:
+                        errors.append(error)
+
+                thread = threading.Thread(target=acquire)
+                thread.start()
+                thread.join(10)
+                self.assertTrue(errors, 'второй экземпляр не заметил занятой блокировки')
+                self.assertIsInstance(errors[0], RuntimeError)
+                # Первый экземпляр узнаёт, что его просят закрыть.
+                self.assertTrue(first.replacement_requested())
+                second.close()
+            finally:
+                first.close()
+
+    def test_panel_lock_is_released_with_the_window(self):
+        with tempfile.TemporaryDirectory() as folder:
+            first = self._instance(folder)
+            first.acquire(timeout_ms=100)
+            first.close()
+            # После закрытия окна место занимает следующий экземпляр.
+            second = self._instance(folder)
+            try:
+                second.acquire(timeout_ms=100)
+            finally:
+                second.close()
+
+
+class PortOwnerTests(unittest.TestCase):
+    """Кто слушает порт сервиса."""
+
+    NETSTAT = (
+        '  Proto  Local Address          Foreign Address        State           PID\n'
+        '  TCP    0.0.0.0:135            0.0.0.0:0              LISTENING       924\n'
+        '  TCP    127.0.0.1:18749        0.0.0.0:0              LISTENING       4242\n'
+        '  TCP    127.0.0.1:18749        127.0.0.1:51514        ESTABLISHED     1200\n'
+    )
+
+    def _port_owner(self, port):
+        with patch.object(process_info.subprocess, 'run',
+                          return_value=SimpleNamespace(stdout=self.NETSTAT)):
+            return process_info.port_owner_pid(port)
+
+    def test_listening_pid_is_found_by_port(self):
+        self.assertEqual(self._port_owner(18749), 4242)
+        # Соединение — не слушание: его PID портом не владеет.
+        self.assertNotEqual(self._port_owner(18749), 1200)
+
+    def test_free_port_has_no_owner(self):
+        self.assertIsNone(self._port_owner(19999))
+
+    def test_describe_reports_a_dead_process(self):
+        info = process_info.describe(999999)
+        self.assertFalse(info['alive'])
+        self.assertFalse(info['looks_like_service'])
+        self.assertIsNone(info['command'])
 
 
 class ProcessCheckTests(unittest.TestCase):

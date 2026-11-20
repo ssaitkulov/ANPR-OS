@@ -189,6 +189,9 @@ app/ui/shell.py (AppShell) ─► header.py ─► service_panel.py / status.py 
 корневой `conftest.py`): рабочие данные, сеть и процессы уводятся в
 безопасный режим. База для новых тестов — `tests/anpr_testenv.IsolatedTestCase`;
 общая оснастка UI (заглушки, базовый класс) — `tests/ui_harness.py`.
+В ней ожидание идёт по состоянию: `ShellTestCase.pump_until(условие, таймаут)`,
+`wait_idle()` и `settle()` крутят цикл событий Tk, пока состояние не изменится;
+фиксированных пауз `pump(0.4)` в тестах быть не должно.
 Классификация набора и что запускать при каком изменении — в
 [`TESTING.md`](TESTING.md).
 
@@ -205,7 +208,8 @@ app/ui/shell.py (AppShell) ─► header.py ─► service_panel.py / status.py 
 | `test_stream_latency.py` | задержка потока камеры (быстрый smoke-тест) |
 | `test_audit_log.py` | журналы управления, маскирование секретов |
 | `test_control_auth.py` | токен остановки, `POST /shutdown`, защита процесса |
-| `test_service_instance.py` | один экземпляр сервиса, устойчивость запуска |
+| `test_http_api.py` | HTTP-эндпоинты локального сервиса: `/health`, `/events`, `/passages`, фото проезда, `/status`, `/entries/today`, ручной отчёт и добор |
+| `test_service_instance.py` | один экземпляр сервиса и панели, владелец порта, описание процесса |
 | `test_stage2_resilience.py` | ротация журналов, потоки, устойчивость ядра |
 | `test_stage3_quality.py`, `test_stage4_polish.py` | регрессии ядра и боевого режима |
 | `test_setup_anpr.py` | окно настроек: чтение, валидация, сохранение |
@@ -213,10 +217,10 @@ app/ui/shell.py (AppShell) ─► header.py ─► service_panel.py / status.py 
 | `test_shell.py`, `test_panel_status.py` | оболочка окна, словарь состояний |
 | `test_stage2_ui.py`, `test_service_panel.py`, `test_context_panel.py` | шапка с тремя индикаторами, контекстная панель по выбранному компоненту |
 | `test_segmented_tabs.py` | сегментированный переключатель разделов: переключение мышью и с клавиатуры, подложка, фокус, закрытие панели диагностики |
-| `test_dashboard.py` | мониторинг: загрузка данных, лента, график |
+| `test_dashboard.py` | мониторинг: загрузка данных, лента проездов, график |
 | `test_system_events.py` | операционный журнал в памяти |
 | `test_verify_state.py` | `scripts/verify_state.py` — сверка JSON ↔ SQLite |
-| `test_acceptance_tools.py` | `scripts/acceptance_check.py`, `scripts/check_lock.py` |
+| `test_acceptance_tools.py` | `scripts/acceptance_check.py`, `scripts/check_lock.py`, `scripts/test_select.py` |
 
 ## 8. Скрипты обслуживания
 
@@ -225,6 +229,7 @@ app/ui/shell.py (AppShell) ─► header.py ─► service_panel.py / status.py 
 | `scripts/verify_state.py` | сверка JSON-зеркала ↔ SQLite | 1 при расхождениях |
 | `scripts/acceptance_check.py` | автоматическая часть приёмки в бой | 1 при блокирующих замечаниях |
 | `scripts/check_lock.py` | согласованность версий зависимостей в трёх файлах | 1 при расхождении |
+| `scripts/test_select.py` | выбор тестов по изменённым файлам (локальный хук) | 1, если файлы определить не удалось |
 | `scripts/migrate_data.py` | перенос рабочих данных в `data/` с резервной копией и проверками | — |
 | `scripts/rasterize_icons.py` | разработческая растеризация SVG → PNG в `assets/icons` (в runtime не нужен) | — |
 | `scripts/_bootstrap.py` | единое добавление корня проекта в `sys.path` для скриптов | — |

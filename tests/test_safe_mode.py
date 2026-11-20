@@ -14,6 +14,8 @@
 """
 from tests import anpr_testenv  # noqa: F401  — изоляция тестов от боевой БД
 
+import contextlib
+import io
 import socket
 import subprocess
 import sys
@@ -21,6 +23,7 @@ import threading
 import unittest
 import os
 from pathlib import Path
+from unittest.mock import patch
 
 import requests
 
@@ -252,6 +255,49 @@ class ThreadLifecycleTests(unittest.TestCase):
             release.set()
             thread.join(5)
         self.assertEqual(safe_mode.join_threads(timeout=2.0), [])
+
+
+def _isolated_safe_mode():
+    """Отдельный экземпляр модуля `safe_mode`.
+
+    Состояние у него своё: проверка ветки «защита выключена» не должна
+    трогать защиту рабочего процесса — ни подмен, ни изоляцию данных.
+    """
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location('safe_mode_probe', Path(safe_mode.__file__))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+class SafeModeFlagTests(unittest.TestCase):
+    """Значение `ANPR_SAFE_MODE`: выключение защиты — осознанное решение."""
+
+    def test_flag_values_are_parsed(self):
+        module = _isolated_safe_mode()
+        for value, expected in (('1', True), ('true', True), ('on', True),
+                                ('0', False), ('false', False), ('off', False)):
+            with patch.dict(os.environ, {'ANPR_SAFE_MODE': value}):
+                self.assertIs(module._flag_value(), expected, value)
+        # Незаданное значение — «не задано», а не «выключено».
+        with patch.dict(os.environ):
+            os.environ.pop('ANPR_SAFE_MODE', None)
+            self.assertIsNone(module._flag_value())
+
+    def test_zero_turns_the_protection_off_with_a_warning(self):
+        """`ANPR_SAFE_MODE=0` не включает защиту и предупреждает об этом."""
+        module = _isolated_safe_mode()
+        stderr = io.StringIO()
+        with patch.dict(os.environ, {'ANPR_SAFE_MODE': '0'}):
+            with contextlib.redirect_stderr(stderr):
+                self.assertFalse(module.activate())
+        self.assertIn('ANPR_SAFE_MODE=0', stderr.getvalue())
+        self.assertFalse(module.is_active())
+        # Изоляция не создавалась: рабочие данные не затронуты.
+        self.assertNotIn('anpr-safemode', str(module.isolation_dir()))
+        # Защита самого тестового процесса не тронута.
+        self.assertTrue(safe_mode.is_active())
 
 
 class WorkingDataTests(unittest.TestCase):

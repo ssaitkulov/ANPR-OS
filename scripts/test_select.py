@@ -54,12 +54,12 @@ GROUPS = {
     ),
     'services': (
         'tests/test_control_auth.py', 'tests/test_audit_log.py', 'tests/test_service_instance.py',
-        'tests/test_stage2_resilience.py',
+        'tests/test_stage2_resilience.py', 'tests/test_http_api.py',
     ),
     'ui': (
         'tests/test_shell.py', 'tests/test_panel_status.py', 'tests/test_stage2_ui.py',
         'tests/test_service_panel.py', 'tests/test_context_panel.py', 'tests/test_dashboard.py',
-        'tests/test_setup_anpr.py',
+        'tests/test_setup_anpr.py', 'tests/test_segmented_tabs.py',
     ),
     'scripts': ('tests/test_acceptance_tools.py', 'tests/test_verify_state.py'),
     'paths': ('tests/test_paths.py',),
@@ -107,7 +107,12 @@ def collect(paths: list[str]) -> list[str]:
             continue  # конфигурация CI — код приложения не меняется
         docs_only = False
         if name.startswith('tests/') and name.endswith('.py'):
-            modules.add(name)
+            if Path(name).name.startswith('test_'):
+                modules.add(name)
+            else:
+                # Общая оснастка набора (не тестовый модуль): меняет
+                # поведение сразу всех тестов.
+                return ['FULL']
             continue
         if name.startswith('app/core/anpr_telegram.py'):
             modules.update(GROUPS['core'])
