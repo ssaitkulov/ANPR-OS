@@ -418,6 +418,16 @@ class PanelClosingTests(ShellTestCase):
         self.pump(0.3)
         self.assertFalse(self.panel.is_open)
 
+    def test_minimizing_to_tray_closes_the_panel(self):
+        """Сворачивание в трей закрывает панель."""
+        self.shell.update_status(HEALTH)
+        self.click(self.header.service_chip.frame)
+        self.pump(0.2)
+        self.assertTrue(self.panel.is_open)
+        self.shell.hide()
+        self.pump(0.4)
+        self.assertFalse(self.panel.is_open)
+
     def test_panel_does_not_move_the_dashboard(self):
         self.shell.update_status(HEALTH)
         self.pump(0.2)
