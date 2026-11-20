@@ -616,12 +616,9 @@ class SystemHeader:
             return
         self._states[key] = state
         chip.set_state(state, self.compact)
-        try:
-            self.control.update_idletasks()
-        except tk.TclError:
-            pass
-        if not self.compact:
-            self._full_width = self.control.winfo_reqwidth()
+        # Ширину и принудительную обработку idle-событий делает _fit_width_now
+        # по <Configure>: здесь они только добавляли паузу на каждом опросе
+        # и затирали накопленный максимум ширины.
 
     def refresh_panel(self):
         """Обновить содержимое панели диагностики (один раз за цикл опроса)."""

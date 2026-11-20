@@ -367,5 +367,33 @@ class VideoLifecycleTests(unittest.TestCase):
         self.assertTrue(section.paused.is_set())
 
 
+class HealthPollingTests(unittest.TestCase):
+    """Одновременно работает только один опрос состояния сервиса."""
+
+    def _shell(self):
+        shell = AppShell.__new__(AppShell)
+        shell.closing = False
+        shell._health_inflight = threading.Event()
+        shell.queue = queue.Queue()
+        return shell
+
+    def test_second_check_is_skipped_while_the_first_is_running(self):
+        shell = self._shell()
+        started = []
+        with patch.object(shell, '_health_worker', lambda: started.append(1)):
+            self.assertTrue(shell._start_health_check())
+            self.assertFalse(shell._start_health_check())
+        self.assertEqual(len(started), 1)
+        self.assertTrue(shell._health_inflight.is_set())
+
+    def test_flag_is_cleared_after_the_worker_finishes(self):
+        shell = self._shell()
+        with patch('app.ui.shell.service.health', return_value={'service': 'anpr-fayz'}):
+            shell._health_worker()
+        self.assertFalse(shell._health_inflight.is_set())
+        self.assertEqual(shell.queue.get_nowait()[0], 'health')
+        self.assertTrue(shell._start_health_check())
+
+
 if __name__ == '__main__':
     unittest.main()

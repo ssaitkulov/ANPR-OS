@@ -150,6 +150,15 @@ class StatusModelTests(unittest.TestCase):
 class ServiceControlTests(ShellTestCase):
     """Управление сервисом в шапке: путь переключателя и подтверждения."""
 
+    def test_set_state_does_not_force_a_tk_idle_flush(self):
+        header = self.shell.header
+        chip = header.chips['service']
+        with patch.object(chip, 'set_state') as set_state, \
+             patch.object(header.control, 'update_idletasks',
+                          side_effect=AssertionError('idle-события обрабатывает _fit_width')):
+            header.set_state('service', {'label': 'Работает', 'color': '#06C35D'})
+        set_state.assert_called_once()
+
     def test_service_control_exists_only_in_the_header(self):
         header = self.shell.header
         self.assertTrue(header.action_button.winfo_exists())

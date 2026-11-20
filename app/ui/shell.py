@@ -90,6 +90,7 @@ class AppShell:
         self._normal_geometry = None
         self._after_ids = set()
         self._health = None
+        self._health_inflight = threading.Event()
         self._health_error = ''
         self._last_check = None
         self._last_error = ''
@@ -184,18 +185,24 @@ class AppShell:
     # ------------------------------------------------------------------
     # Состояние системы
     # ------------------------------------------------------------------
+    def _start_health_check(self):
+        """Запустить опрос, только если предыдущий ещё не закончился."""
+        if self.closing or self._health_inflight.is_set():
+            return False
+        self._health_inflight.set()
+        threading.Thread(target=self._health_worker, daemon=True).start()
+        return True
+
     def refresh(self):
         """Периодическая проверка состояния сервиса (в фоновом потоке)."""
         if self.closing:
             return
-        threading.Thread(target=self._health_worker, daemon=True).start()
+        self._start_health_check()
         self.schedule(HEALTH_INTERVAL, self.refresh)
 
     def refresh_now(self):
         """Проверить состояние немедленно, не дожидаясь очередного цикла."""
-        if self.closing:
-            return
-        threading.Thread(target=self._health_worker, daemon=True).start()
+        self._start_health_check()
 
     def _health_worker(self):
         try:
@@ -207,6 +214,8 @@ class AppShell:
             self.queue.put(('health_error', detail))
         else:
             self.queue.put(('health', data))
+        finally:
+            self._health_inflight.clear()
 
     def update_status(self, data=None, error=''):
         """Обновить индикаторы состояния по данным `/health`."""
