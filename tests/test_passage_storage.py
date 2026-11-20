@@ -50,6 +50,23 @@ class PassageStorageTests(StoreTestCase):
         self.assertEqual(rows[0]['source_key'], '1048576:1:RR:1')
         self.assertEqual(rows[0]['group_id'], '1048576')
 
+    def test_same_group_id_with_different_plate_creates_two_rows(self):
+        """Прошивка переиспользует GroupID для разных машин — строки должны разойтись."""
+        event = {'EventBaseInfo.Code': 'TrafficJunction', 'GroupID': '1048576',
+                 'IndexInGroup': '1', 'TrafficCar.PlateNumber': 'RR', 'Lane': '1'}
+        state = {'days': {}, 'seen': []}
+        start = datetime(2026, 11, 16, 20, 9, tzinfo=timezone.utc)
+        with patch.object(bot, 'save_state'), patch.object(bot, 'ALLOWED_LANES', ''):
+            with patch.object(bot, 'now_local', return_value=start):
+                bot.record_event(state, event, None)
+            other = dict(event, **{'TrafficCar.PlateNumber': 'XYZ789'})
+            with patch.object(bot, 'now_local', return_value=start + timedelta(minutes=2)):
+                bot.record_event(state, other, None)
+        rows = self.store.day_passages('2026-11-16')
+        self.assertEqual(len(rows), 2)
+        self.assertEqual({row['group_id'] for row in rows}, {'1048576'})
+        self.assertEqual({row['plate'] for row in rows}, {'RR', 'XYZ789'})
+
     def test_backfill_event_is_stored_with_archive_flag(self):
         state = {'days': {}, 'seen': []}
         when = datetime(2026, 11, 16, 20, 9, tzinfo=timezone.utc)
@@ -127,10 +144,9 @@ class PassageStorageTests(StoreTestCase):
 
 
 class LegacyMigrationTests(unittest.TestCase):
-    def test_legacy_unique_firmware_key_is_rebuilt(self):
-        folder = tempfile.TemporaryDirectory()
-        self.addCleanup(folder.cleanup)
-        path = Path(folder.name) / 'legacy.sqlite3'
+    @staticmethod
+    def _legacy_events_db(path):
+        """Старая таблица events: прошивный ключ в UNIQUE, без source_key."""
         conn = sqlite3.connect(path)
         conn.executescript('''
             CREATE TABLE events (
@@ -149,6 +165,13 @@ class LegacyMigrationTests(unittest.TestCase):
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
             );
         ''')
+        return conn
+
+    def test_legacy_unique_firmware_key_is_rebuilt(self):
+        folder = tempfile.TemporaryDirectory()
+        self.addCleanup(folder.cleanup)
+        path = Path(folder.name) / 'legacy.sqlite3'
+        conn = self._legacy_events_db(path)
         rows = [
             ('7:1:RR:1', '2026-11-16', '2026-11-16T20:09:00+05:00', 'RR', '1'),
             ('8:1:RR:1', '2026-11-16', '2026-11-16T20:12:00+05:00', 'RR', '1'),
@@ -168,6 +191,67 @@ class LegacyMigrationTests(unittest.TestCase):
         reopened = Store(path)
         self.addCleanup(reopened.close)
         self.assertEqual(len(reopened.day_passages('2026-11-16')), 2)
+
+    def test_identical_passages_are_kept_as_two_rows(self):
+        """Два проезда с одинаковым содержимым не склеиваются при пересборке."""
+        folder = tempfile.TemporaryDirectory()
+        self.addCleanup(folder.cleanup)
+        path = Path(folder.name) / 'legacy-dup.sqlite3'
+        conn = self._legacy_events_db(path)
+        rows = [
+            ('7:1:RR:1', '2026-11-16', '2026-11-16T20:09:00+05:00', 'RR', '1'),
+            ('8:1:RR:1', '2026-11-16', '2026-11-16T20:09:00+05:00', 'RR', '1'),
+        ]
+        conn.executemany('''INSERT INTO events (event_key, day, captured_at, plate, lane)
+                             VALUES (?,?,?,?,?)''', rows)
+        conn.commit()
+        conn.close()
+
+        store = Store(path)
+        self.addCleanup(store.close)
+        passages = store.day_passages('2026-11-16')
+        self.assertEqual(len(passages), 2)
+        self.assertEqual({row['plate'] for row in passages}, {'RR'})
+        keys = {row['event_key'] for row in passages}
+        self.assertEqual(len(keys), 2)
+        base = event_key('2026-11-16', '2026-11-16T20:09:00+05:00', 'RR', '1', '')
+        # Один ключ — содержимое, второй — тот же ключ с добавкой к id.
+        self.assertIn(base, keys)
+        self.assertTrue(any(key.startswith(base + '#') for key in keys))
+
+
+class LegacyOutboxMigrationTests(unittest.TestCase):
+    """Старая очередь без next_attempt_at: сообщения должны копиться и дальше."""
+
+    def test_next_attempt_column_is_added_and_queue_works(self):
+        folder = tempfile.TemporaryDirectory()
+        self.addCleanup(folder.cleanup)
+        path = Path(folder.name) / 'legacy-outbox.sqlite3'
+        conn = sqlite3.connect(path)
+        conn.executescript('''
+            CREATE TABLE outbox (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                event_id INTEGER,
+                chat_id TEXT NOT NULL,
+                body TEXT NOT NULL,
+                kind TEXT NOT NULL DEFAULT 'text',
+                status TEXT NOT NULL DEFAULT 'pending',
+                attempts INTEGER NOT NULL DEFAULT 0,
+                last_error TEXT,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                sent_at TEXT
+            );
+        ''')
+        conn.commit()
+        conn.close()
+
+        store = Store(path)
+        self.addCleanup(store.close)
+        columns = {row[1] for row in store.conn.execute('PRAGMA table_info(outbox)')}
+        self.assertIn('next_attempt_at', columns)
+        store.enqueue_text(1, '42', 'текст')
+        pending = store.pending()
+        self.assertEqual([row[2] for row in pending], ['42'])
 
 
 class KeyMigrationTests(unittest.TestCase):
@@ -229,6 +313,55 @@ class KeyMigrationTests(unittest.TestCase):
         self.addCleanup(reopened.close)
         after = [(row['id'], row['event_key']) for row in reopened.day_passages('2026-11-16')]
         self.assertEqual(before, after)
+
+
+class DuplicateContentMigrationTests(unittest.TestCase):
+    """Одинаковое содержимое в двух строках: первая забирает ключ, вторая сохраняет свой."""
+
+    def setUp(self):
+        folder = tempfile.TemporaryDirectory()
+        self.addCleanup(folder.cleanup)
+        self.path = Path(folder.name) / 'duplicate.sqlite3'
+        conn = sqlite3.connect(self.path)
+        conn.executescript('''
+            CREATE TABLE events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                event_key TEXT UNIQUE,
+                source_key TEXT,
+                day TEXT NOT NULL,
+                captured_at TEXT NOT NULL,
+                plate TEXT NOT NULL,
+                direction TEXT,
+                lane TEXT,
+                speed TEXT,
+                vehicle_color TEXT,
+                plate_type TEXT,
+                confidence TEXT,
+                backfill INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+        ''')
+        conn.executemany('''INSERT INTO events
+            (event_key, source_key, day, captured_at, plate, lane, direction)
+            VALUES (?,?,?,?,?,?,?)''', [
+            ('live:1|RR|1', '1048576:1:RR:1', '2026-11-16',
+             '2026-11-16T20:09:00.000001+05:00', 'RR', '1', 'Approach'),
+            ('live:2|RR|1', '1048577:1:RR:1', '2026-11-16',
+             '2026-11-16T20:09:00.000001+05:00', 'RR', '1', 'Approach'),
+        ])
+        conn.commit()
+        conn.close()
+
+    def test_first_row_takes_the_content_key_and_second_keeps_its_own(self):
+        store = Store(self.path)
+        self.addCleanup(store.close)
+        rows = store.day_passages('2026-11-16')
+        self.assertEqual(len(rows), 2)
+        keys = {row['event_key'] for row in rows}
+        self.assertIn('live:2|RR|1', keys)
+        fresh = event_key('2026-11-16', '2026-11-16T20:09:00.000001+05:00', 'RR', '1', 'Approach')
+        self.assertIn(fresh, keys)
+        self.assertTrue(is_event_key(fresh))
 
 
 class RepeatedGroupIdTests(StoreTestCase):

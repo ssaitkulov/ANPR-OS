@@ -3,68 +3,72 @@
 Как устроен тестовый набор, что запускать при каком изменении и где проходит
 граница между «быстрая проверка» и «полный прогон». Карта кода — в
 [`CODEMAP.md`](CODEMAP.md), правила работы агентов — в
-[`AGENTS.md`](../AGENTS.md).
+[`AGENTS.md`](../AGENTS.md), разовый аудит набора — в
+[`TEST_AUDIT.md`](TEST_AUDIT.md).
 
 ## 1. Факты о наборе
 
 | Показатель | Значение |
 |---|---|
-| Тестовых файлов | 32 (`tests/test_*.py`) + `tests/anpr_testenv.py` (база для изоляции) |
-| Тестов собрано | **372** (`test_*.py`, без параметризации) |
-| Уникальных имён тестов | 360 — 12 тестов имеют одинаковое имя в двух файлах |
-| Полный прогон | ~3 минуты (`python -m unittest discover` — 188 с на Windows) |
-| Быстрый smoke | `python -m unittest tests.test_stream_latency tests.test_setup_anpr` — 0,3 с |
+| Тестовых файлов | 33 (`tests/test_*.py`) + `tests/anpr_testenv.py` (изоляция) + `tests/ui_harness.py` (общая оснастка UI) |
+| Тестов собрано | **368** (одинаково у pytest и `unittest discover`) |
+| Уникальных имён тестов | 365 — 3 теста имеют одинаковое имя в двух файлах (см. §4) |
+| Полный прогон | ~2 мин 15 с: `python -m unittest discover` — 131 с, `python -m pytest -q` — 144 с |
+| Быстрый smoke | `python -m pytest -q tests/test_stream_latency.py tests/test_setup_anpr.py` — 0,3 с |
+| Быстрая выборка для CI | `python -m unittest tests.test_safe_mode tests.test_control_auth tests.test_paths` — 57 тестов, 0,9 с |
 | Изоляция | `app/core/safe_mode.py`: рабочие данные уходят во временный каталог, сеть, процессы и запуск сервиса запрещены |
 
-Полный набор отрабатывает за ~3 минуты, поэтому «прогнать всё» — не самовольная
-роскошь, а последний шаг перед релизом, а не привычка.
+Полный набор отрабатывает за ~2 минуты — это последний шаг перед релизом,
+а не привычка перед каждым коммитом. Локальный коммит гоняет только тесты
+затронутой области (§3, §4).
 
 ## 2. Классификация тестов
 
 | Класс | Что проверяет | Граница | Файлов | Тестов |
 |---|---|---|---|---|
-| **UNIT** | одну функцию или модуль в отрыве от системы | нет сети, нет живого сервиса, нет боевой базы; только временные каталоги | 14 | 53 |
-| **INTEGRATION** | несколько модулей вместе: ядро + SQLite + очередь, HTTP-сервис + токен, интерфейс без окна | сеть замкана, потоки и процессы — заглушки | 16 | 300 |
+| **UNIT** | одну функцию или модуль в отрыве от системы | нет сети, нет живого сервиса, нет боевой базы; только временные каталоги | 14 | 58 |
+| **INTEGRATION** | несколько модулей вместе: ядро + SQLite + очередь, HTTP-сервис + токен, интерфейс без окна | сеть замкана, потоки и процессы — заглушки | 17 | 291 |
 | **ACCEPTANCE** | соответствие боевому регламенту: сверка источников, инструменты приёмки | идёт по рабочим данным, код возврата важен | 2 | 19 |
 
-### 2.1 UNIT (14 файлов, 53 теста)
+### 2.1 UNIT (14 файлов, 58 тестов)
 
 | Файл | Тестов | Предмет |
 |---|---|---|
 | `test_paths.py` | 14 | `app/core/paths.py`: пути от корня проекта, переносимость |
+| `test_camera_events.py` | 9 | разбор событий камеры: текст snapManager, группировка, отбор проездов (`is_countable`, направление, полоса) |
+| `test_storage_and_outbox.py` | 5 | `app/storage/database.py`: SQLite и очередь во временной базе |
+| `test_app_preferences.py` | 4 | `app/core/preferences.py`: настройки панели, реестр Windows |
+| `test_event_images.py` | 4 | `app/storage/event_images.py`: вырезка номера |
 | `test_directions.py` | 3 | направление движения, фильтр `DIRECTION` |
 | `test_archive_time.py` | 3 | время записи архива камеры |
-| `test_event_images.py` | 4 | `app/storage/event_images.py`: вырезка номера |
+| `test_manual_snapshots.py` | 3 | фильтр ручных снимков камеры (`INCLUDE_MANUAL_SNAPSHOTS`) |
+| `test_setup_anpr.py` | 3 | `app/ui/settings.py`: чтение, валидация, сохранение |
 | `test_passage_photos.py` | 2 | `app/storage/passage_photos.py`: кэш снимков |
 | `test_system_events.py` | 3 | `app/core/system_events.py`: журнал в памяти |
-| `test_ai_and_photo_archive.py` | 1 | `app/storage/photo_archive.py` + ключи проезда |
-| `test_app_preferences.py` | 4 | `app/core/preferences.py`: настройки панели, реестр Windows |
-| `test_panel_status.py` | 5 | `app/ui/status.py`: словарь состояний |
-| `test_manual_snapshots.py` | 2 | фильтр ручных снимков камеры |
 | `test_stream_latency.py` | 3 | задержка обработки потока камеры |
+| `test_ai_and_photo_archive.py` | 1 | `app/storage/photo_archive.py` + путь фото в базе |
 | `test_passages.py` | 1 | проезды: ключ и нормализация номера |
-| `test_setup_anpr.py` | 3 | `app/ui/settings.py`: чтение, валидация, сохранение |
-| `test_storage_and_outbox.py` | 5 | `app/storage/database.py`: SQLite и очередь во временной базе |
 
-### 2.2 INTEGRATION (16 файлов, 300 тестов)
+### 2.2 INTEGRATION (17 файлов, 291 тест)
 
 | Файл | Тестов | Предмет |
 |---|---|---|
-| `test_service_panel.py` | 37 | панель управления сервисом: состояния, действия, подтверждения |
-| `test_stage3_quality.py` | 30 | регрессии ядра: дедупликация, backfill, отчёт, очередь |
-| `test_context_panel.py` | 30 | контекстная панель по выбранному индикатору |
-| `test_safe_mode.py` | 27 | изоляция: запрет сети и процессов, увод путей, учёт потоков |
+| `test_service_panel.py` | 35 | панель управления сервисом: состояния, действия, подтверждения |
+| `test_safe_mode.py` | 28 | изоляция: запрет сети и процессов, увод путей, учёт потоков, детектор тестового прогона |
 | `test_stage2_ui.py` | 28 | шапка, навигация, жизненный цикл Tk |
 | `test_stage2_resilience.py` | 26 | устойчивость ядра: ротация журналов, потоки, обрывы |
+| `test_stage3_quality.py` | 25 | регрессии ядра: дедупликация, backfill, отчёт, очередь |
+| `test_context_panel.py` | 23 | контекстная панель по выбранному индикатору |
 | `test_audit_log.py` | 20 | `app/services/audit.py`: журналы управления, маскирование секретов |
+| `test_passage_storage.py` | 19 | `app/storage/database.py`: проезды, миграции схемы, фото |
 | `test_shell.py` | 18 | `app/ui/shell.py`: оболочка окна, разделы, состояние |
-| `test_passage_storage.py` | 15 | `app/storage/database.py`: проезды, миграция ключей, фото |
 | `test_control_auth.py` | 15 | `app/services/auth.py` + `POST /shutdown`: токен, `401`, защита процесса |
 | `test_service_instance.py` | 13 | один экземпляр сервиса, устойчивость запуска |
 | `test_stage4_polish.py` | 12 | боевой режим: отчёт, фотоархив, получатели |
 | `test_outbox_reliability.py` | 10 | backoff, `dead`, доставка по чатам, фоновый поток |
-| `test_delivery_queue.py` | 10 | очередь недоставленных: частичная доставка, развоз при обрыве |
 | `test_dashboard.py` | 6 | `app/ui/dashboard.py`: загрузка данных, лента, график |
+| `test_delivery_queue.py` | 5 | очередь недоставленных на подменах: архивная рассылка, частичная доставка |
+| `test_panel_status.py` | 5 | `app/ui/status.py` через `Panel.update_status` |
 | `test_live_duplicates.py` | 3 | дедупликация живых событий |
 
 ### 2.3 ACCEPTANCE (2 файла, 19 тестов)
@@ -83,31 +87,67 @@
 | Изменение | Минимальный достаточный прогон |
 |---|---|
 | Только `*.md`, `.gitignore` | `python scripts/check_docs.py` — ссылки и структура. Полный прогон **не нужен** |
-| Один модуль `app/core/*` | `python -m pytest tests/test_<файл>.py -q` по таблице 2.1–2.3 + `tests/test_safe_mode.py` |
-| `app/storage/database.py` | `tests/test_passage_storage.py tests/test_storage_and_outbox.py tests/test_outbox_reliability.py tests/test_delivery_queue.py` |
-| `app/services/*` (токен, аудит, управление) | `tests/test_control_auth.py tests/test_audit_log.py tests/test_service_instance.py tests/test_safe_mode.py` |
-| `app/ui/*` | `tests/test_shell.py tests/test_panel_status.py tests/test_stage2_ui.py tests/test_service_panel.py tests/test_context_panel.py` |
-| Ядро целиком (`app/core/anpr_telegram.py`) | `tests/test_stage3_quality.py tests/test_stage4_polish.py tests/test_stage2_resilience.py` |
-| Изоляция тестов, `conftest.py`, `tests/__init__.py` | `tests/test_safe_mode.py` + любой затронутый файл |
+| Один модуль `app/core/*` | `python -m pytest tests/test_stage3_quality.py tests/test_stage2_resilience.py` (для `anpr_telegram.py` — плюс `test_camera_events.py`) |
+| `app/core/safe_mode.py`, `tests/__init__.py`, `tests/conftest.py`, `tests/anpr_testenv.py` | **полный набор** — изоляция влияет на всё |
+| `app/core/paths.py` | `tests/test_paths.py tests/test_passage_storage.py` |
+| `app/storage/*` | `tests/test_passage_storage.py tests/test_storage_and_outbox.py tests/test_outbox_reliability.py tests/test_delivery_queue.py` |
+| `app/services/*` (токен, аудит, управление) | `tests/test_control_auth.py tests/test_audit_log.py tests/test_service_instance.py` |
+| `app/ui/*` | `tests/test_shell.py tests/test_panel_status.py tests/test_stage2_ui.py tests/test_service_panel.py tests/test_context_panel.py tests/test_dashboard.py` |
 | Зависимости, `pyproject.toml` | `python scripts/check_lock.py` + полный прогон |
 | Перед релизом | **полный прогон** + `check_lock.py` + `verify_state.py` + `acceptance_check.py` + чек-лист [`ACCEPTANCE.md`](ACCEPTANCE.md) |
 
-Полный прогон: `python -m unittest discover -v` (или `python -m pytest -q`).
-Локальный запрет коммита при падении тестов — хук `.githooks/pre-commit`.
+Полный прогон: `python -m unittest discover` (или `python -m pytest -q`).
+
+Локальный хук `.githooks/pre-commit` делает это сам: он спрашивает
+`scripts/test_select.py`, какие файлы в индексе, и запускает тесты затронутой
+области (для правки только документации — проверку ссылок и smoke-тест).
+Полный набор перед релизом — обязателен.
 
 ## 4. Дублирование проверок
 
-Факты на 372 теста (сверено с исходниками, не на глаз):
+### 4.1 Что сделано
 
-| Вид дублирования | Факт | Что делать |
+| Было | Стало | Итог |
 |---|---|---|
-| **Один и тот же раннер дважды** | CI (`.github/workflows/ci.yml`) гоняет `python -m unittest discover -v` **и** `python -m pytest -q` — это один и тот же набор 372 тестов дважды (~6 минут CI вместо ~3) | оставить в CI один раннер: `pytest` (у него есть teardown изоляции — `join_threads`/`finalize` в `tests/conftest.py`); `unittest discover` остаётся в хуке, где pytest может быть не установлен |
-| **Третий полный прогон локально** | хук `.githooks/pre-commit` запускает `python -m unittest discover` перед каждым коммитом (~3 мин) | сознательный размен: надёжность коммита против трёх минут ожидания. Если мешает — оставить только быструю проверку затронутого, но не ослаблять приёмку перед релизом |
-| **Одинаковые имена тестов** | 12 тестов имеют одинаковое имя в двух файлах (собрано 372, уникальных имён 360). Все 12 — в UI-панели: `test_context_panel.py` ↔ `test_service_panel.py` (10) и `test_service_panel.py` ↔ `test_stage2_ui.py` (2) | привести к одному исполнению: оставить в более узком файле, второй удалить или переименовать. Разбор — в аудите |
-| **Один предмет в нескольких файлах** | ядро `anpr_telegram` импортируют 17 файлов, `app/storage/database.py` — 9, UI-панель — 4 | это не дубли, а разные уровни проверки. Сводить не нужно: карта тестов (`CODEMAP.md` §7) и раздел 3 показывают, что запускать |
-| **Комбинаторика «ядро + очередь + доставка»** | в 5 файлах (`delivery_queue`, `outbox_reliability`, `storage_and_outbox`, `stage3_quality`, `stage4_polish`) | кандидат на объединение в один файл с явными классами (UNIT/INTEGRATION) — на усмотрение аудита |
+| CI гонял и `unittest discover`, и `pytest` над одним набором: 8 полных прогонов в матрице 3.11–3.14 ≈ 24 мин | в CI один полный прогон (`pytest`) + быстрая проверка совместимости на `unittest` (57 тестов, 0,9 с) | 4 полных прогона ≈ 12 мин |
+| Хук гонял полный набор перед каждым коммитом (~3 мин) | хук запускает тесты затронутой области по файлам индекса | коммит с правкой UI — секунды вместо минут |
+| 12 тестов имели одинаковое имя в двух файлах | 3 (остались в `test_service_panel.py` и `test_stage2_ui.py` — см. §4.2) | −9 |
+| Дубли по поведению: доставка очереди, «попытки исчерпаны → dead», `SAVE_PHOTOS`, конкуренция добора, «чужой процесс», изоляция БД, `GroupID` | оставлено по одной проверке в более строгом месте (настоящая база вместо подмены) | −10 тестов |
+| `tests/test_manual_snapshots.py` проверял выражение, переписанное в самом тесте | проверяет production-код `_apply_archive_records` | +1 полезный тест |
+| `tests/test_safe_mode.py` проверял текст исходника `safe_mode.py` | проверяет поведение детектора тестового прогона | +1 полезный тест |
+| `test_concurrent_backfill_does_not_duplicate_rows` зависел от того, как потоки разошлись по времени (голая `backfill_once` без сериализации) | тест идёт через `run_backfill` — с тем же мьютексом, что и в бою; гонки больше нет | тест перестал флакать |
 
-## 5. Правила, которые нельзя ослаблять
+Факт: было 373 теста и 177 с полного прогона — стало 368 тестов и 131 с.
+Тестов меньше, а покрытых рисков больше (§5).
+
+### 4.2 Что осталось
+
+| Что | Где | Почему не трогаем сейчас |
+|---|---|---|
+| 3 теста с одинаковым именем: `test_stop_requires_confirmation`, `test_restart_requires_confirmation`, `test_start_does_not_ask_confirmation` | `test_service_panel.py` ↔ `test_stage2_ui.py` | файлы правит второй агент (рефакторинг шапки); сводим после его мержа |
+| ~200 строк копипастой оснастки UI | уже вынесены в `tests/ui_harness.py` | сделано |
+| «Ядро + очередь + доставка» в 5 файлах | `test_outbox_reliability.py`, `test_delivery_queue.py`, `test_storage_and_outbox.py`, `test_stage3_quality.py`, `test_stage4_polish.py` | это разные уровни (подмены против настоящей базы) — сводить без потери проверок нельзя |
+
+## 5. Пробелы покрытия
+
+Аудит ([`TEST_AUDIT.md`](TEST_AUDIT.md)) нашёл 14 пробелов, 7 — в критичной
+логике. Закрыты:
+
+| Пробел | Чем закрыт |
+|---|---|
+| Миграция очереди `_upgrade_outbox` (колонка `next_attempt_at`) | `test_passage_storage.py::LegacyOutboxMigrationTests` |
+| Пересборка старой `events` с одинаковым содержимым | `test_passage_storage.py::LegacyMigrationTests` |
+| Миграция ключа при совпадении содержимого | `test_passage_storage.py::DuplicateContentMigrationTests` |
+| Разбор событий камеры: `is_countable`, полоса, направление, `parse_kv_text`/`extract_events`, boundary | `test_camera_events.py` |
+| Ручные снимки при `INCLUDE_MANUAL_SNAPSHOTS=0` | `test_manual_snapshots.py` (через `_apply_archive_records`) |
+| Детектор тестового прогона вместо проверки текста исходника | `test_safe_mode.py` |
+
+Не закрыты (план — в аудите): HTTP-эндпоинты кроме `/health` и `/shutdown`
+(`app/services/http_api.py` — 51 % покрытия), `panel_lock.py` (0 %),
+`paths.legacy_data()`, ветка `ANPR_SAFE_MODE=0`, `process_info.port_owner_pid`,
+чтение журнала аудита при битых строках, график и лента «Мониторинга».
+
+## 6. Правила, которые нельзя ослаблять
 
 - Изоляция включена **до** импорта модулей приложения (`tests/__init__.py`, корневой
   `conftest.py`). Правка этого порядка ломает безопасность рабочей системы.
@@ -115,38 +155,14 @@
   прошло» — не довод.
 - Регрессионное покрытие критичной логики (`event_key`, очередь доставки, токен
   остановки, маскирование секретов, изоляция) не сокращается ради скорости.
+- Тест проверяет поведение production-кода, а не текст исходника и не
+  переписанное в тесте выражение.
 - Новый тест — не «ещё один файл на всякий случай», а проверка конкретного
   поведения; дубли имён и предметов — повод пересмотреть набор, а не повод
   добавить ещё один.
 
-## 6. Аудит набора тестов
+## 7. Аудит набора тестов
 
-Аудит выполняется отдельной задачей в новом чате, чтобы не смешивать его с
-изменением кода. Промпт-шаблон:
-
-```
-Проведи аудит тестов ANPR OS Fayz (проект в D:\PROJECT\ANPR OS Fayz).
-
-Контекст:
-- AGENTS.md — правила работы агентов (прочитай первым).
-- docs/CODEMAP.md — карта модулей и тестов.
-- docs/TESTING.md — классификация UNIT/INTEGRATION/ACCEPTANCE и факты:
-  32 файла, 372 теста (360 уникальных имён), 12 дублирующихся имён.
-
-Задача (только анализ, код и тесты не менять):
-1. Построй таблицу: файл → класс (UNIT/INTEGRATION/ACCEPTANCE) → предмет →
-   какая критичная логика закрыта этим файлом.
-2. Найди реальные дубли: одинаковые проверки в разных файлах (не по именам,
-   а по проверяемому поведению), дублирующие прогоны в CI и хуке.
-3. Найди пробелы: критичная логика без покрытия (event_key, outbox/backoff,
-   токен остановки, маскирование секретов, изоляция safe_mode, миграции
-   схемы, пути).
-4. Предложи точечный план: что объединить, что переименовать, что удалить,
-   что добавить. Без новых тестов «на всякий случай» — только пробелы.
-
-Отчёт: таблица дубликатов, таблица пробелов, приоритетный список действий
-(до 10 пунктов) с оценкой «эффект / трудоёмкость». Код не трогать.
-```
-
-Итог аудита — это правка `docs/TESTING.md` (разделы 2 и 4) и, при необходимости,
-`docs/CODEMAP.md` §7; сам состав тестов меняется отдельной задачей.
+Разовый аудит проведён и лежит в [`TEST_AUDIT.md`](TEST_AUDIT.md): таблицы
+дубликатов и пробелов, измеренное покрытие, приоритетный план. Промпт для
+повторного аудита (если набор снова изменится) — там же, раздел «Промпт».

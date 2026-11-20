@@ -187,11 +187,15 @@ app/ui/shell.py (AppShell) ─► header.py ─► service_panel.py / status.py 
 
 Изоляция включается до импорта модулей приложения (`tests/__init__.py`,
 корневой `conftest.py`): рабочие данные, сеть и процессы уводятся в
-безопасный режим. База для новых тестов — `tests/anpr_testenv.IsolatedTestCase`.
+безопасный режим. База для новых тестов — `tests/anpr_testenv.IsolatedTestCase`;
+общая оснастка UI (заглушки, базовый класс) — `tests/ui_harness.py`.
+Классификация набора и что запускать при каком изменении — в
+[`TESTING.md`](TESTING.md).
 
 | Файл теста | Что покрывает |
 |---|---|
-| `test_safe_mode.py` | изоляция: запрет сети/процессов, увод путей, учёт потоков |
+| `test_safe_mode.py` | изоляция: запрет сети/процессов, увод путей, учёт потоков, детектор тестового прогона |
+| `test_camera_events.py` | разбор событий камеры: текст snapManager, группировка по индексу, отбор проездов (`is_countable`, полоса, направление) |
 | `test_paths.py` | единая система путей, переносимость проекта |
 | `test_passage_storage.py`, `test_passages.py`, `test_storage_and_outbox.py` | `storage/database.py`: проезды, ключи, outbox |
 | `test_outbox_reliability.py`, `test_delivery_queue.py` | backoff, `dead`, доставка по чатам, фоновый поток |

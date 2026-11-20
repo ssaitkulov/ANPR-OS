@@ -42,9 +42,32 @@ class SafeModeStateTests(unittest.TestCase):
 
     def test_detection_covers_pytest_and_unittest(self):
         """Режим включается и при pytest, и при `python -m unittest`."""
-        source = Path(safe_mode.__file__).read_text(encoding='utf-8')
-        self.assertIn("'pytest' in sys.modules", source)
-        self.assertIn("'unittest' in argv", source)
+        self.assertTrue(safe_mode.detect_test_run())
+
+    def test_plain_start_is_not_detected_as_a_test_run(self):
+        """Обычный запуск приложения тестовым не считается.
+
+        Проверяется поведение детектора, а не текст в его исходнике:
+        переименование переменной не должно ронять проверку.
+        """
+        main = sys.modules.get('__main__')
+        saved_pytest = sys.modules.pop('pytest', None)
+        saved_argv = list(sys.argv)
+        saved_env = os.environ.pop('PYTEST_CURRENT_TEST', None)
+        saved_package = getattr(main, '__package__', None)
+        try:
+            sys.argv = ['anpr_telegram.py']
+            if main is not None:
+                main.__package__ = ''
+            self.assertFalse(safe_mode.detect_test_run())
+        finally:
+            if saved_pytest is not None:
+                sys.modules['pytest'] = saved_pytest
+            sys.argv = saved_argv
+            if saved_env is not None:
+                os.environ['PYTEST_CURRENT_TEST'] = saved_env
+            if main is not None and saved_package is not None:
+                main.__package__ = saved_package
 
     def test_database_state_and_photos_are_isolated(self):
         isolation = str(safe_mode.isolation_dir())

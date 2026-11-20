@@ -51,28 +51,6 @@ class FakeStore:
 
 
 class OutboxWorkerTests(unittest.TestCase):
-    def test_worker_delivers_queue_without_camera(self):
-        store = FakeStore()
-        store.enqueue_text(None, '42', 'ABC · 20:00', 'entry_without_photo')
-        sent = threading.Event()
-        stop = threading.Event()
-
-        def _send(chat_id, text):
-            sent.set()
-            return True
-
-        with patch.object(bot, 'STORE', store), patch.object(bot, 'TELEGRAM_BOT_TOKEN', '123:token'), \
-             patch.object(bot, 'telegram_send_to', side_effect=_send):
-            worker = threading.Thread(target=bot.outbox_worker, args=(stop,), daemon=True)
-            worker.start()
-            try:
-                self.assertTrue(sent.wait(5), 'очередь не доставлена без камеры')
-            finally:
-                stop.set()
-                worker.join(5)
-        self.assertEqual(store.sent, [1])
-        self.assertEqual(store.pending_grouped(), {})
-
     def test_worker_keeps_message_when_telegram_is_down(self):
         store = FakeStore()
         store.enqueue_text(None, '42', 'ABC · 20:00', 'entry_without_photo')
@@ -159,62 +137,6 @@ class PartialDeliveryTests(unittest.TestCase):
             ok = bot.telegram_send_photo(b'car', 'caption')
         self.assertTrue(ok)
         self.assertEqual([row[2] for row in store.rows], ['2'])
-
-    def test_failed_text_delivery_is_queued(self):
-        store = FakeStore()
-        with patch.object(bot, 'STORE', store), patch.object(bot, 'TELEGRAM_BOT_TOKEN', '123:token'), \
-             patch.object(bot, 'get_recipients', return_value=['1', '2']), \
-             patch.object(bot, 'telegram_send_to', side_effect=lambda cid, text: cid == '1'):
-            ok = bot.telegram_send('дневной отчёт', kind='report')
-        self.assertTrue(ok)
-        self.assertEqual([(row[2], row[4]) for row in store.rows], [('2', 'report')])
-
-
-class BackfillConcurrencyTests(unittest.TestCase):
-    def test_second_backfill_is_skipped_while_first_runs(self):
-        started = threading.Event()
-        release = threading.Event()
-
-        def _slow_backfill(sess, state, dry_run=False):
-            started.set()
-            release.wait(5)
-            return 0
-
-        with patch.object(bot, 'backfill_once', side_effect=_slow_backfill):
-            worker = threading.Thread(target=bot.run_backfill, args=({},), daemon=True)
-            worker.start()
-            try:
-                self.assertTrue(started.wait(5))
-                self.assertEqual(bot.run_backfill({}), 0)
-            finally:
-                release.set()
-                worker.join(5)
-
-
-class PhotoArchiveTests(unittest.TestCase):
-    def test_photo_is_not_written_when_saving_is_disabled(self):
-        store = FakeStore()
-        record = {'iso': '2026-11-17T12:00:00+05:00', 'plate': 'A', 'lane': '1', 'speed': '0', 'time': '12:00:00'}
-        with patch.object(bot, 'STORE', store), patch.object(bot, 'PHOTOS'), \
-             patch.object(bot, 'record_event', return_value=record), \
-             patch.object(bot, 'prepare_event_images', return_value=[b'jpeg']), \
-             patch.object(bot, 'send_entry_notification'), patch.object(bot, 'EVENTS'), \
-             patch.object(bot, 'save_photo', return_value='/tmp/a.jpg') as save:
-            with patch.object(bot, 'SAVE_PHOTOS', False):
-                bot.flush_pending_events({}, {0: {}}, [b'jpeg'])
-        save.assert_not_called()
-
-    def test_photo_is_written_when_saving_is_enabled(self):
-        store = FakeStore()
-        record = {'iso': '2026-11-17T12:00:00+05:00', 'plate': 'A', 'lane': '1', 'speed': '0', 'time': '12:00:00'}
-        with patch.object(bot, 'STORE', store), patch.object(bot, 'PHOTOS'), \
-             patch.object(bot, 'record_event', return_value=record), \
-             patch.object(bot, 'prepare_event_images', return_value=[b'jpeg']), \
-             patch.object(bot, 'send_entry_notification'), patch.object(bot, 'EVENTS'), \
-             patch.object(bot, 'save_photo', return_value='/tmp/a.jpg') as save:
-            with patch.object(bot, 'SAVE_PHOTOS', True):
-                bot.flush_pending_events({}, {0: {}}, [b'jpeg'])
-        save.assert_called_once()
 
 
 if __name__ == '__main__':

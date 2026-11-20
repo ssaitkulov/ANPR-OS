@@ -55,28 +55,6 @@ class GroupIdCollisionTests(anpr_testenv.IsolatedTestCase):
         with patch.object(bot, 'now_local', return_value=when):
             return bot.record_event(self.state, _event(plate=plate, lane=lane), None)
 
-    def test_same_group_id_creates_two_rows(self):
-        """Один и тот же GroupID у двух разных проездов — две строки в БД."""
-        first = self.bot.now_local().replace(hour=10, minute=0, second=0, microsecond=0)
-        second = first + timedelta(minutes=2)
-        self.assertIsNotNone(self._record(first))
-        self.assertIsNotNone(self._record(second, plate='XYZ789'))
-        day = first.strftime('%Y-%m-%d')
-        rows = self.rows(day)
-        self.assertEqual(len(rows), 2)
-        self.assertEqual({row['group_id'] for row in rows}, {'1048576'})
-        self.assertEqual({row['plate'] for row in rows}, {'ABC123', 'XYZ789'})
-
-    def test_same_group_id_plate_and_lane_creates_two_rows(self):
-        """Тот же GroupID, тот же номер и та же полоса — но другой проезд."""
-        first = self.bot.now_local().replace(hour=10, minute=0, second=0, microsecond=0)
-        second = first + timedelta(minutes=1)
-        self._record(first)
-        self._record(second)
-        rows = self.rows(first.strftime('%Y-%m-%d'))
-        self.assertEqual(len(rows), 2, 'прошивный GroupID склеил два разных проезда')
-        self.assertNotEqual(rows[0]['event_key'], rows[1]['event_key'])
-
     def test_repeated_passage_in_the_same_second_is_not_duplicated(self):
         """Один и тот же проезд дважды подряд — одна строка."""
         when = self.bot.now_local().replace(hour=10, minute=0, second=0, microsecond=0)
@@ -214,16 +192,6 @@ class OutboxDeliveryTests(anpr_testenv.IsolatedTestCase):
         rows = self.outbox_rows()
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0][1], '22')
-
-    def test_message_dies_after_the_last_attempt(self):
-        """Исчерпали попытки — запись становится dead и больше не отправляется."""
-        bot.STORE.enqueue_text(None, '42', 'ВЪЕЗД ABC123', 'text')
-        for _ in range(bot.OUTBOX_MAX_ATTEMPTS):
-            status = bot._mark_failed(1, 'Telegram недоступен')
-        self.assertEqual(status, 'dead')
-        self.assertEqual(len(bot.STORE.dead_messages()), 1)
-        self.assertEqual(bot.STORE.outbox_stats()['dead'], 1)
-
 
 class DeliveryCounterTests(anpr_testenv.IsolatedTestCase):
     """Счётчики доставки в `/health` показывают результат любой рассылки.
@@ -409,7 +377,9 @@ class ConcurrentBackfillTests(anpr_testenv.IsolatedTestCase):
         results = []
 
         def worker():
-            results.append(bot.backfill_once(object(), self.state))
+            # Через run_backfill: сеансы добора сериализуются замком, иначе
+            # результат зависел бы от того, как потоки успели разойтись.
+            results.append(bot.run_backfill(self.state))
 
         # Подмены делаются в главном потоке: патчить модуль из потоков нельзя —
         # подмены наезжают друг на друга и оставляют после себя моки.
@@ -423,7 +393,7 @@ class ConcurrentBackfillTests(anpr_testenv.IsolatedTestCase):
             for thread in threads:
                 thread.join(15)
         self.assertEqual(len(self.rows('2026-11-17')), 1, 'параллельный добор завёл дубли')
-        self.assertEqual(sum(results), 1)
+        self.assertEqual(sum(results), 1, 'добор прошёл больше одного раза')
 
 
 class ReportCatchUpTests(anpr_testenv.IsolatedTestCase):
@@ -468,36 +438,6 @@ class ReportCatchUpTests(anpr_testenv.IsolatedTestCase):
 
 class WorkingDatabaseIsolationTests(anpr_testenv.IsolatedTestCase):
     """Прогон тестов не должен трогать боевую базу и JSON-состояние."""
-
-    def test_module_paths_point_to_the_temporary_directory(self):
-        """Бот в тестах работает не с боевыми файлами, а с временными."""
-        self.assertTrue(anpr_testenv.is_isolated())
-        self.assertNotEqual(str(self.bot.DB_FILE), str(anpr_testenv.WORKING_FILES['db']))
-        self.assertNotEqual(str(self.bot.STATE_FILE), str(anpr_testenv.WORKING_FILES['state']))
-        self.assertNotEqual(str(self.bot.SUBSCRIBERS_FILE),
-                            str(anpr_testenv.WORKING_FILES['subscribers']))
-        self.assertNotEqual(str(self.bot.IMAGE_DIR),
-                            str(self.bot.BASE_DIR / 'images'))
-        # Настройки окружения (из них модуль берёт пути при импорте) —
-        # внутри временного каталога тестов.
-        for name in ('DB_FILE', 'STATE_FILE', 'SUBSCRIBERS_FILE', 'IMAGE_DIR'):
-            path = Path(os.environ[name])
-            self.assertTrue(str(path).startswith(str(anpr_testenv.ISOLATION_DIR)),
-                            f'{name}={path} не внутри временного каталога тестов')
-
-    def test_write_through_the_module_does_not_reach_the_working_database(self):
-        """Запись через обычный код сервиса не должна появиться в боевой БД."""
-        working_before = anpr_testenv.fingerprint(anpr_testenv.WORKING_FILES['db'])
-        try:
-            self.bot.store_passage({'iso': '2026-11-18T10:00:00+05:00', 'plate': 'ABC123',
-                                    'lane': '1', 'direction': 'Approach'})
-            self.assertEqual(anpr_testenv.working_db_rows('ABC123'), [],
-                             'тестовая запись попала в боевую базу')
-            if working_before is None:
-                self.assertIsNone(anpr_testenv.fingerprint(anpr_testenv.WORKING_FILES['db']),
-                                  'тест создал боевую базу anpr.sqlite3')
-        finally:
-            self.bot.STORE.close()  # временная база модуля — закрыть, чтобы не висела
 
     def test_state_is_written_to_the_temporary_file(self):
         """JSON-зеркало пишется во временный каталог, боевой файл не трогаем."""

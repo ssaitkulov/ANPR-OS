@@ -51,9 +51,18 @@ jobs:
           if (Test-Path anpr.sqlite3) { throw "Импорт создал anpr.sqlite3 в рабочей папке" }
           if (Test-Path anpr_state.json) { throw "Импорт создал anpr_state.json в рабочей папке" }
 
-      # Этап 3: основной прогон — unittest discover, он же падает при ошибке.
-      - name: Тесты (unittest discover)
-        run: python -m unittest discover -v
+      # Этап 3: основной прогон. Раннер один — pytest: у него есть teardown
+      # изоляции (join_threads/finalize в tests/conftest.py), которого нет у
+      # unittest discover. Второй полный прогон того же набора не давал
+      # ничего, но стоил ещё ~3 минуты на каждую версию Python.
+      - name: Тесты (pytest)
+        run: python -m pytest -q
+
+      # Совместимость со стандартной библиотекой: набор должен запускаться и
+      # без pytest (так работает хук и запасной путь на машине без pytest).
+      # Быстрая выборка вместо второго полного прогона.
+      - name: Тесты (совместимость с unittest)
+        run: python -m unittest tests.test_safe_mode tests.test_control_auth tests.test_paths
 
       # Этап 3: тесты не должны трогать рабочую базу, состояние и подписчиков.
       - name: Проверить, что тесты не тронули рабочие файлы
@@ -62,7 +71,3 @@ jobs:
           if (Test-Path anpr.sqlite3-wal) { throw "Тесты создали anpr.sqlite3-wal в рабочей папке" }
           if (Test-Path anpr_state.json) { throw "Тесты создали anpr_state.json в рабочей папке" }
           if (Test-Path subscribers.json) { throw "Тесты создали subscribers.json в рабочей папке" }
-
-      # Дополнительный прогон pytest — тот же набор тестов, но другим раннером.
-      - name: Тесты (pytest)
-        run: python -m pytest -q

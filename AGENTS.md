@@ -97,17 +97,20 @@
   критичной логики.** Не плоди тесты ради числа и не дублируй чужие.
 - **Быстрые команды:**
   ```bash
-  python -m pytest tests/test_<файл>.py -q        # точечно
+  python -m pytest tests/test_<файл>.py -q        # точечно (pytest ждёт пути, не имена модулей)
   python -m unittest tests.test_stream_latency tests.test_setup_anpr   # быстрый smoke
-  python -m unittest discover                     # полный набор (как CI и pre-commit)
+  python -m unittest discover                     # полный набор (131 с)
   python -m pytest -q                             # тот же набор другим раннером
   python scripts/check_docs.py                    # правки только в документации
+  python scripts/test_select.py --staged          # какие тесты запускать для текущего индекса
   ```
 - Что запускать при каком изменении — таблица в [`docs/TESTING.md`](docs/TESTING.md);
   там же классификация UNIT/INTEGRATION/ACCEPTANCE и известные дубли проверок.
 - **Полный набор** (`python -m unittest discover`) — при существенных изменениях:
   правка ядра сбора, `storage`, `services`, изоляции тестов, безопасности,
-  миграций данных; перед релизом; перед коммитом, если хук включён.
+  миграций данных; перед релизом. Перед коммитом хук `.githooks/pre-commit`
+  запускает тесты затронутой области (по файлам индекса) — полный набор
+  он не гоняет.
 - **Правки только в документации** (`*.md`, `.gitignore`) — полный прогон **не
   нужен**: достаточно `python scripts/check_docs.py` (ссылки, упомянутые файлы,
   обязательные разделы). Полный набор — только если правка документации

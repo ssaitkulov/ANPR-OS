@@ -39,6 +39,8 @@ data/photos/diagnostic/
 __pycache__/
 *.py[cod]
 .pytest_cache/
+.coverage
+htmlcov/
 .venv/
 venv/
 build/

@@ -176,8 +176,10 @@ requirements-lock.txt` → `pip check` → `python -m unittest discover -v` → 
 Для тестов: `python -m unittest discover -v` (полный набор) или `python -m pytest -q`
 (тот же набор другим раннером); быстрая проверка без камеры —
 `python -m unittest tests.test_stream_latency tests.test_setup_anpr`. CI (.github/workflows/ci.yml) гоняет
-`python -m unittest discover -v` на Windows для Python 3.11, 3.12, 3.13 и 3.14, проверяет
-`pip check` и то, что тесты не создали `data/anpr.sqlite3` / `data/anpr_state.json` в рабочей папке.
+один полный прогон `python -m pytest -q` на Windows для Python 3.11, 3.12, 3.13 и 3.14 плюс быструю
+проверку совместимости на стандартной библиотеке, проверяет `pip check` и то, что тесты не создали
+`data/anpr.sqlite3` / `data/anpr_state.json` в рабочей папке. Что запускать при каком изменении,
+классификация тестов и известные дубли — в [docs/TESTING.md](docs/TESTING.md).
 
 ## Тесты и изоляция от боевой базы
 
@@ -218,7 +220,10 @@ python -c "import os,hashlib;print(hashlib.sha256(open('data/anpr.sqlite3','rb')
 пустой токен Telegram, а заодно проверяет, что предыдущий тест не оставил в модуле подмен.
 Доказательства изоляции — в `tests/test_safe_mode.py`.
 
-Локальный запрет коммита при падении тестов — хук `.githooks/pre-commit`. Включается один раз:
+Локальный запрет коммита при падении тестов — хук `.githooks/pre-commit`. Он смотрит на файлы
+в индексе и запускает тесты затронутой области (`scripts/test_select.py`): для правки только
+документации — проверку ссылок и smoke-тест, для кода — точечные тесты; полный набор гоняют CI
+и проверка перед релизом. Включается один раз:
 
 ```bash
 git config core.hooksPath .githooks

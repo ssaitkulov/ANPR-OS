@@ -1,9 +1,39 @@
 #!/bin/sh
-# Локальный запрет коммита при падении тестов (Этап 3).
+# Локальный запрет коммита при падении тестов.
+#
+# Что именно запускать — решает scripts/test_select.py по файлам в индексе:
+#   FULL → весь набор; DOCS → проверка документации и быстрый smoke;
+#   иначе → тесты затронутой области.
+# Полный набор всегда гоняют CI и релиз: локальный хук экономит время,
+# но не заменяет проверку перед релизом.
 #
 # Включается один раз: git config core.hooksPath .githooks
 # Тесты идут во временном каталоге и не трогают рабочую базу anpr.sqlite3.
 set -e
-echo "[pre-commit] прогон тестов (python -m unittest discover)…"
-python -m unittest discover
+
+SELECT=$(python scripts/test_select.py --staged)
+echo "[pre-commit] по индексу: $SELECT"
+
+if [ "$SELECT" = "DOCS" ]; then
+    python scripts/check_docs.py
+    TARGETS="tests/test_stream_latency.py tests/test_setup_anpr.py"
+elif [ "$SELECT" = "FULL" ]; then
+    TARGETS=""
+else
+    TARGETS="$SELECT"
+fi
+
+if python -c "import pytest" >/dev/null 2>&1; then
+    # pytest принимает пути к файлам как есть.
+    # shellcheck disable=SC2086
+    python -m pytest -q $TARGETS
+elif [ "$SELECT" = "FULL" ]; then
+    # pytest не установлен — запасной путь на стандартной библиотеке.
+    python -m unittest discover
+else
+    # unittest ждёт имён модулей: tests/test_x.py -> tests.test_x
+    MODULES=$(echo "$TARGETS" | tr ' ' '\n' | sed -e 's|/|.|g' -e 's|\.py$||' | tr '\n' ' ')
+    # shellcheck disable=SC2086
+    python -m unittest $MODULES
+fi
 echo "[pre-commit] тесты зелёные — коммит разрешён"
