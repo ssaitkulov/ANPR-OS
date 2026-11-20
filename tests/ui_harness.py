@@ -155,17 +155,15 @@ class ShellTestCase(unittest.TestCase):
         # Отложенные вызовы Tk надо дать сработать до закрытия окна —
         # тогда ошибки в них попадут в `self.errors`.
         self.pump(0.05)
+        # Снимки иконок освобождаем до уничтожения Tk: иначе их __del__
+        # сработает после выхода из главного цикла и даст warning.
+        icons._cache.clear()
         try:
             self.shell._quit()
         except Exception:
             pass
         for item in self.patches:
             item.stop()
-        # Снимки иконок и виджеты закрытого окна освобождать надо здесь, в
-        # главном потоке: PIL освобождает снимок вызовом в Tk, а вызов из
-        # чужого потока ждёт обработки событий главного окна и вешает
-        # прогон (в том числе фоновые потоки следующих тестов).
-        icons._cache.clear()
         self.header = None
         self.panel = None
         self.shell = None

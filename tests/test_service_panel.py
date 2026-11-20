@@ -161,6 +161,20 @@ class ServicePanelTests(ShellTestCase):
         self.shell.show_section('settings')
         self.assertFalse(self.panel.is_open)
 
+    def test_refresh_skips_the_layout_while_the_panel_is_closed(self):
+        """Скрытая панель обновляет кнопки, но не делает дорогую перекладку Tk."""
+        self.assertFalse(self.panel.is_open)
+        with patch.object(self.panel, '_layout_content',
+                          side_effect=AssertionError('скрытая панель не должна перекладываться')):
+            self.header.refresh_panel()
+        self.shell.busy = True
+        self.shell._set_busy(True)
+        self.assertEqual(str(self.header.action_button.cget('state')), 'disabled')
+        self.shell.busy = False
+        self.shell._set_busy(False)
+        self.header.toggle_panel()
+        self.assertTrue(self.panel.is_open)
+
     def test_panel_does_not_move_the_dashboard(self):
         self.shell.update_status(HEALTH)
         self.settle()

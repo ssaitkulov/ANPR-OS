@@ -1,17 +1,19 @@
 from tests import anpr_testenv  # noqa: F401  — изоляция тестов от боевой БД
 import tempfile
 import queue
+import sqlite3
 import threading
 import unittest
 from datetime import date, datetime
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 from zoneinfo import ZoneInfo
 
 from app.ui import dashboard
-from app.ui.dashboard import (MonitorWindow, MonitoringSection, aggregate_hours,
-                              archived_photo, chart_last_hour, direction, load_dashboard)
+from app.ui.dashboard import (_iso_hour, MonitorWindow, MonitoringSection,
+                              aggregate_hours, archived_photo, chart_last_hour,
+                              direction, load_dashboard)
 from app.storage.database import Store
 
 class DashboardTests(unittest.TestCase):
@@ -155,6 +157,67 @@ class DashboardTests(unittest.TestCase):
             finally:
                 store.close()
 
+    def test_recent_limit_does_not_change_the_aggregates(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / 'events.sqlite3'
+            store = Store(path)
+            try:
+                for index in range(10):
+                    store.add_event(f'row{index}',
+                                    {'iso': f'2026-11-17T12:{index:02}:00+05:00',
+                                     'plate': f'P{index}', 'direction': 'entry'})
+                all_rows = load_dashboard(path, '2026-11-17', recent_limit=50)
+                limited = load_dashboard(path, '2026-11-17', recent_limit=3)
+                for key in ('total', 'unique', 'hours', 'directions'):
+                    self.assertEqual(limited[key], all_rows[key], key)
+                self.assertEqual(len(limited['recent']), 3)
+                self.assertEqual([row[2] for row in limited['recent']],
+                                 ['P9', 'P8', 'P7'])
+            finally:
+                store.close()
+
+    def test_search_is_applied_before_the_recent_limit(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / 'events.sqlite3'
+            store = Store(path)
+            try:
+                for index in range(10):
+                    store.add_event(f'row{index}',
+                                    {'iso': f'2026-11-17T12:{index:02}:00+05:00',
+                                     'plate': f'OTHER{index}', 'direction': 'entry'})
+                store.add_event('match', {'iso': '2026-11-17T01:00:00+05:00',
+                                          'plate': '01 D 555 AA', 'direction': 'exit'})
+                result = load_dashboard(path, '2026-11-17', plate_query='d-555', recent_limit=2)
+                self.assertEqual([row[2] for row in result['recent']], ['01 D 555 AA'])
+                self.assertEqual(result['total'], 11)
+            finally:
+                store.close()
+
+    def test_invalid_timestamps_are_counted_but_not_shown_on_the_chart(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / 'events.sqlite3'
+            store = Store(path)
+            try:
+                store.add_event('valid', {'iso': '2026-11-17T12:00:00+05:00',
+                                          'plate': 'A', 'direction': 'entry'})
+                conn = sqlite3.connect(path)
+                try:
+                    conn.execute('INSERT INTO events (event_key, day, captured_at, plate, direction) '
+                                 "VALUES ('broken', '2026-11-17', 'T25:00:00', 'B', 'exit')")
+                    conn.commit()
+                finally:
+                    conn.close()
+                result = load_dashboard(path, '2026-11-17')
+                self.assertEqual(result['total'], 2)
+                self.assertEqual(result['unique'], 2)
+                self.assertEqual(result['hours'][12], 1)
+                self.assertEqual(result['directions']['Выезд'], 1)
+                self.assertIsNone(_iso_hour('T25:00:00'))
+                self.assertEqual(_iso_hour('2026-11-17T12:00:00+05:00'), 12)
+            finally:
+                store.close()
+
+
 class _FakeWidget:
     """Заглушка виджета CustomTkinter: запоминает, что на нём нарисовали."""
 
@@ -171,6 +234,9 @@ class _FakeWidget:
         pass
 
     def grid(self, **kwargs):
+        pass
+
+    def grid_forget(self):
         pass
 
     def pack(self, **kwargs):
@@ -247,7 +313,9 @@ class MonitoringWidgetsTests(unittest.TestCase):
         self.section = MonitoringSection.__new__(MonitoringSection)
         self.section.visible_count = 30
         self.section.photo_bytes = {}
+        self.section.photo_images = {}
         self.section.photo_buttons = {}
+        self.section._cards = []
         self.section.search_selection = (0, '')
         self.section.feed = _FakeWidget()
         self.section.graph = _FakeCanvas()
@@ -306,6 +374,124 @@ class MonitoringWidgetsTests(unittest.TestCase):
         # Все точки графика — на одной высоте: за день проездов не было.
         heights = {args[1] for args, _ in self.section.graph.ovals}
         self.assertEqual(len(heights), 1, 'пустой день должен давать ровную линию')
+
+    def _poll_with_hours(self, hours):
+        """Один цикл poll() с готовым ответом данных, без Tk и планировщика."""
+        section = self.section
+        section.period_selection = (0, None)
+        section.search_selection = (0, '')
+        section.stream_selection = (0, 0, True)
+        section.today = lambda: date(2026, 11, 20)
+        section.video_label = SimpleNamespace(winfo_width=lambda: 0, winfo_height=lambda: 0)
+        section.frames = queue.Queue()
+        section.results = queue.Queue()
+        section.photo_results = queue.Queue()
+        section.total = _FakeWidget()
+        section.unique = _FakeWidget()
+        section.entry_metric = _FakeWidget()
+        section.exit_metric = _FakeWidget()
+        section._feed_content = None
+        section.reset_feed_scroll = False
+        section.schedule = lambda *args: setattr(section, '_scheduled', args)
+        section.draw_chart = Mock()
+        section.render_passages = Mock()
+        section.set_video_status = Mock()
+        section.show_video_message = Mock()
+        data = {'total': 1, 'unique': 1, 'hours': hours,
+                'directions': {'Въезд': 1, 'Выезд': 0, 'Неизвестно': 0},
+                'recent': [(1, '2026-11-20T10:00:00+05:00', 'A', 'entry', 0)]}
+        day = date(2026, 11, 20)
+        section.results.put_nowait((0, 0, (day, day), 'data', data))
+        section.poll()
+        return section
+
+    def test_chart_is_not_redrawn_when_hours_are_unchanged(self):
+        section = self._poll_with_hours([0] * 24)
+        section.draw_chart.assert_not_called()
+
+    def test_chart_is_redrawn_when_hours_change(self):
+        hours = [0] * 24
+        hours[10] = 3
+        section = self._poll_with_hours(hours)
+        section.draw_chart.assert_called_once_with()
+        self.assertEqual(section.hours, hours)
+
+    def test_poll_runs_at_the_frame_rate(self):
+        section = self._poll_with_hours([0] * 24)
+        self.assertEqual(section._scheduled[0], 50)
+
+    def test_already_fitted_video_is_not_resized_again(self):
+        image = SimpleNamespace(size=(320, 180))
+        with patch.object(dashboard.ImageOps, 'contain') as contain:
+            self.assertIs(self.section._fit_video(image, 320, 180), image)
+        contain.assert_not_called()
+
+    def test_video_is_fitted_only_when_the_size_changed(self):
+        image = SimpleNamespace(size=(640, 360))
+        fitted = SimpleNamespace(size=(320, 180))
+        with patch.object(dashboard.ImageOps, 'contain', return_value=fitted) as contain:
+            result = self.section._fit_video(image, 320, 180)
+        self.assertIs(result, fitted)
+        contain.assert_called_once_with(image, (320, 180), dashboard.Image.Resampling.LANCZOS)
+
+    def test_video_size_is_cached_from_configure(self):
+        self.section.video_label = SimpleNamespace(winfo_width=lambda: 320,
+                                                   winfo_height=lambda: 180)
+        self.section.fullscreen_label = None
+        self.section._on_video_configure()
+        self.assertEqual(self.section._video_label_size, (320, 180))
+        self.assertEqual(self.section.video_size, (320, 180))
+
+        self.section.fullscreen_label = SimpleNamespace(winfo_width=lambda: 1280,
+                                                        winfo_height=lambda: 720)
+        self.section._on_video_configure()
+        self.assertEqual(self.section._fullscreen_size, (1280, 720))
+        self.assertEqual(self.section.video_size, (1280, 720))
+
+    def test_photo_is_decoded_only_once_per_event(self):
+        button = _FakeWidget()
+        self.section.photo_buttons = {7: button}
+        preview = SimpleNamespace(size=(86, 72))
+        with patch.object(dashboard.Image, 'open'), \
+             patch.object(dashboard.ImageOps, 'contain', return_value=preview) as contain, \
+             patch.object(dashboard.ctk, 'CTkImage',
+                          side_effect=lambda **kwargs: SimpleNamespace(**kwargs)):
+            self.section.set_photo(7, b'jpeg')
+            first = button.photo
+            self.section.set_photo(7, b'jpeg')
+        self.assertIs(button.photo, first)
+        contain.assert_called_once()
+
+    def test_feed_reuses_cards_and_images_on_rerender(self):
+        rows = [(1, '2026-11-17T12:00:00+05:00', 'A', 'Въезд', False)]
+        self.section.photo_bytes = {1: b'jpeg'}
+        preview = SimpleNamespace(size=(86, 72))
+        with patch.object(dashboard.Image, 'open'), \
+             patch.object(dashboard.ImageOps, 'contain', return_value=preview) as contain, \
+             patch.object(dashboard.ctk, 'CTkImage',
+                          side_effect=lambda **kwargs: SimpleNamespace(**kwargs)):
+            self.section.render_passages(rows)
+            created = len(_FakeWidget.created)
+            self.assertEqual(contain.call_count, 1)
+            self.section.render_passages(rows)
+        self.assertEqual(contain.call_count, 1)
+        self.assertEqual(len(_FakeWidget.created), created)
+
+    def test_card_resets_the_photo_when_another_passage_takes_its_place(self):
+        preview = SimpleNamespace(size=(86, 72))
+        with patch.object(dashboard.Image, 'open'), \
+             patch.object(dashboard.ImageOps, 'contain', return_value=preview), \
+             patch.object(dashboard.ctk, 'CTkImage',
+                          side_effect=lambda **kwargs: SimpleNamespace(**kwargs)):
+            self.section.photo_bytes = {1: b'jpeg'}
+            self.section.render_passages([(1, '2026-11-17T12:00:00+05:00', 'A', 'Въезд', False)])
+            button = self.section.photo_buttons[1]
+            self.assertEqual(str(button.kwargs.get('state')), 'normal')
+            self.section.photo_bytes = {}
+            self.section.render_passages([(2, '2026-11-17T13:00:00+05:00', 'B', 'Выезд', False)])
+        self.assertIs(self.section.photo_buttons[2], button)
+        self.assertEqual(str(button.kwargs.get('state')), 'disabled')
+        self.assertEqual(button.kwargs.get('text'), 'Нет\nфото')
 
 
 if __name__ == '__main__': unittest.main()

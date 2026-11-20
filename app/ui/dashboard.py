@@ -57,23 +57,60 @@ def open_database(path):
         return sqlite3.connect(str(resolved), timeout=2)
 
 
-def load_dashboard(path, day, end_day=None, plate_query=''):
+FEED_PAGE = 30
+
+
+def _iso_hour(value):
+    """Час из ISO-метки; невалидные значения не попадают в график."""
+    try:
+        return datetime.fromisoformat(value).hour
+    except (ValueError, TypeError):
+        return None
+
+
+def load_dashboard(path, day, end_day=None, plate_query='', recent_limit=200):
+    """Показатели за весь период + ограниченная выборка для ленты.
+
+    Агрегаты считаются одним сканом таблицы: отдельные COUNT/GROUP BY
+    проходили бы по ней несколько раз и были бы медленнее полной выборки.
+    Поиск по номеру влияет только на `recent`, как и раньше.
+    """
     end_day = end_day or day
     if end_day < day:
         raise ValueError('Invalid date range')
     with closing(open_database(path)) as conn:
-        rows = conn.execute('SELECT id, captured_at, plate, direction, backfill FROM events WHERE day BETWEEN ? AND ? ORDER BY captured_at DESC, id DESC', (day, end_day)).fetchall()
+        conn.create_function('iso_hour', 1, _iso_hour)
+        conn.create_function('normplate', 1, normalize_plate)
+        # shortcut: NOT INDEXED — на диапазоне дней индекс (day, captured_at)
+        # вызывает случайные чтения и замедляет скан в ~7 раз; убрать, если
+        # запросы станут точечными по одному дню.
+        grouped = conn.execute(
+            'SELECT iso_hour(captured_at), direction, COUNT(*) FROM events NOT INDEXED '
+            'WHERE day BETWEEN ? AND ? GROUP BY 1, 2', (day, end_day)).fetchall()
+        unique = conn.execute(
+            "SELECT COUNT(DISTINCT plate) FROM events NOT INDEXED WHERE day BETWEEN ? AND ? "
+            "AND plate <> '' AND plate NOT IN ('—', 'UNKNOWN', 'unknown')",
+            (day, end_day)).fetchone()[0]
+        query = normalize_plate(plate_query)
+        sql = ('SELECT id, captured_at, plate, direction, backfill FROM events NOT INDEXED '
+               'WHERE day BETWEEN ? AND ?')
+        params = [day, end_day]
+        if query:
+            sql += ' AND instr(normplate(plate), ?) > 0'
+            params.append(query)
+        sql += ' ORDER BY captured_at DESC, id DESC LIMIT ?'
+        params.append(recent_limit)
+        recent = conn.execute(sql, params).fetchall()
     hours = [0] * 24
     counts = {'Въезд': 0, 'Выезд': 0, 'Неизвестно': 0}
-    unique = set()
-    for _, captured, plate, direct, _ in rows:
-        try: hours[datetime.fromisoformat(captured).hour] += 1
-        except (ValueError, TypeError): pass
-        counts[direction(direct)] += 1
-        if plate and plate not in ('—', 'UNKNOWN', 'unknown'): unique.add(plate)
-    query = normalize_plate(plate_query)
-    recent = [row for row in rows if query in normalize_plate(row[2])] if query else rows
-    return {'total': len(rows), 'unique': len(unique), 'hours': hours, 'directions': counts, 'recent': recent}
+    total = 0
+    for hour, direct, count in grouped:
+        total += count
+        if hour is not None:
+            hours[hour] += count
+        counts[direction(direct)] += count
+    return {'total': total, 'unique': unique, 'hours': hours,
+            'directions': counts, 'recent': recent}
 
 
 def aggregate_hours(hours, interval, current_hour):
@@ -137,6 +174,8 @@ class MonitoringSection:
         self.reset_feed_scroll = False
         self.date_window = None
         self.video_size = (640, 360)
+        self._video_label_size = self.video_size
+        self._fullscreen_size = None
         self.image = None
         self.stream_selection = (0, 0, True)
         self.stream_changed = threading.Event()
@@ -145,7 +184,9 @@ class MonitoringSection:
         self.fullscreen_image = None
         self.photo_results = queue.Queue(maxsize=60)
         self.photo_bytes = {}
+        self.photo_images = {}
         self.photo_buttons = {}
+        self._cards = []
         self.settings = read_settings()
         try: self.tz = ZoneInfo(self.settings.get('TIMEZONE', 'Asia/Tashkent'))
         except (ZoneInfoNotFoundError, ValueError): self.tz = None
@@ -196,6 +237,7 @@ class MonitoringSection:
         self.video_label = ctk.CTkLabel(video, text='Подключение к камере…', text_color=MUTED, fg_color='#090e16')
         self.video_label.pack(fill='both', expand=True, padx=10, pady=10)
         self.video_label.bind('<Double-Button-1>', self.open_video_fullscreen)
+        self.video_label.bind('<Configure>', self._on_video_configure)
         right = ctk.CTkFrame(layout, fg_color='transparent')
         right.grid(row=0, column=1, rowspan=2, sticky='nsew', padx=(7, 0))
         right.grid_columnconfigure((0, 1), weight=1, uniform='metric')
@@ -273,6 +315,42 @@ class MonitoringSection:
         """Заголовок блока видео: название камеры или «Прямой эфир»."""
         name = str(self.settings.get('CAMERA_NAME') or '').strip()
         return name or 'Прямой эфир'
+
+    def _on_video_configure(self, _event=None):
+        """Кэшировать размеры областей показа: не запрашивать их на каждом кадре."""
+        label = getattr(self, 'video_label', None)
+        if label is None:
+            return
+        try:
+            width, height = label.winfo_width(), label.winfo_height()
+        except tk.TclError:
+            return
+        if width > 10 and height > 10:
+            self._video_label_size = (width, height)
+        fullscreen = getattr(self, 'fullscreen_label', None)
+        if fullscreen is not None:
+            try:
+                full_width, full_height = fullscreen.winfo_width(), fullscreen.winfo_height()
+            except tk.TclError:
+                full_width = full_height = 0
+            if full_width > 10 and full_height > 10:
+                self._fullscreen_size = (full_width, full_height)
+            else:
+                self._fullscreen_size = None
+        else:
+            self._fullscreen_size = None
+        width, height = self._video_label_size
+        if self._fullscreen_size is not None:
+            width = max(width, self._fullscreen_size[0])
+            height = max(height, self._fullscreen_size[1])
+        self.video_size = (max(width, 160), max(height, 90))
+
+    @staticmethod
+    def _fit_video(image, width, height):
+        """Не масштабировать повторно кадр, уже приведённый к этому размеру."""
+        if image.size == (width, height):
+            return image
+        return ImageOps.contain(image, (width, height), Image.Resampling.LANCZOS)
 
     def card(self, parent, row, col, **kwargs):
         frame=ctk.CTkFrame(parent, fg_color=CARD, border_color=BORDER, border_width=1, corner_radius=10); frame.grid(row=row, column=col, sticky='nsew', **kwargs); return frame
@@ -393,6 +471,7 @@ class MonitoringSection:
         self.reset_feed_scroll = True
         self._feed_content = None
         self.photo_bytes = {}
+        self.photo_images = {}
         if start == end:
             label = 'Сегодня  ▾' if start == self.today() else start.strftime('%d.%m.%Y  ▾')
         else:
@@ -541,59 +620,132 @@ class MonitoringSection:
         self.reset_feed_scroll = True
         self._feed_content = None
         self.photo_bytes = {}
+        self.photo_images = {}
         self.render_passages(None)
         self.data_changed.set()
 
-    def render_passages(self, rows, error=False):
-        for child in self.feed.winfo_children(): child.destroy()
-        self.photo_buttons = {}
-        if rows is None:
-            ctk.CTkLabel(self.feed, text='Не удалось загрузить данные' if error else 'Загрузка…',
-                         text_color=MUTED).grid(row=0, column=0, pady=12)
+    def _feed_card(self, index):
+        """Карточка ленты по позиции: создаётся один раз и переиспользуется."""
+        if index < len(self._cards):
+            return self._cards[index]
+        frame = ctk.CTkFrame(self.feed, fg_color='#202d40', corner_radius=8)
+        button = ctk.CTkButton(frame, text='Нет\nфото', width=86, height=72,
+                               fg_color='#34445a', hover_color='#41536c',
+                               text_color=MUTED, font=('Segoe UI', 10), state='disabled')
+        button.pack(side='left', padx=8, pady=8)
+        details = ctk.CTkFrame(frame, fg_color='transparent')
+        details.pack(side='left', fill='x', expand=True, padx=(0, 8), pady=6)
+        labels = []
+        for color, font in ((TEXT, ('Segoe UI', 13, 'bold')),
+                            (MUTED, ('Segoe UI', 11)),
+                            ('#8ebaff', ('Segoe UI', 11))):
+            label = ctk.CTkLabel(details, text='', text_color=color, anchor='w', font=font)
+            label.pack(fill='x')
+            labels.append(label)
+        card = {'frame': frame, 'button': button, 'labels': labels,
+                'texts': None, 'photo_for': None}
+        self._cards.append(card)
+        return card
+
+    def _feed_message(self, text):
+        """Одна строка-заглушка вместо новой метки на каждую перерисовку."""
+        label = getattr(self, '_feed_message_label', None)
+        if label is None:
+            label = ctk.CTkLabel(self.feed, text=text, text_color=MUTED)
+            self._feed_message_label = label
+        label.configure(text=text)
+        label.grid(row=0, column=0, pady=12)
+
+    def _hide_feed_message(self):
+        label = getattr(self, '_feed_message_label', None)
+        if label is not None:
+            label.grid_forget()
+
+    def _set_card_photo(self, card, event_id):
+        """Сменить проезд в карточке: старое фото/команду обязательно убрать."""
+        if card['photo_for'] == event_id:
             return
-        for index, (event_id, captured, plate, direct, archive) in enumerate(rows[:self.visible_count]):
+        card['photo_for'] = event_id
+        button = card['button']
+        data = self.photo_bytes.get(event_id)
+        if data:
+            self._apply_photo(button, event_id, data)
+        else:
+            button.configure(image=None, text='Нет\nфото', state='disabled', command=None)
+            button.photo = None
+
+    def render_passages(self, rows, error=False):
+        if rows is None:
+            for card in self._cards:
+                card['frame'].grid_forget()
+            self._feed_message('Не удалось загрузить данные' if error else 'Загрузка…')
+            self.photo_buttons = {}
+            return
+        self._hide_feed_message()
+        visible = rows[:self.visible_count]
+        buttons = {}
+        for index, (event_id, captured, plate, direct, archive) in enumerate(visible):
             try: stamp = datetime.fromisoformat(captured).strftime('%d.%m.%Y  %H:%M:%S')
             except (ValueError, TypeError): continue
-            card = ctk.CTkFrame(self.feed, fg_color='#202d40', corner_radius=8)
-            card.grid(row=index, column=0, sticky='ew', padx=3, pady=4)
-            button = ctk.CTkButton(card, text='Нет\nфото', width=86, height=72,
-                                   fg_color='#34445a', hover_color='#41536c',
-                                   text_color=MUTED, font=('Segoe UI', 10), state='disabled')
-            button.pack(side='left', padx=8, pady=8)
-            self.photo_buttons[event_id] = button
-            details = ctk.CTkFrame(card, fg_color='transparent')
-            details.pack(side='left', fill='x', expand=True, padx=(0, 8), pady=6)
-            ctk.CTkLabel(details, text='№  ' + (plate or '—'), text_color=TEXT, anchor='w',
-                         font=('Segoe UI', 13, 'bold')).pack(fill='x')
-            ctk.CTkLabel(details, text='◷  ' + stamp, text_color=MUTED, anchor='w',
-                         font=('Segoe UI', 11)).pack(fill='x')
-            state = direction(direct) + ('  ·  Архив' if archive else '')
-            ctk.CTkLabel(details, text=state, text_color='#8ebaff', anchor='w',
-                         font=('Segoe UI', 11)).pack(fill='x')
-            if event_id in self.photo_bytes: self.set_photo(event_id, self.photo_bytes[event_id])
+            card = self._feed_card(index)
+            texts = ('№  ' + (plate or '—'), '◷  ' + stamp,
+                     direction(direct) + ('  ·  Архив' if archive else ''))
+            if card['texts'] != texts:
+                for label, text in zip(card['labels'], texts):
+                    label.configure(text=text)
+                card['texts'] = texts
+            self._set_card_photo(card, event_id)
+            card['frame'].grid(row=index, column=0, sticky='ew', padx=3, pady=4)
+            buttons[event_id] = card['button']
+        for card in self._cards[len(visible):]:
+            card['frame'].grid_forget()
+        self.photo_buttons = buttons
         if not rows:
             message = 'По номеру ничего не найдено' if self.search_selection[1] else 'Проездов за выбранный период нет'
-            ctk.CTkLabel(self.feed, text=message, text_color=MUTED).grid(row=0, column=0, pady=12)
+            self._feed_message(message)
         elif len(rows) > self.visible_count:
-            ctk.CTkButton(self.feed, text='Показать ещё', height=30, fg_color='#263b57',
-                          command=self.show_more_passages).grid(row=self.visible_count, column=0, sticky='ew', padx=4, pady=8)
+            more = getattr(self, '_feed_more_button', None)
+            if more is None:
+                more = ctk.CTkButton(self.feed, text='Показать ещё', height=30,
+                                     fg_color='#263b57', command=self.show_more_passages)
+                self._feed_more_button = more
+            more.grid(row=len(visible), column=0, sticky='ew', padx=4, pady=8)
+        else:
+            more = getattr(self, '_feed_more_button', None)
+            if more is not None:
+                more.grid_forget()
 
     def show_more_passages(self):
-        self.visible_count += 30
+        self.visible_count += FEED_PAGE
         self.render_passages(self._feed_content or ())
         self.data_changed.set()
 
-    def set_photo(self, event_id, data):
-        button = self.photo_buttons.get(event_id)
-        if not button: return
+    def _photo_image(self, event_id, data):
+        """Декодировать JPEG один раз на проезд и переиспользовать CTkImage."""
+        cached = self.photo_images.get(event_id)
+        if cached is not None and cached[0] == data:
+            return cached[1]
         try:
             with Image.open(io.BytesIO(data)) as source:
                 preview = ImageOps.contain(source.convert('RGB'), (86, 72), Image.Resampling.LANCZOS)
             image = ctk.CTkImage(light_image=preview, dark_image=preview, size=preview.size)
-            button.configure(text='', image=image, state='normal', command=lambda: self.open_photo(data))
-            button.photo = image
         except (OSError, ValueError):
+            return None
+        self.photo_images[event_id] = (data, image)
+        return image
+
+    def _apply_photo(self, button, event_id, data):
+        image = self._photo_image(event_id, data)
+        if image is None:
             return
+        button.configure(text='', image=image, state='normal',
+                         command=lambda: self.open_photo(data))
+        button.photo = image
+
+    def set_photo(self, event_id, data):
+        button = self.photo_buttons.get(event_id)
+        if button is not None:
+            self._apply_photo(button, event_id, data)
 
     def open_photo(self, data):
         try:
@@ -632,7 +784,8 @@ class MonitoringSection:
                     checked_at = {}
                     checked_generation = (generation, search_generation)
                 try:
-                    data = load_dashboard(app_paths.db_file(), start.isoformat(), end.isoformat(), query)
+                    data = load_dashboard(app_paths.db_file(), start.isoformat(), end.isoformat(), query,
+                                          recent_limit=self.visible_count + FEED_PAGE)
                     try: self.results.get_nowait()
                     except queue.Empty: pass
                     self.results.put_nowait((generation, search_generation, (start, end), 'data', data))
@@ -718,6 +871,32 @@ class MonitoringSection:
         for thread in self.threads:
             thread.join(5)
         cancel_pending_scripts(self.root)
+        # Ссылки на картинки надо отпустить до уничтожения Tk-интерпретатора:
+        # иначе их __del__ сработает вне главного цикла и даст warning.
+        for card in self._cards:
+            button = card['button']
+            button.photo = None
+            try:
+                button.configure(image=None)
+            except tk.TclError:
+                pass
+        for label in (getattr(self, 'video_label', None),
+                      getattr(self, 'fullscreen_label', None)):
+            if label is not None:
+                try:
+                    label._label.configure(image='')
+                    label.configure(image=None)
+                except (tk.TclError, AttributeError):
+                    pass
+        self._cards.clear()
+        self.photo_images.clear()
+        self.photo_buttons.clear()
+        self.photo_bytes.clear()
+        self._feed_message_label = None
+        self._feed_more_button = None
+        self.chart_interval = None
+        self.image = None
+        self.fullscreen_image = None
 
     def set_video_status(self, state):
         text, color = {
@@ -762,6 +941,7 @@ class MonitoringSection:
                                              text_color=MUTED, fg_color='#090e16')
         self.fullscreen_label.pack(fill='both', expand=True, padx=12, pady=12)
         self.fullscreen_label.bind('<Double-Button-1>', self.close_video_fullscreen)
+        self.fullscreen_label.bind('<Configure>', self._on_video_configure)
         self.window_after(window, 0, lambda: (window.lift(), window.focus_force()), idle=True)
 
     def close_video_fullscreen(self, _event=None):
@@ -771,6 +951,8 @@ class MonitoringSection:
         if window is not None:
             self._close_window(window)
         self.fullscreen_image = None
+        self._fullscreen_size = None
+        self._on_video_configure()
 
     def video_worker(self):
         os.environ.setdefault('OPENCV_LOG_LEVEL', 'SILENT')
@@ -880,16 +1062,6 @@ class MonitoringSection:
                                fill='#4598ff', outline='#e4f0ff', width=1)
 
     def poll(self):
-        # Размер области видео: пока виджет не показан, размер не меняется —
-        # иначе кадры уменьшаются до пикселей, пока раздел скрыт.
-        width, height = self.video_label.winfo_width(), self.video_label.winfo_height()
-        if width > 10 and height > 10:
-            self.video_size = (max(width, 160), max(height, 90))
-            if self.fullscreen_label is not None:
-                full_width = self.fullscreen_label.winfo_width()
-                full_height = self.fullscreen_label.winfo_height()
-                if full_width > 10 and full_height > 10:
-                    self.video_size = (max(self.video_size[0], full_width), max(self.video_size[1], full_height))
         try:
             generation, kind, value=self.frames.get_nowait()
             if generation != self.stream_selection[0]:
@@ -897,16 +1069,12 @@ class MonitoringSection:
             elif kind == 'frame':
                 self.set_video_status('online')
                 if self.video_label.winfo_ismapped():
-                    w = max(self.video_label.winfo_width(), 10)
-                    h = max(self.video_label.winfo_height(), 10)
-                    fitted = ImageOps.contain(value, (w, h), Image.Resampling.LANCZOS)
+                    fitted = self._fit_video(value, *self._video_label_size)
                     image = ctk.CTkImage(light_image=fitted, dark_image=fitted, size=fitted.size)
                     self.video_label.configure(image=image, text='')
                     self.image = image
-                if self.fullscreen_label is not None and self.fullscreen_label.winfo_ismapped():
-                    w = max(self.fullscreen_label.winfo_width(), 10)
-                    h = max(self.fullscreen_label.winfo_height(), 10)
-                    fitted = ImageOps.contain(value, (w, h), Image.Resampling.LANCZOS)
+                if self._fullscreen_size is not None and self.fullscreen_label is not None:
+                    fitted = self._fit_video(value, *self._fullscreen_size)
                     image = ctk.CTkImage(light_image=fitted, dark_image=fitted, size=fitted.size)
                     self.fullscreen_label.configure(image=image, text='')
                     self.fullscreen_image = image
@@ -930,11 +1098,14 @@ class MonitoringSection:
                 self.total.configure(text=str(data['total'])); self.unique.configure(text=str(data['unique']))
                 self.entry_metric.configure(text=str(data['directions']['Въезд']))
                 self.exit_metric.configure(text=str(data['directions']['Выезд']))
-                self.hours=data['hours']; self.draw_chart()
+                if data['hours'] != self.hours:
+                    self.hours = data['hours']
+                    self.draw_chart()
                 content = tuple(data['recent'])
                 if content != self._feed_content:
                     current_ids = {row[0] for row in content}
                     self.photo_bytes = {key: value for key, value in self.photo_bytes.items() if key in current_ids}
+                    self.photo_images = {key: value for key, value in self.photo_images.items() if key in current_ids}
                     self.render_passages(content)
                     self._feed_content = content
                     if self.reset_feed_scroll:
@@ -949,7 +1120,7 @@ class MonitoringSection:
                     self.photo_bytes[event_id] = photo
                     self.set_photo(event_id, photo)
         except queue.Empty: pass
-        self.schedule(40, self.poll)
+        self.schedule(50, self.poll)
 
     def close(self):
         """Закрыть раздел (автономный режим): отменить вызовы и остановить потоки."""

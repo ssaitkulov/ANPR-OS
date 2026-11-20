@@ -229,7 +229,6 @@ class AppShell:
             header.set_state('service', service_state)
             header.set_state('camera', camera_state)
             header.set_state('telegram', telegram_state)
-            header.set_running(running)
             header.refresh_panel()
 
     def _settings(self):

@@ -427,6 +427,10 @@ class ServicePanel:
             self._hide_actions()
             self._stop_progress()
             self._hide_message()
+        if not self.open_state:
+            # Скрытая панель не делает дорогую перекладку Tk; состояние
+            # кнопок выше обновляется в любом случае.
+            return
         self._layout_content(key)
         self._fit()
 
