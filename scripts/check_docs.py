@@ -21,14 +21,20 @@ import subprocess
 import sys
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[1]
+SCRIPTS_DIR = Path(__file__).resolve().parent
+if str(SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS_DIR))
+
+from _bootstrap import PROJECT_ROOT  # noqa: E402  — корень проекта — из app.core.paths
 
 #: Консоль Windows может быть в cp1251/cp866 — печатаем отчёт в UTF-8.
-for _stream in (sys.stdout, sys.stderr):
-    try:
-        _stream.reconfigure(encoding='utf-8', errors='replace')
-    except (AttributeError, ValueError):
-        pass
+try:
+    sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+    sys.stderr.reconfigure(encoding='utf-8', errors='replace')
+except Exception:
+    pass
+
+ROOT = PROJECT_ROOT
 
 #: Документы, которые проверяем поимённо (остальные markdown — только ссылки).
 DOCS = (
