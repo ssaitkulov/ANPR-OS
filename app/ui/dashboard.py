@@ -584,7 +584,8 @@ class MonitoringSection:
         window.resizable(False, False)
         window.transient(self.root.winfo_toplevel())
         x = max(0, self.date_button.winfo_rootx() + self.date_button.winfo_width() - 310)
-        window.geometry(f'310x375+{x}+{self.date_button.winfo_rooty() + 36}')
+        y = self.date_button.winfo_rooty() + 36
+        window.geometry(f'310x430+{x}+{y}')
         def close_picker(_event=None):
             self.date_window = None
             self._close_window(window)
@@ -597,7 +598,31 @@ class MonitoringSection:
             bind_widget(self.calendar_body, sequence,
                         lambda _event, offset=offset: self._move_selection(offset))
         self.draw_calendar()
+        # Высота календаря зависит от числа недель и режима: подстраиваем окно
+        # по фактическому содержимому, иначе «Применить» обрезается (6 недель).
+        self.window_after(window, 0, self._fit_date_window, idle=True)
+        self.window_after(window, 0, self._focus_selected_day, idle=True)
         self.window_after(window, 0, lambda: (window.lift(), window.focus_force()), idle=True)
+
+    def _focus_selected_day(self):
+        button = getattr(self, '_focus_day_button', None)
+        if button is not None:
+            try:
+                button.focus_set()
+            except tk.TclError:
+                pass
+
+    def _fit_date_window(self):
+        window = self.date_window
+        if window is None:
+            return
+        try:
+            needed = self.calendar_body.winfo_reqheight() + 24
+            scale = window._reverse_widget_scaling(1)
+            height = max(430, int(needed / scale))
+            window.geometry(f'310x{height}')
+        except (tk.TclError, AttributeError, TypeError):
+            pass
 
     def draw_calendar(self):
         for child in self.calendar_body.winfo_children():
@@ -612,7 +637,7 @@ class MonitoringSection:
         activatable(prev_month)
         prev_month.pack(side='left')
         next_month = ctk.CTkButton(top, text='›', width=34, height=30, fg_color=CARD,
-                                   text_color=MUTED if at_current_month else TEXT,
+                                   text_color='#5d708a',
                                    state='disabled' if at_current_month else 'normal',
                                    command=lambda: self.move_calendar(1))
         activatable(next_month)
@@ -642,8 +667,11 @@ class MonitoringSection:
                                            text_color=MUTED if future else TEXT,
                                            state='disabled' if future else 'normal',
                                            command=lambda value=value: on_pick(value))
-                focusable(day_button)
-                activatable(day_button)
+                if not future:
+                    focusable(day_button)
+                    activatable(day_button)
+                if value == self.calendar_end and not future:
+                    self._focus_day_button = day_button
                 day_button.grid(row=row, column=column, padx=2, pady=2)
         if self.calendar_range_mode:
             if self.calendar_selecting_end:
@@ -653,10 +681,10 @@ class MonitoringSection:
         else:
             label = 'Клик по дню применит дату'
         ctk.CTkLabel(self.calendar_body, text=label, height=20, text_color=TEXT,
-                     font=('Segoe UI', 11)).pack(fill='x')
+                     font=('Segoe UI', 11), anchor='w').pack(fill='x')
         ctk.CTkLabel(self.calendar_body, text='Будущие даты недоступны',
                      height=18, text_color=MUTED,
-                     font=('Segoe UI', 10)).pack(fill='x')
+                     font=('Segoe UI', 10), anchor='w').pack(fill='x')
         mode_row = ctk.CTkFrame(self.calendar_body, fg_color='transparent')
         mode_row.pack(fill='x', pady=(4, 0))
         mode = ctk.CTkSegmentedButton(mode_row, values=['Один день', 'Диапазон'], height=26,
@@ -717,6 +745,7 @@ class MonitoringSection:
         self.calendar_range_mode = choice == 'Диапазон'
         self.calendar_selecting_end = False
         self.draw_calendar()
+        self.window_after(self.date_window, 0, self._fit_date_window, idle=True)
 
     def _toggle_calendar_mode(self):
         self._set_calendar_mode('Один день' if self.calendar_range_mode else 'Диапазон')

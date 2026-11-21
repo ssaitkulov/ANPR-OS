@@ -630,6 +630,8 @@ class CalendarTests(unittest.TestCase):
         self.section.draw_calendar = Mock()
         self.section.data_changed = threading.Event()
         self.section.date_window = None
+        self.section._closing = False
+        self.section.window_after = Mock()
         self.section._after_ids = set()
         self.section._window_afters = {}
         self.section.select_period = Mock(return_value=True)
