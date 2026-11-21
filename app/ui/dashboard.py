@@ -675,34 +675,36 @@ class MonitoringSection:
                 label = f'{self.calendar_start:%d.%m.%Y} – {self.calendar_end:%d.%m.%Y}'
             ctk.CTkLabel(self.calendar_body, text=label, height=20, text_color=TEXT,
                          font=('Segoe UI', 11), anchor='w').pack(fill='x')
-        mode_row = ctk.CTkFrame(self.calendar_body, fg_color='transparent')
-        mode_row.pack(fill='x', pady=(8, 0))
-        mode = ctk.CTkSegmentedButton(mode_row, values=['Один день', 'Диапазон'], height=26,
+        # Два ряда управления: режим+пресеты, затем «Применить» — вместо трёх.
+        controls = ctk.CTkFrame(self.calendar_body, fg_color='transparent')
+        controls.pack(fill='x', pady=(8, 0))
+        mode = ctk.CTkSegmentedButton(controls, values=['День', 'Период'], height=26,
                                       selected_color=theme.ACCENT_DEEP, selected_hover_color=BLUE,
                                       command=self._set_calendar_mode)
-        mode.set('Диапазон' if self.calendar_range_mode else 'Один день')
+        mode.set('Период' if self.calendar_range_mode else 'День')
         focusable(mode)
         activatable(mode, action=self._toggle_calendar_mode)
         mode.pack(side='left')
-        presets = ctk.CTkFrame(self.calendar_body, fg_color='transparent')
-        presets.pack(fill='x', pady=(4, 0))
-        for text, days in (('Сегодня', 0), ('Вчера', 1), ('7 дней', 7), ('30 дней', 30)):
-            button = ctk.CTkButton(presets, text=text, width=70, height=26, fg_color='#263b57',
+        presets = ctk.CTkFrame(controls, fg_color='transparent')
+        presets.pack(side='right')
+        for text, days in (('Сгод', 0), ('Вч', 1), ('7д', 7), ('30д', 30)):
+            button = ctk.CTkButton(presets, text=text, width=36, height=26, fg_color='#263b57',
+                                   font=('Segoe UI', 10),
                                    command=lambda days=days: self._select_preset(days))
             activatable(button)
-            button.pack(side='left', padx=(0, 4))
+            button.pack(side='left', padx=(0, 2))
         if self.calendar_range_mode:
             actions = ctk.CTkFrame(self.calendar_body, fg_color='transparent')
-            actions.pack(fill='x', pady=(4, 0))
+            actions.pack(fill='x', pady=(6, 0))
             span_days = (self.calendar_end - self.calendar_start).days
             apply_text = ('Применить' if self.calendar_selecting_end
                           else f'Применить {span_days + 1} дн.')
             disabled = self.calendar_selecting_end or span_days >= MAX_PERIOD_DAYS
-            apply_button = ctk.CTkButton(actions, text=apply_text, width=150, height=30, fg_color=BLUE,
+            apply_button = ctk.CTkButton(actions, text=apply_text, height=30, fg_color=BLUE,
                                          state='disabled' if disabled else 'normal',
                                          command=self._apply_period)
             activatable(apply_button)
-            apply_button.pack(side='right')
+            apply_button.pack(fill='x')
 
     def _move_selection(self, days):
         """Стрелки клавиатуры сдвигают выбранный день и листают месяцы."""
@@ -732,7 +734,7 @@ class MonitoringSection:
             self.select_period(self.today() - timedelta(days=days_back - 1), self.today())
 
     def _set_calendar_mode(self, choice):
-        self.calendar_range_mode = choice == 'Диапазон'
+        self.calendar_range_mode = choice == 'Период'
         self.calendar_selecting_end = False
         self.draw_calendar()
         # При смене режима меняется высота: просим Tk пересчитать геометрию
@@ -747,7 +749,7 @@ class MonitoringSection:
                 pass
 
     def _toggle_calendar_mode(self):
-        self._set_calendar_mode('Один день' if self.calendar_range_mode else 'Диапазон')
+        self._set_calendar_mode('День' if self.calendar_range_mode else 'Период')
 
     def pick_single_day(self, value):
         """Один клик применяет дату и закрывает календарь."""

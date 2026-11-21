@@ -645,7 +645,7 @@ class CalendarTests(unittest.TestCase):
         self.assertFalse(self.section.calendar_range_mode)
 
     def test_mode_toggle_switches_to_range_draft(self):
-        self.section._set_calendar_mode('Диапазон')
+        self.section._set_calendar_mode('Период')
         self.assertTrue(self.section.calendar_range_mode)
         self.section.pick_calendar_day(date(2026, 11, 10))
         self.section.select_period.assert_not_called()
