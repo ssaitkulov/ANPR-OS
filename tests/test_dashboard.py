@@ -10,9 +10,11 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 from zoneinfo import ZoneInfo
 
+from PIL import Image
+
 from app.ui import dashboard
 from app.ui.dashboard import (_iso_hour, MonitorWindow, MonitoringSection,
-                              aggregate_hours, archived_photo, chart_last_hour,
+                              aggregate_hours, archived_photo, archived_photos, chart_last_hour,
                               direction, load_dashboard)
 from app.storage.database import Store
 
@@ -79,10 +81,33 @@ class DashboardTests(unittest.TestCase):
                 history = load_dashboard(path, '2026-11-16')
                 self.assertEqual((history['total'], history['hours'][23], len(history['recent'])), (35, 35, 35))
                 self.assertEqual(archived_photo(path, history['recent'][0][0]), b'archived image')
+                ids = [row[0] for row in history['recent'][:3]]
+                self.assertEqual(archived_photos(path, ids),
+                                 {history['recent'][0][0]: b'archived image'})
                 self.assertEqual(load_dashboard(path, '2026-11-17')['total'], 1)
                 now = datetime(2026, 11, 17, 9, 0)
                 self.assertEqual(chart_last_hour(date(2026, 11, 16), now), 23)
                 self.assertEqual(chart_last_hour(date(2026, 11, 17), now), 9)
+            finally:
+                store.close()
+
+    def test_archived_photos_survives_a_broken_file_in_the_batch(self):
+        """Один недоступный снимок не должен лишать фото остальные карточки."""
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / 'events.sqlite3'
+            good = Path(folder) / 'good.jpg'
+            good.write_bytes(b'jpeg')
+            store = Store(path)
+            try:
+                stamp_a = '2026-11-19T10:00:00+05:00'
+                stamp_b = '2026-11-19T11:00:00+05:00'
+                store.add_event('a', {'iso': stamp_a, 'plate': 'A', 'direction': 'entry'})
+                store.add_event('b', {'iso': stamp_b, 'plate': 'B', 'direction': 'entry'})
+                store.set_photo_path(stamp_a, 'A', str(good))
+                store.set_photo_path(stamp_b, 'B', str(Path(folder) / 'missing.jpg'))
+                ids = [row[0] for row in load_dashboard(path, '2026-11-19')['recent']]
+                result = archived_photos(path, ids)
+                self.assertEqual(list(result.values()), [b'jpeg'])
             finally:
                 store.close()
 
@@ -193,7 +218,8 @@ class DashboardTests(unittest.TestCase):
             finally:
                 store.close()
 
-    def test_today_is_not_cached(self):
+    def test_today_cache_is_invalidated_by_new_events(self):
+        """Кэш «сегодня» сбрасывается по MAX(id): новые проезды не теряются."""
         with tempfile.TemporaryDirectory() as folder:
             path = Path(folder) / 'events.sqlite3'
             store = Store(path)
@@ -204,9 +230,39 @@ class DashboardTests(unittest.TestCase):
                 store.add_event('a', {'iso': stamp, 'plate': 'A', 'direction': 'entry'})
                 with patch.object(dashboard, '_aggregate_stats',
                                   wraps=dashboard._aggregate_stats) as stats:
-                    load_dashboard(path, date.today().isoformat())
-                    load_dashboard(path, date.today().isoformat())
+                    first = load_dashboard(path, date.today().isoformat())
+                    second = load_dashboard(path, date.today().isoformat())
+                    self.assertEqual(stats.call_count, 1)
+                    self.assertEqual(first['total'], second['total'])
+                    store.add_event('b', {'iso': stamp, 'plate': 'B', 'direction': 'exit'})
+                    third = load_dashboard(path, date.today().isoformat())
                 self.assertEqual(stats.call_count, 2)
+                self.assertEqual(third['total'], 2)
+            finally:
+                store.close()
+
+    def test_cache_is_invalidated_by_an_update_without_new_rows(self):
+        """Правка номера меняет unique, но не MAX(id) — кэш обязан сброситься."""
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / 'events.sqlite3'
+            store = Store(path)
+            self.addCleanup(dashboard._AGG_CACHE.clear)
+            dashboard._AGG_CACHE.clear()
+            try:
+                stamp = date.today().isoformat() + 'T12:00:00+05:00'
+                store.add_event('a', {'iso': stamp, 'plate': 'A', 'direction': 'entry'})
+                first = load_dashboard(path, date.today().isoformat())
+                self.assertEqual(first['unique'], 1)
+                # Обновляем существующую запись: id тот же, номер другой.
+                conn = sqlite3.connect(path)
+                try:
+                    conn.execute('UPDATE events SET plate=? WHERE event_key=?', ('B', 'a'))
+                    conn.commit()
+                finally:
+                    conn.close()
+                second = load_dashboard(path, date.today().isoformat())
+                self.assertEqual(second['unique'], 1)
+                self.assertEqual([row[2] for row in second['recent']], ['B'])
             finally:
                 store.close()
 
@@ -414,6 +470,13 @@ class MonitoringWidgetsTests(unittest.TestCase):
                  if widget.kwargs.get('fg_color') == '#202d40']
         self.assertEqual(len(cards), 30, 'лента показала больше карточек, чем видно')
 
+    def test_show_more_is_hidden_at_the_feed_limit(self):
+        self.section.visible_count = dashboard.MAX_FEED_ROWS
+        rows = [(index, '2026-11-17T12:00:00+05:00', 'A', 'Въезд', False)
+                for index in range(dashboard.MAX_FEED_ROWS + 10)]
+        self.section.render_passages(rows)
+        self.assertNotIn('Показать ещё', self._texts())
+
     def test_chart_draws_the_curve_and_the_axis(self):
         self.section.hours[13] = 4
         self.section.draw_chart()
@@ -514,9 +577,9 @@ class MonitoringWidgetsTests(unittest.TestCase):
         section.draw_chart.assert_called_once_with()
         self.assertEqual(section.hours, hours)
 
-    def test_poll_runs_at_the_frame_rate(self):
+    def test_poll_runs_at_the_configured_interval(self):
         section = self._poll_with_hours([0] * 24)
-        self.assertEqual(section._scheduled[0], 50)
+        self.assertEqual(section._scheduled[0], dashboard.POLL_INTERVAL_MS)
 
     def test_graph_redraw_is_debounced_on_resize(self):
         section = MonitoringSection.__new__(MonitoringSection)
@@ -718,6 +781,51 @@ class CalendarTests(unittest.TestCase):
             self.section._window_afters.pop('win')
         self.assertNotIn('id-1', self.section._after_ids)
         self.assertNotIn('win', self.section._window_afters)
+
+
+class VideoImageCacheTests(unittest.TestCase):
+    def test_frame_updates_reuse_the_same_ctk_image(self):
+        section = MonitoringSection.__new__(MonitoringSection)
+        section._video_images = {}
+        created = []
+
+        class FakePhoto:
+            def __init__(self):
+                self.pasted = None
+
+            def width(self):
+                return 8
+
+            def height(self):
+                return 8
+
+            def paste(self, source):
+                self.pasted = source
+
+        class FakeImage:
+            def __init__(self, light_image, dark_image, size):
+                self.calls = []
+                self._light_image = light_image
+                self._dark_image = dark_image
+                # CTk заполняет кэш при первой отрисовке в виджете.
+                photo = FakePhoto()
+                self._scaled_light_photo_images = {(8, 8): photo}
+                self._scaled_dark_photo_images = {(8, 8): photo}
+                created.append(self)
+
+            def configure(self, **kwargs):
+                self.calls.append(kwargs)
+
+        first_pil = Image.new('RGB', (8, 8))
+        second_pil = Image.new('RGB', (8, 8), 'red')
+        with patch.object(dashboard.ctk, 'CTkImage', FakeImage):
+            first = section._video_ctk_image(first_pil)
+            second = section._video_ctk_image(second_pil)
+
+        self.assertIs(first, second)
+        self.assertEqual(len(created), 1)
+        # Повторный кадр не должен сбрасывать кэш PhotoImage через light_image.
+        self.assertNotIn('light_image', second.calls[-1])
 
 
 if __name__ == '__main__': unittest.main()
