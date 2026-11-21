@@ -236,6 +236,7 @@ app/ui/shell.py (AppShell) ─► header.py ─► service_panel.py / status.py 
 | `scripts/rasterize_icons.py` | разработческая растеризация SVG → PNG в `assets/icons` (в runtime не нужен) | — |
 | `scripts/_bootstrap.py` | единое добавление корня проекта в `sys.path` для скриптов | — |
 | `deploy/install.bat` | офлайн-установка зависимостей на рабочем ПК из `deploy/wheelhouse/` | 1 при ошибке |
+| `deploy/UNINSTALL.bat` | остановка сервиса и снятие автозапуска перед удалением папки | 0 (при отмене тоже 0) |
 
 ## 9. Что менять осторожно
 
