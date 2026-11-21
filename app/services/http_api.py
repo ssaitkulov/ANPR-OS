@@ -67,6 +67,14 @@ def shutdown_service() -> None:
     worker = _worker
     if worker is not None:
         worker.join(10)
+    # Сестринские потоки (outbox/backfill/report/...) могут проснуться после
+    # закрытия Store — дожидаемся их до сохранения состояния и закрытия базы.
+    try:
+        stuck = M.stop_workers(10)
+        if stuck:
+            print(f'[shutdown] потоки не завершились: {", ".join(stuck)}', file=sys.stderr)
+    except Exception as error:
+        print(f'[shutdown] ожидание потоков: {error}', file=sys.stderr)
     try:
         M.save_state(state)
     except Exception as error:
@@ -82,6 +90,9 @@ def shutdown_service() -> None:
 async def lifespan(_app: FastAPI):
     global _worker_started, _worker
     if not _worker_started:
+        # Сервис может быть перезапущен в том же процессе (/restart из панели):
+        # сбрасываем одноразовый сигнал остановки до запуска потоков.
+        M.reset_stop()
         M.EVENTS.add('started', 'Система запущена', M.now_local().isoformat())
         # Проезды, которые остались только в JSON, переносим в БД — источник истины один.
         M.reconcile_state_with_store(state)

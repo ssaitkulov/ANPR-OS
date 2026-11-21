@@ -9,7 +9,7 @@ import sqlite3
 import sys
 import tempfile
 import unittest
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
 
@@ -87,9 +87,10 @@ class AcceptanceToolTests(unittest.TestCase):
                             for check in self.report.checks))
 
     def test_stale_pending_message_is_a_warning(self):
-        old = (datetime.now() - timedelta(hours=2)).strftime('%Y-%m-%d %H:%M:%S')
+        # created_at в БД — UTC (CURRENT_TIMESTAMP), как и в бою: проверка
+        # сравнивает его с datetime('now'), а не с локальным временем.
         self.conn.execute("INSERT INTO outbox (chat_id, body, status, created_at) "
-                          "VALUES ('1', 'текст', 'pending', ?)", (old,))
+                          "VALUES ('1', 'текст', 'pending', datetime('now','-2 hours'))")
         self.conn.commit()
         acceptance_check.check_outbox(self.report, self.conn, 30)
         self.assertTrue(any(check['status'] == acceptance_check.WARN

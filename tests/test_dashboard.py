@@ -506,7 +506,9 @@ class MonitoringWidgetsTests(unittest.TestCase):
         self.assertEqual(labels.count('0'), 1)
 
     def test_today_chart_marks_the_current_hour(self):
-        today = date.today()
+        # График сравнивает дату с now(self.section.tz), а не с системной —
+        # иначе тест падает в первые часы суток, когда в Europe/Moscow ещё вчера.
+        today = datetime.now(self.section.tz).date()
         self.section.display_period = (today, today)
         self.section.draw_chart()
         labels = [kwargs.get('text') for _, kwargs in self.section.graph.texts]

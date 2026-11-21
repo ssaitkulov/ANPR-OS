@@ -41,11 +41,13 @@ def set_autostart(enabled):
         except FileNotFoundError:
             existing = None
         command = startup_command()
-        if existing is not None and existing != command:
+        if enabled and existing is not None and existing != command:
             raise OSError('Запись автозапуска Evrika принадлежит другой установке.')
         if enabled:
             winreg.SetValueEx(key, RUN_NAME, 0, winreg.REG_SZ, command)
         elif existing is not None:
+            # Выключение должно работать и после переноса папки: чужую
+            # (устаревшую) запись всё равно нужно удалить.
             winreg.DeleteValue(key, RUN_NAME)
 
 

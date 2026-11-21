@@ -51,8 +51,8 @@ jobs:
       - name: Проверить, что импорт не создаёт рабочую базу и состояние
         run: |
           python -c "import anpr_telegram"
-          if (Test-Path anpr.sqlite3) { throw "Импорт создал anpr.sqlite3 в рабочей папке" }
-          if (Test-Path anpr_state.json) { throw "Импорт создал anpr_state.json в рабочей папке" }
+          if (Test-Path data/anpr.sqlite3) { throw "Импорт создал anpr.sqlite3 в рабочей папке" }
+          if (Test-Path data/anpr_state.json) { throw "Импорт создал anpr_state.json в рабочей папке" }
 
       # Этап 3: основной прогон. Раннер один — pytest: у него есть teardown
       # изоляции (join_threads/finalize в tests/conftest.py), которого нет у
@@ -70,7 +70,7 @@ jobs:
       # Этап 3: тесты не должны трогать рабочую базу, состояние и подписчиков.
       - name: Проверить, что тесты не тронули рабочие файлы
         run: |
-          if (Test-Path anpr.sqlite3) { throw "Тесты создали anpr.sqlite3 в рабочей папке" }
-          if (Test-Path anpr.sqlite3-wal) { throw "Тесты создали anpr.sqlite3-wal в рабочей папке" }
-          if (Test-Path anpr_state.json) { throw "Тесты создали anpr_state.json в рабочей папке" }
-          if (Test-Path subscribers.json) { throw "Тесты создали subscribers.json в рабочей папке" }
+          if (Test-Path data/anpr.sqlite3) { throw "Тесты создали anpr.sqlite3 в рабочей папке" }
+          if (Test-Path data/anpr.sqlite3-wal) { throw "Тесты создали anpr.sqlite3-wal в рабочей папке" }
+          if (Test-Path data/anpr_state.json) { throw "Тесты создали anpr_state.json в рабочей папке" }
+          if (Test-Path data/subscribers.json) { throw "Тесты создали subscribers.json в рабочей папке" }

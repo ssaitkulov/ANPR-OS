@@ -20,6 +20,7 @@
 from tests import anpr_testenv  # noqa: F401  — изоляция тестов от боевой БД
 
 import os
+import tempfile
 import threading
 import time
 import unittest
@@ -325,6 +326,29 @@ class TelegramConnectionTests(anpr_testenv.IsolatedTestCase):
                 "with url: /bot123:SECRET-TOKEN/getUpdates"))
         self.assertNotIn('SECRET-TOKEN', text)
         self.assertIn('***', text)
+
+    def test_broken_state_file_is_backed_up_before_restarting(self):
+        """Битый JSON не должен молча терять reported_days/last_rec_no."""
+        with tempfile.TemporaryDirectory() as folder:
+            state_file = Path(folder) / 'anpr_state.json'
+            state_file.write_text('{broken', encoding='utf-8')
+            with patch.object(bot, 'STATE_FILE', state_file):
+                fresh = bot.load_state()
+                backups = list(Path(folder).glob('*.corrupt-*'))
+                content = backups[0].read_text(encoding='utf-8') if backups else ''
+        self.assertEqual(fresh['last_rec_no'], 0)
+        self.assertEqual(len(backups), 1)
+        self.assertIn('{broken', content)
+
+    def test_check_connection_hides_the_token_in_the_raised_error(self):
+        """getMe с сетевой ошибкой не должен выдавать токен в traceback CLI."""
+        with patch.object(bot, 'TELEGRAM_BOT_TOKEN', '123:SECRET-TOKEN'), \
+             patch.object(bot, '_telegram_call',
+                          side_effect=Exception(
+                              "HTTPSConnectionPool: url: /bot123:SECRET-TOKEN/getMe")):
+            with self.assertRaises(RuntimeError) as ctx:
+                bot.check_connection()
+        self.assertNotIn('SECRET-TOKEN', str(ctx.exception))
 
     def test_delivery_success_does_not_imply_connection(self):
         """Отправка, обходящая API, не подтверждает связь."""

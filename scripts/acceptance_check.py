@@ -134,9 +134,12 @@ def check_outbox(report: Report, conn: sqlite3.Connection, stale_minutes: int) -
     else:
         report.add('Очередь доставки: нет dead', OK, 'недоставленных сообщений нет')
 
+    # created_at в БД — UTC (DEFAULT CURRENT_TIMESTAMP), поэтому порог тоже
+    # считаем в UTC: datetime.now() дал бы локальное время и ложные WARN.
     stale = conn.execute(
-        "SELECT COUNT(*) FROM outbox WHERE status='pending' AND created_at < ?",
-        ((datetime.now() - timedelta(minutes=stale_minutes)).strftime('%Y-%m-%d %H:%M:%S'),)
+        "SELECT COUNT(*) FROM outbox WHERE status='pending' "
+        "AND created_at < datetime('now', ?)",
+        (f'-{stale_minutes} minutes',)
     ).fetchone()[0]
     if stale:
         report.add('Очередь доставки: нет зависших', WARN,
@@ -171,9 +174,9 @@ def check_report(report: Report, conn: sqlite3.Connection, state: dict, day: str
             report.add(f'Отчёт за {day}', WARN,
                        f'время отчёта ещё не наступило ({report_time}), отчёт не требовался')
             return
-        if (now - due) <= timedelta(minutes=10):
+        if (now - due) <= timedelta(minutes=window):
             report.add(f'Отчёт за {day}', WARN,
-                       f'отчёт должен уйти в течение минуты после {report_time} — проверьте поток отчёта')
+                       f'отчёт должен уйти в течение {window} мин после {report_time} — проверьте поток отчёта')
             return
     report.add(f'Отчёт за {day}', FAIL,
                f'отчёт за день не отправлен (проездов: {passages}, '

@@ -295,6 +295,50 @@ class GracefulShutdownTests(unittest.TestCase):
         self.assertTrue(done.get('closed'))
         self.assertIn('state', done)
 
+    def test_shutdown_waits_for_workers_before_closing_store(self):
+        """База закрывается только после ожидания сестринских потоков."""
+        from app.services import http_api as app
+        order = []
+
+        class FakeStore:
+            def close(self):
+                order.append('store.close')
+
+        with patch.object(app.M, 'STORE', FakeStore()), \
+             patch.object(app.M, 'save_state', side_effect=lambda st: order.append('save_state')), \
+             patch.object(app.M, 'stop_workers', side_effect=lambda t: order.append('stop_workers')), \
+             patch.object(app, '_worker_started', True), \
+             patch.object(app, '_worker', None):
+            app.shutdown_service()
+        self.assertEqual(order[0], 'stop_workers')
+        self.assertIn('save_state', order)
+        self.assertEqual(order[-1], 'store.close')
+
+    def test_stop_workers_joins_every_registered_thread(self):
+        class FakeThread:
+            def __init__(self):
+                self.joined = False
+
+            def is_alive(self):
+                return not self.joined
+
+            def join(self, timeout=None):
+                self.joined = True
+
+        workers = {'outbox': FakeThread(), 'report': FakeThread()}
+        with patch.object(bot, '_workers', workers), \
+             patch.object(bot, '_workers_lock', __import__('threading').Lock()):
+            stuck = bot.stop_workers(1)
+        self.assertEqual(stuck, [])
+        self.assertTrue(all(t.joined for t in workers.values()))
+
+    def test_reset_stop_allows_a_second_start(self):
+        self.assertFalse(bot.stop_event().is_set())
+        bot.request_stop()
+        self.assertTrue(bot.stop_event().is_set())
+        bot.reset_stop()
+        self.assertFalse(bot.stop_event().is_set())
+
     def test_service_stops_through_the_shutdown_endpoint(self):
         calls = []
 

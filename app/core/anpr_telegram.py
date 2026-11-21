@@ -274,8 +274,17 @@ def load_state() -> dict:
     if STATE_FILE.exists():
         try:
             return json.loads(STATE_FILE.read_text(encoding="utf-8"))
-        except Exception:
-            pass
+        except Exception as error:
+            # Битый JSON — это потерянные reported_days/last_rec_no: без
+            # журнала и бэкапа сервис молча задвоит отчёт и добор архива.
+            print(f"[state] повреждён {STATE_FILE}: {_short_error(error)}", file=sys.stderr)
+            try:
+                backup = STATE_FILE.with_suffix(
+                    STATE_FILE.suffix + f".corrupt-{datetime.now().strftime('%Y%m%d%H%M%S')}")
+                STATE_FILE.replace(backup)
+                print(f"[state] копия сохранена: {backup}", file=sys.stderr)
+            except OSError as rename_error:
+                print(f"[state] не удалось сохранить копию: {rename_error}", file=sys.stderr)
     return {"days": {}, "seen": [], "last_report_date": "", "reported_days": [],
             "last_event_time": "", "last_rec_no": 0}
 
@@ -431,6 +440,7 @@ _LAST_TAIL: dict = {}
 # Итог последней рассылки: кому доставлено, кому ушло в очередь.
 _LAST_DELIVERY: dict = {'delivered': [], 'failed': [], 'seq': 0}
 _DELIVERY_SEQ = {'n': 0}
+_DELIVERY_LOCK = threading.RLock()
 
 
 def _delivery_message(ok: bool, elapsed: float | None = None) -> str:
@@ -469,10 +479,26 @@ def _publish_delivery(delivered: list, failed: list, elapsed: float | None = Non
 
 def _set_delivery(delivered: list, failed: list) -> None:
     """Запомнить итог рассылки по чатам (пустые списки — отправки не было)."""
-    _DELIVERY_SEQ['n'] += 1
-    _LAST_DELIVERY.update({'delivered': list(delivered), 'failed': list(failed),
-                            'seq': _DELIVERY_SEQ['n']})
+    with _DELIVERY_LOCK:
+        _DELIVERY_SEQ['n'] += 1
+        _LAST_DELIVERY.update({'delivered': list(delivered), 'failed': list(failed),
+                                'seq': _DELIVERY_SEQ['n']})
     _publish_delivery(delivered, failed)
+
+
+def _delivery_seq() -> int:
+    """Атомарно прочитать номер последней рассылки."""
+    with _DELIVERY_LOCK:
+        return _DELIVERY_SEQ['n']
+
+
+def _delivery_result(seq_before: int) -> tuple[int, int] | None:
+    """Итог по чатам, только если рассылка была именно в этом вызове."""
+    with _DELIVERY_LOCK:
+        if _LAST_DELIVERY.get('seq', 0) == seq_before:
+            return None
+        return (len(_LAST_DELIVERY.get('delivered') or []),
+                len(_LAST_DELIVERY.get('failed') or []))
 
 
 def _telegram_post_message(chat_id: str, text: str) -> bool:
@@ -838,7 +864,7 @@ def send_entry_notification(rec: dict, images, dry_run: bool = False) -> None:
     if not SEND_EACH_ENTRY:
         return
     send_started = time.monotonic()
-    seq_before = _DELIVERY_SEQ['n']
+    seq_before = _delivery_seq()
     if len(image_list) >= 2:
         ok = telegram_send_media_group([(image_list[0], caption)] + [(im, "") for im in image_list[1:]])
     elif len(image_list) == 1:
@@ -847,9 +873,9 @@ def send_entry_notification(rec: dict, images, dry_run: bool = False) -> None:
         ok = telegram_send(caption, kind='entry_without_photo')
     delivered_at = now_local().isoformat()
     # Итог по чатам берём только если рассылка действительно была сейчас.
-    if _LAST_DELIVERY.get('seq', 0) != seq_before:
-        good = len(_LAST_DELIVERY.get('delivered') or [])
-        bad = len(_LAST_DELIVERY.get('failed') or [])
+    result = _delivery_result(seq_before)
+    if result is not None:
+        good, bad = result
     else:
         good, bad = (1, 0) if ok else (0, 1)
     with RUNTIME_LOCK:
@@ -1332,10 +1358,11 @@ def reported_days(state: dict) -> set:
 
 def mark_reported(state: dict, day: str) -> None:
     """Отметить день как отправленный (отметка живёт в JSON-зеркале)."""
-    days = reported_days(state)
-    days.add(day)
-    state['reported_days'] = sorted(days)[-REPORT_KEEP_DAYS:]
-    state['last_report_date'] = day
+    with STATE_LOCK:
+        days = reported_days(state)
+        days.add(day)
+        state['reported_days'] = sorted(days)[-REPORT_KEEP_DAYS:]
+        state['last_report_date'] = day
 
 
 def has_passages(state: dict, day: str) -> bool:
@@ -1736,7 +1763,14 @@ def check_connection() -> dict:
     r.raise_for_status()
     out["device"] = r.text.strip()
     if TELEGRAM_BOT_TOKEN:
-        r = _telegram_call('get', f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getMe", timeout=10)
+        try:
+            r = _telegram_call('get', f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getMe", timeout=10)
+        except Exception as error:
+            # urllib3 кладёт полный URL с токеном в текст ошибки. Не даём
+            # ему уйти в traceback CLI — маскируем и поднимаем своё исключение.
+            detail = _short_error(error)
+            print(f"[telegram] проверка не удалась: {detail}", file=sys.stderr)
+            raise RuntimeError(f"Telegram недоступен: {detail}") from None
         out["telegram_bot"] = r.json().get("result", {}).get("username", "?") if r.ok else f"HTTP {r.status_code}"
     telegram_send("✅ ANPR бот подключён. Проверка: " + out.get("device", ""))
     return out
@@ -1884,6 +1918,29 @@ def request_stop() -> None:
     """Мягкая остановка: потоки заканчивают работу, соединение с камерой закрывается."""
     _stop_event.set()
     close_camera_stream()
+
+
+def reset_stop() -> None:
+    """Сбросить сигнал остановки для повторного запуска в том же процессе."""
+    _stop_event.clear()
+
+
+def stop_workers(timeout: float = 10.0) -> list[str]:
+    """Дождаться всех фоновых потоков сервиса.
+
+    Камера, outbox, backfill, отчёт, telegram и обслуживание живут в `_workers`.
+    Базу нельзя закрывать, пока они не остановились, иначе потоки проснутся
+    уже с закрытым Store и недоставленные сообщения будут потеряны.
+    """
+    with _workers_lock:
+        threads = [(name, thread) for name, thread in _workers.items()]
+    alive = []
+    for name, thread in threads:
+        if thread.is_alive():
+            thread.join(timeout)
+            if thread.is_alive():
+                alive.append(name)
+    return alive
 
 
 def set_active_response(response) -> None:
