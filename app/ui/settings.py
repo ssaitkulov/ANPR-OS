@@ -183,9 +183,9 @@ class SettingsSection:
     TABS = ('Камера', 'Telegram', 'Мониторинг', 'Приложение')
 
     #: Ограничения компоновки.
-    FORM_MAX_WIDTH = 720
+    FORM_MAX_WIDTH = 880
     NAV_WIDTH = 168
-    LABEL_WIDTH = 150
+    LABEL_WIDTH = 170
     FIELD_HEIGHT = 32
 
     def __init__(self, master, on_close=None, container=None, show_back=None):
@@ -297,12 +297,12 @@ class SettingsSection:
         self.form.pack(side='left', fill='both', expand=True, padx=(14, 0))
         self.form.grid_columnconfigure(0, weight=1)
         self.form.grid_rowconfigure(1, weight=1)
-        self.form.bind('<Configure>', self._fit_form)
 
         self.tab_frames = {}
         for title in self.TABS:
             frame = ctk.CTkFrame(self.form, fg_color='transparent')
             frame.grid(row=1, column=0, sticky='nsew')
+            frame.grid_columnconfigure(1, weight=1)
             frame.grid_columnconfigure(1, weight=1)
             self.tab_frames[title] = frame
 
@@ -358,16 +358,13 @@ class SettingsSection:
         self.save_button.pack(side='right')
 
     def _build_camera_tab(self, tab):
-        # Две колонки: подключение | доступ.
-        tab.grid_columnconfigure(1, weight=1)
-        tab.grid_columnconfigure(3, weight=1)
-        self._field(tab, 0, 'Название', 'CAMERA_NAME', col=0)
-        self._field(tab, 0, 'Адрес камеры', 'CAMERA_URL', col=2)
-        self._field(tab, 1, 'Логин', 'DAHUA_USERNAME', col=0)
-        self._field(tab, 1, 'Пароль', 'DAHUA_PASSWORD', col=2, secret=True)
-        self._note(tab, 2, 'Адрес: http://IP-камеры:80/. Изменения применяются после перезапуска сервиса.')
-        camera_result = self._check_result(tab, 4, col=2)
-        self._check_button(tab, 3, 'Проверить камеру', check_camera, col=2, result=camera_result)
+        self._field(tab, 0, 'Название', 'CAMERA_NAME')
+        self._field(tab, 1, 'Адрес камеры', 'CAMERA_URL')
+        self._field(tab, 2, 'Логин', 'DAHUA_USERNAME')
+        self._field(tab, 3, 'Пароль', 'DAHUA_PASSWORD', secret=True)
+        self._note(tab, 4, 'Адрес: http://IP-камеры:80/. Изменения применяются после перезапуска сервиса.')
+        camera_result = self._check_result(tab, 6)
+        self._check_button(tab, 5, 'Проверить камеру', check_camera, result=camera_result)
 
     def _build_telegram_tab(self, tab):
         self._field(tab, 0, 'Токен бота', 'TELEGRAM_BOT_TOKEN', secret=True)
@@ -376,7 +373,7 @@ class SettingsSection:
         note = ('ID через запятую. Добавьте ID получателя в оба поля; для личного чата напишите боту /start.\n'
                 'В группе команды доступны её участникам.')
         self._note(tab, 3, note)
-        bot_result = self._check_result(tab, 5, col=1)
+        bot_result = self._check_result(tab, 5)
         self._check_button(tab, 4, 'Проверить бота', check_bot, result=bot_result)
 
     def _build_monitoring_tab(self, tab):
@@ -423,7 +420,7 @@ class SettingsSection:
             return
         for name, tab in self.tab_frames.items():
             if tab is frame:
-                tab.grid(row=0, column=0, sticky='nsew')
+                tab.grid(row=1, column=0, sticky='nsew')
             else:
                 tab.grid_remove()
         self.active_tab = title
