@@ -615,6 +615,7 @@ class CalendarTests(unittest.TestCase):
         self.section.calendar_start = date(2026, 11, 20)
         self.section.calendar_end = date(2026, 11, 20)
         self.section.calendar_selecting_end = False
+        self.section.calendar_range_mode = False
         self.section.calendar_year, self.section.calendar_month = 2026, 11
         self.section.period_selection = (0, None)
         self.section.visible_count = 30
@@ -633,7 +634,23 @@ class CalendarTests(unittest.TestCase):
         self.section._window_afters = {}
         self.section.select_period = Mock(return_value=True)
 
+    def test_single_click_applies_the_day_immediately(self):
+        self.section.pick_single_day(date(2026, 11, 10))
+        self.section.select_period.assert_called_once_with(date(2026, 11, 10),
+                                                           date(2026, 11, 10))
+
+    def test_picker_opens_in_single_day_mode(self):
+        self.assertFalse(self.section.calendar_range_mode)
+
+    def test_mode_toggle_switches_to_range_draft(self):
+        self.section._set_calendar_mode('Диапазон')
+        self.assertTrue(self.section.calendar_range_mode)
+        self.section.pick_calendar_day(date(2026, 11, 10))
+        self.section.select_period.assert_not_called()
+        self.assertTrue(self.section.calendar_selecting_end)
+
     def test_first_click_does_not_apply_and_waits_for_the_end(self):
+        self.section.calendar_range_mode = True
         self.section.pick_calendar_day(date(2026, 11, 10))
         self.assertTrue(self.section.calendar_selecting_end)
         self.assertEqual(self.section.calendar_start, date(2026, 11, 10))

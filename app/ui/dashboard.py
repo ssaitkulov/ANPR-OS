@@ -237,6 +237,7 @@ class MonitoringSection:
         except (ZoneInfoNotFoundError, ValueError): self.tz = None
         self.calendar_start = self.calendar_end = self.today()
         self.calendar_selecting_end = False
+        self.calendar_range_mode = False
         self.calendar_year, self.calendar_month = self.today().year, self.today().month
         root = self.root
         header = ctk.CTkFrame(root, fg_color='transparent'); header.pack(fill='x', padx=22, pady=(15, 8))
@@ -565,6 +566,8 @@ class MonitoringSection:
             return
         self.calendar_start, self.calendar_end = self.period_selection[1] or (self.today(), self.today())
         self.calendar_selecting_end = False
+        # Каждое открытие начинается с одного дня — предсказуемо.
+        self.calendar_range_mode = False
         # Открываем на начале периода: именно его обычно правят первым.
         self.calendar_year, self.calendar_month = self.calendar_start.year, self.calendar_start.month
         window = ctk.CTkToplevel(self.root)
@@ -633,25 +636,36 @@ class MonitoringSection:
                     '#263f64' if self.calendar_start < value < self.calendar_end else CARD)
                 if future:
                     color = '#141d2b'
+                on_pick = self.pick_calendar_day if self.calendar_range_mode else self.pick_single_day
                 day_button = ctk.CTkButton(grid, text=str(day), width=34, height=27, corner_radius=6,
                                            fg_color=color, hover_color='#344e70',
                                            text_color=MUTED if future else TEXT,
                                            state='disabled' if future else 'normal',
-                                           command=lambda value=value: self.pick_calendar_day(value))
+                                           command=lambda value=value: on_pick(value))
                 focusable(day_button)
                 activatable(day_button)
                 day_button.grid(row=row, column=column, padx=2, pady=2)
-        if self.calendar_selecting_end:
-            label = 'Начало выбрано. Укажите конец.'
+        if self.calendar_range_mode:
+            if self.calendar_selecting_end:
+                label = 'Начало выбрано. Укажите конец.'
+            else:
+                label = f'{self.calendar_start:%d.%m.%Y} – {self.calendar_end:%d.%m.%Y}'
         else:
-            label = f'{self.calendar_start:%d.%m.%Y} – {self.calendar_end:%d.%m.%Y}'
+            label = 'Клик по дню применит дату'
         ctk.CTkLabel(self.calendar_body, text=label, height=20, text_color=TEXT,
                      font=('Segoe UI', 11)).pack(fill='x')
         ctk.CTkLabel(self.calendar_body, text='Будущие даты недоступны',
                      height=18, text_color=MUTED,
                      font=('Segoe UI', 10)).pack(fill='x')
-        actions = ctk.CTkFrame(self.calendar_body, fg_color='transparent')
-        actions.pack(fill='x', pady=(4, 0))
+        mode_row = ctk.CTkFrame(self.calendar_body, fg_color='transparent')
+        mode_row.pack(fill='x', pady=(4, 0))
+        mode = ctk.CTkSegmentedButton(mode_row, values=['Один день', 'Диапазон'], height=26,
+                                      selected_color=theme.ACCENT_DEEP, selected_hover_color=BLUE,
+                                      command=self._set_calendar_mode)
+        mode.set('Диапазон' if self.calendar_range_mode else 'Один день')
+        focusable(mode)
+        activatable(mode, action=self._toggle_calendar_mode)
+        mode.pack(side='left')
         presets = ctk.CTkFrame(self.calendar_body, fg_color='transparent')
         presets.pack(fill='x', pady=(2, 0))
         for text, days in (('Сегодня', 0), ('Вчера', 1), ('7 дней', 7), ('30 дней', 30)):
@@ -659,16 +673,18 @@ class MonitoringSection:
                                    command=lambda days=days: self._select_preset(days))
             activatable(button)
             button.pack(side='left', padx=(0, 4))
-        # Пока ждём конец периода, «Применить» коммитил бы один день молча.
-        span_days = (self.calendar_end - self.calendar_start).days
-        apply_text = ('Применить' if self.calendar_selecting_end
-                      else f'Применить {span_days + 1} дн.')
-        disabled = self.calendar_selecting_end or span_days >= MAX_PERIOD_DAYS
-        apply_button = ctk.CTkButton(actions, text=apply_text, width=150, height=30, fg_color=BLUE,
-                                     state='disabled' if disabled else 'normal',
-                                     command=self._apply_period)
-        activatable(apply_button)
-        apply_button.pack(side='right')
+        if self.calendar_range_mode:
+            actions = ctk.CTkFrame(self.calendar_body, fg_color='transparent')
+            actions.pack(fill='x', pady=(4, 0))
+            span_days = (self.calendar_end - self.calendar_start).days
+            apply_text = ('Применить' if self.calendar_selecting_end
+                          else f'Применить {span_days + 1} дн.')
+            disabled = self.calendar_selecting_end or span_days >= MAX_PERIOD_DAYS
+            apply_button = ctk.CTkButton(actions, text=apply_text, width=150, height=30, fg_color=BLUE,
+                                         state='disabled' if disabled else 'normal',
+                                         command=self._apply_period)
+            activatable(apply_button)
+            apply_button.pack(side='right')
 
     def _move_selection(self, days):
         """Стрелки клавиатуры сдвигают выбранный день и листают месяцы."""
@@ -696,6 +712,18 @@ class MonitoringSection:
             self.select_period(yesterday, yesterday)
         else:
             self.select_period(self.today() - timedelta(days=days_back - 1), self.today())
+
+    def _set_calendar_mode(self, choice):
+        self.calendar_range_mode = choice == 'Диапазон'
+        self.calendar_selecting_end = False
+        self.draw_calendar()
+
+    def _toggle_calendar_mode(self):
+        self._set_calendar_mode('Один день' if self.calendar_range_mode else 'Диапазон')
+
+    def pick_single_day(self, value):
+        """Один клик применяет дату и закрывает календарь."""
+        self.select_period(value, value)
 
     def pick_calendar_day(self, value):
         if self.calendar_selecting_end:
