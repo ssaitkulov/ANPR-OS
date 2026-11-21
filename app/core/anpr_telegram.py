@@ -47,6 +47,7 @@ from app.core.system_events import EVENTS
 from app.storage.passage_photos import PHOTOS
 from app.storage.photo_archive import save_photo, cleanup_old_photos
 from app.core import safe_mode
+from app.core.report_xlsx import build_report_xlsx, report_summary
 
 # ---------------------------------------------------------------------------
 # Конфиг (переменные окружения / .env)
@@ -566,6 +567,40 @@ def telegram_send(text: str, photo_path: Path | None = None, caption: str = "", 
     for cid in failed:
         # В очередь — только недоставленный хвост: доставленное не повторяем.
         queue_missed_text(_tail_of(cid) or text, kind=kind, chats=[cid])
+    return bool(delivered)
+
+
+def _telegram_post_document(chat_id: str, filename: str, data: bytes, caption: str) -> bool:
+    """Один вызов sendDocument (multipart)."""
+    try:
+        r = _telegram_call('post', f"{_tg_base()}/sendDocument",
+                           data={'chat_id': chat_id, 'caption': caption},
+                           files={'document': (filename, data)}, timeout=30)
+        r.raise_for_status()
+        return True
+    except Exception as error:  # pragma: no cover
+        print(f"[telegram] документ {chat_id}: {_short_error(error)}", file=sys.stderr)
+        return False
+
+
+def telegram_send_document(filename: str, data: bytes, caption: str = '',
+                           kind: str = 'document') -> bool:
+    """Отправить файл всем получателям. True — дошёл хотя бы одному чату.
+
+    При отсутствии получателей сообщение не исчезает: в очередь кладётся
+    подпись, чтобы отчёт дождался подписчиков по уже существующему механизму.
+    """
+    recipients = get_recipients()
+    if not recipients:
+        queue_missed_text(caption or f'Отчёт: {filename}', kind=kind, chats=[])
+        return False
+    delivered, failed = [], []
+    for chat_id in recipients:
+        if _telegram_post_document(chat_id, filename, data, caption):
+            delivered.append(chat_id)
+        else:
+            failed.append(chat_id)
+    _set_delivery(delivered, failed)
     return bool(delivered)
 
 
@@ -1305,9 +1340,10 @@ def _record_event(state: dict, ev: dict, image: bytes | None) -> dict | None:
     return rec
 
 
-def build_report(state: dict, day: str | None = None) -> str:
+def build_report(state: dict, day: str | None = None, events: list | None = None) -> str:
     day = day or today_str()
-    events = [record_from_row(row) for row in STORE.day_passages(day)]
+    if events is None:
+        events = [record_from_row(row) for row in STORE.day_passages(day)]
     if not events:
         # Резерв: проезды, которые ещё не попали в БД (запись в БД не удалась).
         events = state.get("days", {}).get(day, [])
@@ -1397,17 +1433,26 @@ def due_report_days(state: dict, now: datetime) -> list:
 
 
 def send_report_for_day(state: dict, day: str, dry_run: bool = False) -> bool:
-    """Отправить отчёт за день и отметить день как отправленный."""
-    text = build_report(state, day)
+    """Отправить отчёт за день XLSX-файлом и отметить день как отправленный."""
+    events = [record_from_row(row) for row in STORE.day_passages(day)]
+    if not events:
+        events = state.get("days", {}).get(day, [])
+    text = build_report(state, day, events)
     print(text)
     if dry_run:
         return True
-    ok = telegram_send(text, kind='report')
+    xlsx = build_report_xlsx(day, events, display_plate)
+    total, unique, _avg = report_summary(events)
+    caption = f'📊 Отчёт за {day}: {total} проездов, {unique} номеров'
+    ok = telegram_send_document(f'anpr-{day}.xlsx', xlsx, caption, kind='report')
+    if not ok:
+        # Файл не дошёл — отчёт не должен пропасть: текстом через очередь.
+        ok = telegram_send(text, kind='report')
     # Дату отмечаем всегда: неудачная отправка уже легла в очередь и дойдёт
     # позже. Повтор набил бы очередь копиями отчёта.
     mark_reported(state, day)
     save_state(state)
-    print("[report] отчёт отправлен в Telegram ✅" if ok else
+    print("[report] XLSX-отчёт отправлен в Telegram ✅" if ok else
           "[report] отчёт не доставлен — ждёт в очереди", file=sys.stderr)
     return True
 

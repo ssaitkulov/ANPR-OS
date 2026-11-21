@@ -82,12 +82,13 @@ app/ui/shell.py (AppShell) ─► header.py ─► service_panel.py / status.py 
 
 | Модуль | Назначение | Ключевые функции и классы | Кто использует |
 |---|---|---|---|
-| `anpr_telegram.py` | ядро сбора: камера, разбор событий, запись проездов, отправка в Telegram, добор из архива | `main`, `subscribe_loop`, `consume_camera_stream`, `stream_chunks_with_ticks`, `parse_kv_text`, `extract_events`, `MultipartParser`, `plate_of`, `get_direction_value`, `direction_kind`/`direction_allowed`/`direction_label`, `record_event`/`save_passage`/`store_event`, `send_entry_notification`, `telegram_send`, `telegram_send_photo`, `telegram_send_media_group`, `flush_missed_messages`, `outbox_worker`, `build_report`, `maybe_send_report`, `report_worker`, `backfill_once`, `run_backfill`, `backfill_worker`, `maintenance_worker`, `cleanup_images`, `check_connection`, `load_state`/`save_state`, `load_subscribers`/`get_recipients`, `LazyStore`, `now_local`, `today_str` | `services/http_api.py` (через `from app.core import anpr_telegram as M`; корневой лаунчер даёт тот же объект модуля), корневые лаунчеры, `scripts/`, тесты |
+| `anpr_telegram.py` | ядро сбора: камера, разбор событий, запись проездов, отправка в Telegram, добор из архива | `main`, `subscribe_loop`, `consume_camera_stream`, `stream_chunks_with_ticks`, `parse_kv_text`, `extract_events`, `MultipartParser`, `plate_of`, `get_direction_value`, `direction_kind`/`direction_allowed`/`direction_label`, `record_event`/`save_passage`/`store_event`, `send_entry_notification`, `telegram_send`, `telegram_send_photo`, `telegram_send_media_group`, `telegram_send_document`, `flush_missed_messages`, `outbox_worker`, `build_report`, `send_report_for_day`, `maybe_send_report`, `report_worker`, `backfill_once`, `run_backfill`, `backfill_worker`, `maintenance_worker`, `cleanup_images`, `check_connection`, `load_state`/`save_state`, `load_subscribers`/`get_recipients`, `LazyStore`, `now_local`, `today_str` | `services/http_api.py` (через `from app.core import anpr_telegram as M`; корневой лаунчер даёт тот же объект модуля), корневые лаунчеры, `scripts/`, тесты |
 | `paths.py` | единственный источник правды о путях; считает всё от корня проекта | `PROJECT_ROOT`, `DATA_DIR`, `runtime_dir`, `log_dir`, `photo_dir`, `db_file`, `state_file`, `subscribers_file`, `ui_preferences_file`, `ui_window_file`, `env_file`, `resolve_path`, `resolve_photo_path`, `relative_photo_path`, `ensure_data_dirs`, `legacy_data` | все слои; переопределяется `ANPR_RUNTIME_DIR`, `ANPR_LOG_DIR`, `IMAGE_DIR`, `DB_FILE`, `STATE_FILE`, `SUBSCRIBERS_FILE` |
 | `safe_mode.py` | безопасный тестовый режим: изоляция рабочих данных, запрет сети/процессов, учёт потоков | `activate`, `is_active`, `reason`, `isolation_dir`, `snapshot`, `detect_test_run`, `guard`, `guards_suspended`, `blocked_url`/`blocked_command`/`blocked_endpoint`, `track_thread`, `join_threads`, `finalize`, `restore_patches`, `SafeModeError` | `tests/__init__.py`, корневой `conftest.py`, `tests/conftest.py`; проверки в `control.py`, `core/anpr_telegram.py`, `ui/settings.py`, `ui/dashboard.py` |
 | `preferences.py` | настройки панели и автозапуск Windows (реестр) | `get_autostart`/`set_autostart`, `startup_command`, `get_minimize_to_tray`/`set_minimize_to_tray` | `ui/shell.py`, `ui/settings.py` |
 | `window_state.py` | положение и размер окна между запусками | `parse_geometry`, `format_geometry`, `state_from_geometry`, `load_state`, `save_state`, `within_bounds` | `ui/shell.py` |
 | `system_events.py` | операционный журнал в памяти (кольцевой буфер) | `EventLog.add`, `EventLog.snapshot`, `EVENTS` | `core/anpr_telegram.py`, `services/http_api.py` (`GET /events`) |
+| `report_xlsx.py` | генерация XLSX-отчёта без внешних зависимостей (две вкладки, inlineStr) | `build_report_xlsx`, `report_summary` | `core/anpr_telegram.py` (`send_report_for_day`) |
 
 ### 4.2 `app/services/`
 
@@ -219,6 +220,7 @@ app/ui/shell.py (AppShell) ─► header.py ─► service_panel.py / status.py 
 | `test_segmented_tabs.py` | сегментированный переключатель разделов: переключение мышью и с клавиатуры, подложка, фокус, закрытие панели диагностики |
 | `test_dashboard.py` | мониторинг: загрузка данных, лента проездов, график |
 | `test_system_events.py` | операционный журнал в памяти |
+| `test_report_xlsx.py` | XLSX-отчёт: zip/XML, экранирование, `sendDocument`, откат на текст |
 | `test_verify_state.py` | `scripts/verify_state.py` — сверка JSON ↔ SQLite |
 | `test_acceptance_tools.py` | `scripts/acceptance_check.py`, `scripts/check_lock.py`, `scripts/test_select.py` |
 
