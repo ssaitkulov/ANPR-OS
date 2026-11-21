@@ -586,13 +586,14 @@ class MonitoringSection:
         x = max(0, self.date_button.winfo_rootx() + self.date_button.winfo_width() - 310)
         y = self.date_button.winfo_rooty() + 36
         window.geometry(f'310x430+{x}+{y}')
+        self._date_geometry = (x, y)
         def close_picker(_event=None):
             self.date_window = None
             self._close_window(window)
         window.protocol('WM_DELETE_WINDOW', close_picker)
         window.bind('<Escape>', close_picker)
         self.calendar_body = ctk.CTkFrame(window, fg_color='transparent')
-        self.calendar_body.pack(fill='both', expand=True, padx=12, pady=10)
+        self.calendar_body.pack(fill='x', padx=12, pady=10)
         for sequence, offset in (('<Left>', -1), ('<Right>', 1),
                                  ('<Up>', -7), ('<Down>', 7)):
             bind_widget(self.calendar_body, sequence,
@@ -613,15 +614,20 @@ class MonitoringSection:
                 pass
 
     def _fit_date_window(self):
-        """Высота окна = высота содержимого, без пустого запаса."""
+        """Высота окна = сумма детей календаря, без пустого запаса снизу."""
         window = self.date_window
         if window is None:
             return
         try:
-            needed = self.calendar_body.winfo_reqheight() + 28
+            # reqheight контейнера с pack(fill='x') не включает реальные
+            # размеры детей — складываем их сами.
+            needed = sum(child.winfo_reqheight()
+                         for child in self.calendar_body.winfo_children())
             scale = window._reverse_widget_scaling(1)
-            height = max(280, int(needed / scale))
-            window.geometry(f'310x{height}')
+            # Дети测得 в физических px; заголовок окна — ~26 логических.
+            height = max(240, int(needed / scale) + 26)
+            x, y = getattr(self, '_date_geometry', (0, 0))
+            window.geometry(f'310x{height}+{x}+{y}')
         except (tk.TclError, AttributeError, TypeError):
             pass
 
