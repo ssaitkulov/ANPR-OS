@@ -13,7 +13,7 @@ from app.services import audit
 from app.services import auth
 from app.services import instance as service_instance
 
-import anpr_telegram as M
+from app.core import anpr_telegram as M
 from fastapi import FastAPI, BackgroundTasks, HTTPException, Request
 from fastapi.responses import Response
 
