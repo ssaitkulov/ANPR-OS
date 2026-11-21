@@ -15,8 +15,9 @@ from app.core import preferences
 from app.core import safe_mode
 from app.core import paths as app_paths
 from app.core.paths import PROJECT_ROOT, env_file
+from app.ui import theme
 from app.ui.tklife import cancel_pending_scripts
-from app.ui.widgets import activatable
+from app.ui.widgets import activatable, focusable
 import requests
 from requests.auth import HTTPDigestAuth
 
@@ -169,21 +170,22 @@ class SettingsSection:
     связаны с одними и теми же переменными, а вкладки только скрываются.
     """
 
-    BG = '#101722'
-    CARD = '#1a2432'
-    BORDER = '#303e51'
-    TEXT = '#f2f5fa'
-    MUTED = '#a5b1c2'
-    BLUE = '#2869df'
-    BLUE_HOVER = '#1d55b9'
+    # Единая палитра приложения — единственный источник (theme.py).
+    BG = theme.BG
+    CARD = theme.CARD
+    BORDER = theme.CARD_ALT
+    TEXT = theme.TEXT
+    MUTED = theme.MUTED
+    BLUE = theme.ACCENT_DEEP
+    BLUE_HOVER = theme.ACCENT
 
     #: Вкладки в порядке навигации.
     TABS = ('Камера', 'Telegram', 'Мониторинг', 'Приложение')
 
     #: Ограничения компоновки.
-    FORM_MAX_WIDTH = 800
+    FORM_MAX_WIDTH = 720
     NAV_WIDTH = 168
-    LABEL_WIDTH = 190
+    LABEL_WIDTH = 150
     FIELD_HEIGHT = 32
 
     def __init__(self, master, on_close=None, container=None, show_back=None):
@@ -194,6 +196,10 @@ class SettingsSection:
         self._after_ids = set()
         self._form_width = 0
         self._notes = []
+        self._dirty = False
+        self._dirty_label = None
+        self.save_button = None
+        self._entries = {}
         if container is not None or on_close is not None:
             parent = container if container is not None else master
             root = ctk.CTkFrame(parent, fg_color=self.BG, corner_radius=0)
@@ -219,12 +225,30 @@ class SettingsSection:
         self.direction = tk.StringVar(value=next((label for label, value in DIRECTIONS.items()
                                                  if value == current.get('DIRECTION', 'Approach')), 'Оба направления'))
         self.check_buttons = []
+        self._saved_snapshot = self.values()
+        for var in (*self.variables.values(), self.direction):
+            var.trace_add('write', self._on_value_change)
+        self.autostart = tk.BooleanVar(value=False)
+        self.minimize_to_tray = tk.BooleanVar(value=False)
 
         self._build_header()
         self._build_footer()
         self._build_body()
         self.select_tab(self.TABS[0])
         self.schedule(100, self.poll)
+
+    def _on_value_change(self, *_args):
+        """Отслеживать несохранённые изменения."""
+        self._dirty = self.values() != self._saved_snapshot
+        if self._dirty_label is not None:
+            self._dirty_label.configure(
+                text='Несохранённые изменения' if self._dirty else '')
+        if self.save_button is not None:
+            self.save_button.configure(state='normal' if self._dirty else 'disabled')
+
+    def _mark_saved(self):
+        self._saved_snapshot = self.values()
+        self._on_value_change()
 
     # ------------------------------------------------------------------
     # Компоновка
@@ -241,49 +265,44 @@ class SettingsSection:
                      font=('Segoe UI', 20, 'bold'), anchor='w').pack(side='left')
 
     def _build_footer(self):
-        footer = ctk.CTkFrame(self.root, fg_color='#151f2d', corner_radius=0)
+        """Подвал — только обратная связь; Save поднят в форму."""
+        footer = ctk.CTkFrame(self.root, fg_color=theme.CARD, corner_radius=0)
         footer.pack(side='bottom', fill='x')
-        actions = ctk.CTkFrame(footer, fg_color='transparent')
-        actions.pack(fill='x', padx=22, pady=(8, 2))
-        self.save_button = ctk.CTkButton(actions, text='Сохранить', command=self.save, width=150,
-                                         height=36, fg_color=self.BLUE, hover_color='#1d55b9',
-                                         font=('Segoe UI', 12, 'bold'))
-        activatable(self.save_button)
-        self.save_button.pack(side='right')
-        ctk.CTkLabel(actions, text='Настройки камеры применяются после перезапуска сервиса',
-                     text_color=self.MUTED, font=('Segoe UI', 11), anchor='w').pack(side='left', fill='x', expand=True)
         self.status = tk.StringVar(value='')
-        ctk.CTkLabel(footer, textvariable=self.status, text_color='#b8c9e1', font=('Segoe UI', 11),
-                     anchor='w', justify='left').pack(fill='x', padx=22, pady=(0, 8))
+        ctk.CTkLabel(footer, textvariable=self.status, text_color=theme.MUTED,
+                     font=('Segoe UI', 11), anchor='w', justify='left',
+                     wraplength=520).pack(fill='x', padx=22, pady=(8, 8))
 
     def _build_body(self):
         body = ctk.CTkFrame(self.root, fg_color='transparent')
         body.pack(fill='both', expand=True, padx=22, pady=(4, 8))
 
-        nav = ctk.CTkFrame(body, fg_color='transparent', width=self.NAV_WIDTH)
-        nav.pack(side='left', fill='y')
-        nav.pack_propagate(False)
+        # --- левый rail: навигация + резюме текущей конфигурации ---
+        rail = ctk.CTkFrame(body, fg_color='transparent', width=self.NAV_WIDTH)
+        rail.pack(side='left', fill='y')
+        rail.pack_propagate(False)
         self.nav_buttons = {}
         for title in self.TABS:
-            button = ctk.CTkButton(nav, text=title, width=self.NAV_WIDTH - 20, height=36, anchor='w',
-                                    fg_color='transparent', hover_color='#263b57', text_color=self.TEXT,
-                                    font=('Segoe UI', 12), command=lambda title=title: self.select_tab(title))
+            button = ctk.CTkButton(rail, text=title, width=self.NAV_WIDTH - 20, height=36, anchor='w',
+                                   fg_color='transparent', hover_color=theme.CARD_ALT, text_color=self.TEXT,
+                                   font=('Segoe UI', 12), command=lambda title=title: self.select_tab(title))
+            focusable(button)
             activatable(button)
             button.pack(anchor='w', pady=2, padx=4)
             self.nav_buttons[title] = button
+        self._build_readiness(rail)
 
-        # Форма: ширина не больше 800 px, при нехватке места — прокрутка.
-        self.scroll = ctk.CTkScrollableFrame(body, fg_color='transparent', corner_radius=0)
-        self.scroll.pack(side='left', fill='both', expand=True, padx=(14, 0))
-        self.form = ctk.CTkFrame(self.scroll, fg_color='transparent', width=self.FORM_MAX_WIDTH)
-        self.form.pack(anchor='w', padx=(6, 6), pady=(2, 8))
+        # --- форма: обычный CTkFrame, без фантомного скроллбара ---
+        self.form = ctk.CTkFrame(body, fg_color='transparent', width=self.FORM_MAX_WIDTH)
+        self.form.pack(side='left', fill='both', expand=True, padx=(14, 0))
         self.form.grid_columnconfigure(0, weight=1)
-        self.scroll.bind('<Configure>', self._fit_form)
+        self.form.grid_rowconfigure(1, weight=1)
+        self.form.bind('<Configure>', self._fit_form)
 
         self.tab_frames = {}
         for title in self.TABS:
             frame = ctk.CTkFrame(self.form, fg_color='transparent')
-            frame.grid(row=0, column=0, sticky='nsew')
+            frame.grid(row=1, column=0, sticky='nsew')
             frame.grid_columnconfigure(1, weight=1)
             self.tab_frames[title] = frame
 
@@ -291,13 +310,64 @@ class SettingsSection:
         self._build_telegram_tab(self.tab_frames['Telegram'])
         self._build_monitoring_tab(self.tab_frames['Мониторинг'])
         self._build_application_tab(self.tab_frames['Приложение'])
+        self._build_save_strip()
+
+    def _build_readiness(self, parent):
+        """Резюме конфигурации из уже загруженных значений — без новых запросов."""
+        block = ctk.CTkFrame(parent, fg_color=theme.CARD, corner_radius=10)
+        block.pack(fill='x', pady=(24, 0), padx=4)
+        ctk.CTkLabel(block, text='Готовность', text_color=self.TEXT,
+                     font=('Segoe UI', 12, 'bold'), anchor='w').pack(fill='x', padx=12, pady=(12, 6))
+        self._readiness_labels = {}
+        for key, caption in (('camera', 'Камера'), ('telegram', 'Telegram'),
+                             ('photos', 'Фото'), ('timezone', 'Пояс')):
+            label = ctk.CTkLabel(block, text=caption, text_color=self.MUTED,
+                                 font=('Segoe UI', 11), anchor='w', justify='left',
+                                 wraplength=self.NAV_WIDTH - 32)
+            label.pack(fill='x', padx=12, pady=(0, 8))
+            self._readiness_labels[key] = label
+        self._refresh_readiness()
+
+    def _refresh_readiness(self):
+        if not getattr(self, '_readiness_labels', None):
+            return
+        v = self.values()
+        host = v.get('DAHUA_HOST') or ''
+        url = v.get('CAMERA_URL', '')
+        camera = 'адрес задан' if (host or url) else 'не настроена'
+        bot = 'токен задан' if v.get('TELEGRAM_BOT_TOKEN') else 'не настроен'
+        photos = 'папка задана' if v.get('IMAGE_DIR') else 'по умолчанию'
+        tz = v.get('TIMEZONE') or 'по умолчанию'
+        for key, text in (('camera', f'Камера · {camera}'), ('telegram', f'Telegram · {bot}'),
+                          ('photos', f'Фото · {photos}'), ('timezone', f'Пояс · {tz}')):
+            self._readiness_labels[key].configure(text=text)
+
+    def _build_save_strip(self):
+        """Save рядом с полями + индикатор несохранённых изменений."""
+        strip = ctk.CTkFrame(self.form, fg_color='transparent')
+        strip.grid(row=0, column=0, sticky='ew', pady=(0, 8))
+        self._dirty_label = ctk.CTkLabel(strip, text='', text_color=theme.WARNING,
+                                        font=('Segoe UI', 11), anchor='w')
+        self._dirty_label.pack(side='left', fill='x', expand=True)
+        self.save_button = ctk.CTkButton(strip, text='Сохранить', command=self.save, width=150,
+                                         height=36, fg_color=theme.ACCENT_DEEP,
+                                         hover_color=theme.ACCENT, font=('Segoe UI', 12, 'bold'),
+                                         state='disabled')
+        focusable(self.save_button)
+        activatable(self.save_button)
+        self.save_button.pack(side='right')
 
     def _build_camera_tab(self, tab):
-        self._field(tab, 0, 'Название', 'CAMERA_NAME')
-        self._field(tab, 1, 'Адрес камеры', 'CAMERA_URL')
-        self._field(tab, 2, 'Логин', 'DAHUA_USERNAME')
-        self._field(tab, 3, 'Пароль', 'DAHUA_PASSWORD', secret=True)
-        self._check_button(tab, 4, 'Проверить камеру', check_camera)
+        # Две колонки: подключение | доступ.
+        tab.grid_columnconfigure(1, weight=1)
+        tab.grid_columnconfigure(3, weight=1)
+        self._field(tab, 0, 'Название', 'CAMERA_NAME', col=0)
+        self._field(tab, 0, 'Адрес камеры', 'CAMERA_URL', col=2)
+        self._field(tab, 1, 'Логин', 'DAHUA_USERNAME', col=0)
+        self._field(tab, 1, 'Пароль', 'DAHUA_PASSWORD', col=2, secret=True)
+        self._note(tab, 2, 'Адрес: http://IP-камеры:80/. Изменения применяются после перезапуска сервиса.')
+        camera_result = self._check_result(tab, 4, col=2)
+        self._check_button(tab, 3, 'Проверить камеру', check_camera, col=2, result=camera_result)
 
     def _build_telegram_tab(self, tab):
         self._field(tab, 0, 'Токен бота', 'TELEGRAM_BOT_TOKEN', secret=True)
@@ -306,7 +376,8 @@ class SettingsSection:
         note = ('ID через запятую. Добавьте ID получателя в оба поля; для личного чата напишите боту /start.\n'
                 'В группе команды доступны её участникам.')
         self._note(tab, 3, note)
-        self._check_button(tab, 4, 'Проверить бота', check_bot)
+        bot_result = self._check_result(tab, 5, col=1)
+        self._check_button(tab, 4, 'Проверить бота', check_bot, result=bot_result)
 
     def _build_monitoring_tab(self, tab):
         self._field(tab, 0, 'Часовой пояс', 'TIMEZONE')
@@ -371,7 +442,7 @@ class SettingsSection:
         try:
             if not self.form.winfo_exists():
                 return
-            available = event.width if event is not None else self.scroll.winfo_width()
+            available = event.width if event is not None else self.form.winfo_width()
             width = max(320, min(self.FORM_MAX_WIDTH, int(available) - 12))
             if width == self._form_width:
                 return
@@ -384,13 +455,34 @@ class SettingsSection:
             # Виджеты уже уничтожены (окно закрывается) — тихо выходим.
             return
 
-    def _field(self, parent, row, label, key, secret=False):
-        ctk.CTkLabel(parent, text=label, text_color=self.TEXT, anchor='w', width=self.LABEL_WIDTH,
-                     justify='left', font=('Segoe UI', 12)).grid(row=row, column=0, sticky='w',
-                                                                 padx=(4, 16), pady=6)
-        ctk.CTkEntry(parent, textvariable=self.variables[key], show='•' if secret else '',
-                     height=self.FIELD_HEIGHT, fg_color='#111b29', border_color='#3a4a60',
-                     text_color=self.TEXT).grid(row=row, column=1, sticky='ew', padx=(0, 4), pady=6)
+    def _field(self, parent, row, label, key, secret=False, col=0):
+        caption = ctk.CTkLabel(parent, text=label, text_color=self.TEXT, anchor='w',
+                               width=self.LABEL_WIDTH, justify='left', font=('Segoe UI', 12))
+        caption.grid(row=row, column=col, sticky='w',
+                     padx=(4, 12), pady=6)
+        caption.bind('<Button-1>', lambda _e, key=key: self._focus_field(key))
+        entry = ctk.CTkEntry(parent, textvariable=self.variables[key], show='•' if secret else '',
+                             height=self.FIELD_HEIGHT, fg_color=theme.BG,
+                             border_color=theme.CARD_ALT, text_color=self.TEXT)
+        entry.grid(row=row, column=col + 1, sticky='ew', padx=(0, 12), pady=6)
+        self._entries[key] = entry
+        # trace уже установлен в __init__ на все StringVar.
+        if secret:
+            reveal = ctk.CTkButton(parent, text='Показать', width=64, height=22,
+                                   fg_color='transparent', text_color=theme.MUTED,
+                                   font=('Segoe UI', 10),
+                                   command=lambda e=entry: self._toggle_secret(e))
+            focusable(reveal)
+            activatable(reveal)
+            reveal.grid(row=row, column=col + 1, sticky='e', padx=(0, 18), pady=6)
+
+    def _focus_field(self, key):
+        entry = self._entries.get(key)
+        if entry is not None:
+            entry.focus_set()
+
+    def _toggle_secret(self, entry):
+        entry.configure(show='' if entry.cget('show') else '•')
 
     def _note(self, parent, row, text):
         label = ctk.CTkLabel(parent, text=text, text_color=self.MUTED, justify='left', anchor='w',
@@ -399,13 +491,22 @@ class SettingsSection:
         self._notes.append(label)
         return label
 
-    def _check_button(self, parent, row, label, function):
-        button = ctk.CTkButton(parent, text=label, command=lambda: self.check(function),
-                               height=self.FIELD_HEIGHT, width=170, fg_color='#283a53', hover_color='#365172',
-                               border_width=1, border_color='#405471')
+    def _check_button(self, parent, row, label, function, col=1, result=None):
+        button = ctk.CTkButton(parent, text=label, command=lambda: self.check(function, button, result),
+                               height=self.FIELD_HEIGHT, width=170, fg_color=theme.CARD_ALT,
+                               hover_color=theme.CARD, border_width=1,
+                               border_color=theme.CARD_ALT)
+        focusable(button)
         activatable(button)
-        button.grid(row=row, column=1, sticky='e', padx=(0, 4), pady=(12, 8))
+        button.grid(row=row, column=col, sticky='e', padx=(0, 12), pady=(12, 4))
         self.check_buttons.append(button)
+
+    def _check_result(self, parent, row, col=1):
+        """Результат проверки — рядом с кнопкой, а не в подвале."""
+        label = ctk.CTkLabel(parent, text='', justify='left', anchor='w',
+                             font=('Segoe UI', 11), wraplength=280)
+        label.grid(row=row, column=col, sticky='ew', padx=(0, 12), pady=(0, 8))
+        return label
 
     def choose_photo_folder(self):
         current = self.variables['IMAGE_DIR'].get()
@@ -429,10 +530,12 @@ class SettingsSection:
         """
         if self.active_tab == 'Приложение':
             self.save_application()
+            self._mark_saved()
             return
         try:
             save_settings(self.values())
             self.status.set('Настройки сохранены. Перезапустите сервис, чтобы применить изменения.')
+            self._mark_saved()
         except ValueError as error:
             messagebox.showerror('Проверьте настройки', str(error), parent=self.root.winfo_toplevel())
         except OSError:
@@ -447,11 +550,14 @@ class SettingsSection:
             self.status.set('Не удалось сохранить параметры приложения.')
             messagebox.showerror('Не удалось сохранить', str(error), parent=self.root.winfo_toplevel())
 
-    def check(self, function):
+    def check(self, function, button=None, result=None):
         values = self.values()
         self.status.set('Проверяю подключение…')
-        for button in self.check_buttons:
-            button.configure(state='disabled')
+        if result is not None:
+            result.configure(text='Проверяю…', text_color=theme.MUTED)
+        self._active_check = (button, result)
+        for item in self.check_buttons:
+            item.configure(state='disabled')
         def worker():
             try:
                 result = function(values)
@@ -468,12 +574,25 @@ class SettingsSection:
     def poll(self):
         if self.stopped or self._closing:
             return
+        received = False
         try:
-            self.status.set(self.results.get_nowait())
-            for button in self.check_buttons:
-                button.configure(state='normal')
+            while True:
+                self.status.set(self.results.get_nowait())
+                received = True
         except queue.Empty:
             pass
+        if received:
+            for button in self.check_buttons:
+                button.configure(state='normal')
+            button, result = getattr(self, '_active_check', (None, None))
+            if button is not None:
+                button.configure(state='normal')
+            if result is not None:
+                text = self.status.get()
+                ok = 'недоступ' not in text.lower() and 'не удалось' not in text.lower() \
+                    and 'ошибк' not in text.lower() and 'проверьте' not in text.lower()
+                result.configure(text=text,
+                                 text_color=theme.SUCCESS if ok else theme.DANGER)
         self.schedule(100, self.poll)
 
     def schedule(self, delay, callback):
