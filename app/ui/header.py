@@ -199,7 +199,7 @@ class SegmentedTabs:
         self.track = ctk.CTkFrame(self.frame, fg_color='transparent', corner_radius=0,
                                   border_width=0)
         self.track.pack(fill='both', expand=True, padx=TABS_PADDING, pady=TABS_PADDING)
-        self.pill = ctk.CTkFrame(self.track, fg_color=theme.ACCENT,
+        self.pill = ctk.CTkFrame(self.track, fg_color=theme.ACCENT_DEEP,
                                  corner_radius=TABS_RADIUS, border_width=0)
 
     # ------------------------------------------------------------------

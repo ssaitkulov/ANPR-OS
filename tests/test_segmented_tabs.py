@@ -139,7 +139,7 @@ class SegmentedTabsTests(SegmentedTabsTestCase):
         self.assertEqual(round(cover[0]), round(slot[0]))
         self.assertEqual(round(cover[2]), round(slot[2]))
         # Заливку активной вкладки даёт акцент темы, у неактивной — нет.
-        self.assertEqual(self.tabs.pill.cget('fg_color'), theme.ACCENT)
+        self.assertEqual(self.tabs.pill.cget('fg_color'), theme.ACCENT_DEEP)
         for tab in self.tabs.tabs.values():
             self.assertEqual(tab.static.frame.cget('fg_color'), 'transparent')
 
@@ -172,7 +172,7 @@ class SegmentedTabsTests(SegmentedTabsTestCase):
         for name in TAB_ICONS.values():
             self.assertIn(name, available)
         self.assertEqual(self.tabs.frame.cget('fg_color'), theme.CARD)
-        self.assertEqual(self.tabs.pill.cget('fg_color'), theme.ACCENT)
+        self.assertEqual(self.tabs.pill.cget('fg_color'), theme.ACCENT_DEEP)
         self.settle()
         # Неактивная вкладка — приглушённая подпись, активную закрывает
         # подложка, поэтому её подпись совпадает с фоном контейнера.

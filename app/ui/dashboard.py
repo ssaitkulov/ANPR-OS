@@ -260,7 +260,7 @@ class MonitoringSection:
                                         font=('Segoe UI', 12, 'bold'), anchor='w')
         self.video_title.pack(side='left')
         self.video_status = ctk.CTkLabel(video_header, text='● Подключение', text_color=MUTED,
-                                         font=('Segoe UI', 10))
+                                         font=('Segoe UI', 11))
         self.video_status.pack(side='left', padx=(10, 0))
         self.video_enabled = ctk.CTkSwitch(video_header, text='Видео', width=65, height=24,
                                            switch_width=30, switch_height=16,
@@ -344,7 +344,7 @@ class MonitoringSection:
         self.graph = tk.Canvas(graph, bg=CARD, highlightthickness=0)
         self.graph.pack(fill='both', expand=True, padx=12, pady=(4, 12))
         from tkinter import font as tkfont
-        self.chart_axis_font = tkfont.Font(root=self.graph, family='Segoe UI', size=9)
+        self.chart_axis_font = tkfont.Font(root=self.graph, family='Segoe UI', size=10)
         self._chart_redraw = None
         self.graph.bind('<Configure>', self._on_graph_configure)
         self._feed_content = None
@@ -580,7 +580,7 @@ class MonitoringSection:
         for column, weekday in enumerate(('Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс')):
             grid.grid_columnconfigure(column, weight=1, uniform='day')
             ctk.CTkLabel(grid, text=weekday, height=25, text_color=MUTED,
-                         font=('Segoe UI', 10)).grid(row=0, column=column, sticky='ew')
+                         font=('Segoe UI', 11)).grid(row=0, column=column, sticky='ew')
         for row, week in enumerate(calendar.monthcalendar(self.calendar_year, self.calendar_month), start=1):
             for column, day in enumerate(week):
                 if day == 0:
@@ -588,15 +588,16 @@ class MonitoringSection:
                 value = date(self.calendar_year, self.calendar_month, day)
                 color = BLUE if value in (self.calendar_start, self.calendar_end) else (
                     '#263f64' if self.calendar_start < value < self.calendar_end else CARD)
-                ctk.CTkButton(grid, text=str(day), width=34, height=27, corner_radius=6,
-                              fg_color=color,
-                              hover_color='#344e70', text_color=TEXT,
-                              state='disabled' if value > self.today() else 'normal',
-                              command=lambda value=value: self.pick_calendar_day(value)).grid(row=row, column=column, padx=2, pady=2)
+                day_button = ctk.CTkButton(grid, text=str(day), width=34, height=27, corner_radius=6,
+                                           fg_color=color, hover_color='#344e70', text_color=TEXT,
+                                           state='disabled' if value > self.today() else 'normal',
+                                           command=lambda value=value: self.pick_calendar_day(value))
+                activatable(day_button)
+                day_button.grid(row=row, column=column, padx=2, pady=2)
         label = ('Выберите конец периода' if self.calendar_selecting_end else
                  f'{self.calendar_start:%d.%m.%Y} – {self.calendar_end:%d.%m.%Y} · Выберите даты')
         ctk.CTkLabel(self.calendar_body, text=label, height=23, text_color=MUTED,
-                     font=('Segoe UI', 10)).pack(fill='x')
+                     font=('Segoe UI', 11)).pack(fill='x')
         actions = ctk.CTkFrame(self.calendar_body, fg_color='transparent')
         actions.pack(fill='x', pady=(4, 0))
         today_button = ctk.CTkButton(actions, text='Сегодня', width=110, height=30,
@@ -680,7 +681,7 @@ class MonitoringSection:
         frame = ctk.CTkFrame(self.feed, fg_color='#202d40', corner_radius=8)
         button = ctk.CTkButton(frame, text='Нет\nфото', width=86, height=72,
                                fg_color='#34445a', hover_color='#41536c',
-                               text_color=MUTED, font=('Segoe UI', 10), state='disabled')
+                               text_color=MUTED, font=('Segoe UI', 11), state='disabled')
         button.pack(side='left', padx=8, pady=8)
         details = ctk.CTkFrame(frame, fg_color='transparent')
         details.pack(side='left', fill='x', expand=True, padx=(0, 8), pady=6)
