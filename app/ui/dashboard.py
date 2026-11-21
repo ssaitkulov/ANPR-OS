@@ -678,13 +678,8 @@ class MonitoringSection:
                 label = 'Начало выбрано. Укажите конец.'
             else:
                 label = f'{self.calendar_start:%d.%m.%Y} – {self.calendar_end:%d.%m.%Y}'
-        else:
-            label = 'Клик по дню применит дату'
-        ctk.CTkLabel(self.calendar_body, text=label, height=20, text_color=TEXT,
-                     font=('Segoe UI', 11), anchor='w').pack(fill='x')
-        ctk.CTkLabel(self.calendar_body, text='Будущие даты недоступны',
-                     height=18, text_color=MUTED,
-                     font=('Segoe UI', 10), anchor='w').pack(fill='x')
+            ctk.CTkLabel(self.calendar_body, text=label, height=20, text_color=TEXT,
+                         font=('Segoe UI', 11), anchor='w').pack(fill='x')
         mode_row = ctk.CTkFrame(self.calendar_body, fg_color='transparent')
         mode_row.pack(fill='x', pady=(4, 0))
         mode = ctk.CTkSegmentedButton(mode_row, values=['Один день', 'Диапазон'], height=26,
