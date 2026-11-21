@@ -454,7 +454,8 @@ class StatusChip:
         self.state = state
         color = state.get('color') or theme.MUTED
         text = state.get('short') or state.get('label', '—')
-        self.value.configure(text=text or '—')
+        if self.value.cget('text') != (text or '—'):
+            self.value.configure(text=text or '—')
         self.icon.set_color(color)
         text = f'{self.caption}: {state.get("label", "—")}'
         detail = str(state.get('detail') or '').strip()
@@ -657,7 +658,7 @@ class SystemHeader:
     # ------------------------------------------------------------------
     # Ширина
     # ------------------------------------------------------------------
-    def _fit_width(self, _event=None):
+    def _fit_width(self, event=None):
         """Подогнать шапку под ширину окна.
 
         Шапка компактна по построению: у индикаторов нет названий и
@@ -668,7 +669,12 @@ class SystemHeader:
         Пересчёт защищён от повторного входа: `update_idletasks()` внутри
         обрабатывает и события Configure, поэтому без защиты шапка
         пересчитывала бы саму себя до переполнения стека.
+
+        Configure приходит и от детей overlay: без проверки каждый их ресайз
+        пересчитывал бы шапку и вызывал update_idletasks() при обработке событий.
         """
+        if event is not None and event.widget is not self.overlay:
+            return
         if self.closed:
             return
         if self._fitting:

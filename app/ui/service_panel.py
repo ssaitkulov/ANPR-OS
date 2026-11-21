@@ -73,8 +73,11 @@ class DetailRows:
         """Обновить строки (список пар «подпись, значение»)."""
         for index, (caption, value) in enumerate(rows):
             pair = self._ensure(index)
-            pair[0].configure(text=caption)
-            pair[1].configure(text=value or '—')
+            shown = value or '—'
+            if pair[0].cget('text') != caption:
+                pair[0].configure(text=caption)
+            if pair[1].cget('text') != shown:
+                pair[1].configure(text=shown)
             pair[0].grid(row=index, column=0, sticky='w', padx=(0, 10), pady=(6, 4))
             pair[1].grid(row=index, column=1, sticky='ew', pady=(6, 4))
         for index in range(len(rows), len(self._rows)):
@@ -148,6 +151,7 @@ class ServicePanel:
         self.closed = False
         self._anchor = None
         self._progress_job = None
+        self._last_layout = None
         self._token = object()
 
         self.motion = motion.Motion(overlay)
@@ -454,18 +458,22 @@ class ServicePanel:
             if other_key != key and other.frame.winfo_manager():
                 other.frame.place_forget()
         mode = self.modes[key]
+        # Сначала обновляем layout: после DetailRows.update() reqheight ещё
+        # stale, и сравнение со старым размером пропускало перекладку.
         try:
             self.frame.update_idletasks()
         except tk.TclError:
             pass
         content_height = mode.frame.winfo_reqheight()
         head_height = self.head.winfo_reqheight()
-        try:
-            self.content.configure(height=content_height)
-            self.body.configure(width=PANEL_WIDTH - 2 * PANEL_PADDING,
-                                height=head_height + content_height + 6)
-        except tk.TclError:
-            pass
+        if (content_height, head_height) != self._last_layout:
+            try:
+                self.content.configure(height=content_height)
+                self.body.configure(width=PANEL_WIDTH - 2 * PANEL_PADDING,
+                                    height=head_height + content_height + 6)
+            except tk.TclError:
+                pass
+            self._last_layout = (content_height, head_height)
         if not mode.frame.winfo_manager():
             mode.frame.place(x=0, y=0, relwidth=1)
 

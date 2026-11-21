@@ -25,6 +25,7 @@ from app.core.paths import PROJECT_ROOT
 from app.core import safe_mode
 from app.ui.tklife import cancel_pending_scripts
 from app.ui import theme
+from app.ui import perf
 from app.ui.widgets import activatable, bind_widget, focusable
 
 BASE = PROJECT_ROOT
@@ -60,6 +61,10 @@ def open_database(path):
 
 
 FEED_PAGE = 30
+#: Частота опроса очередей: 20 Гц будили Tk даже когда данных нет.
+POLL_INTERVAL_MS = 100
+#: Поток карточек: дальше этого числа виджеты и фото не растут бесконечно.
+MAX_FEED_ROWS = 300
 #: Максимальная длина периода, дней. Защита от полного скана БД раз в 2 с.
 MAX_PERIOD_DAYS = 366
 
@@ -103,9 +108,15 @@ def _aggregate_stats(conn, day, end_day):
 
 
 def _cached_aggregates(conn, path, day, end_day):
-    """Кэш для закрытого периода; новые строки (MAX(id)) его сбрасывают."""
+    """Кэш агрегатов; версия учитывает и новые, и изменённые строки.
+
+    MAX(id) ловит новые проезды, COUNT(*) — изменения существующих (правка
+    номера/направления не меняет id, но меняет агрегаты). Благодаря этому
+    кэш можно применять и к текущему дню.
+    """
     key = (str(path), day, end_day)
-    version = conn.execute('SELECT MAX(id) FROM events').fetchone()[0] or 0
+    version = conn.execute('SELECT MAX(id), COUNT(*) FROM events').fetchone()
+    version = (version[0] or 0, version[1] or 0)
     now = time.monotonic()
     with _AGG_CACHE_LOCK:
         cached = _AGG_CACHE.get(key)
@@ -132,16 +143,16 @@ def load_dashboard(path, day, end_day=None, plate_query='', recent_limit=200, as
     end_day = end_day or day
     if end_day < day:
         raise ValueError('Invalid date range')
+    # as_of остался в API для совместимости: кэш инвалидируется по MAX(id).
     as_of = as_of or date.today()
     if isinstance(as_of, str):
         as_of = date.fromisoformat(as_of)
     with closing(open_database(path)) as conn:
         conn.create_function('iso_hour', 1, _iso_hour)
         conn.create_function('normplate', 1, normalize_plate)
-        if end_day < as_of.isoformat():
-            total, unique, hours, counts = _cached_aggregates(conn, path, day, end_day)
-        else:
-            total, unique, hours, counts = _aggregate_stats(conn, day, end_day)
+        # Кэш сбрасывается по MAX(id), поэтому подходит и для «сегодня»:
+        # новый проезд сразу меняет version и агрегаты пересчитываются.
+        total, unique, hours, counts = _cached_aggregates(conn, path, day, end_day)
         query = normalize_plate(plate_query)
         # recent использует индекс (captured_at): при длинном периоде
         # NOT INDEXED здесь давал бы полный скан и сортировку каждые 2 с.
@@ -186,6 +197,32 @@ def archived_photo(path, event_id):
         return None
 
 
+def archived_photos(path, event_ids):
+    """Одно соединение на пачку карточек вместо соединения на каждую."""
+    if not event_ids:
+        return {}
+    result = {}
+    try:
+        with closing(open_database(path)) as conn:
+            marks = ','.join('?' * len(event_ids))
+            rows = conn.execute(f'''SELECT e.id, p.path FROM events e
+                                   JOIN passage_photo_paths p ON p.captured_at=e.captured_at AND p.plate=e.plate
+                                   WHERE e.id IN ({marks})''', tuple(event_ids)).fetchall()
+    except (OSError, sqlite3.Error):
+        return {}
+    # Ошибка одного снимка не должна лишать фото остальные карточки пачки.
+    for event_id, stored in rows:
+        if event_id in result or not stored:
+            continue
+        try:
+            photo = app_paths.resolve_photo_path(stored)
+            if photo is not None:
+                result[event_id] = photo.read_bytes()
+        except OSError:
+            continue
+    return result
+
+
 class MonitoringSection:
     """Раздел «Мониторинг»: видео, показатели, статистика и лента проездов.
 
@@ -221,6 +258,7 @@ class MonitoringSection:
         self.video_size = (640, 360)
         self._video_label_size = self.video_size
         self._fullscreen_size = None
+        self._video_images = {}
         self.image = None
         self.stream_selection = (0, 0, True)
         self.stream_changed = threading.Event()
@@ -375,7 +413,7 @@ class MonitoringSection:
                         threading.Thread(target=self.video_worker, daemon=True)]
         for thread in self.threads:
             thread.start()
-        self.schedule(100, self.poll)
+        self.schedule(POLL_INTERVAL_MS, self.poll)
 
     def _camera_title(self):
         """Заголовок блока видео: название камеры или «Прямой эфир»."""
@@ -418,6 +456,44 @@ class MonitoringSection:
             return image
         return ImageOps.contain(image, (width, height), Image.Resampling.LANCZOS)
 
+    def _video_ctk_image(self, fitted):
+        """Один CTkImage на размер: обновляем пиксели, не создавая PhotoImage за кадр."""
+        size = fitted.size
+        image = self._video_images.get(size)
+        if image is None:
+            # При ресайзе создаётся новый размер — старые не должны копиться.
+            if len(self._video_images) >= 3:
+                self._video_images.pop(next(iter(self._video_images)))
+            image = ctk.CTkImage(light_image=fitted, dark_image=fitted, size=size)
+            self._video_images[size] = image
+            return image
+        # configure(light_image=...) выбрасывает кэш масштабированных PhotoImage —
+        # это и есть новый Tk-объект на каждый кадр. Пишем пиксели в существующий.
+        caches = (getattr(image, '_scaled_light_photo_images', None),
+                  getattr(image, '_scaled_dark_photo_images', None))
+        updated = False
+        for cache in caches:
+            if not cache:
+                continue
+            for photo in cache.values():
+                try:
+                    source = fitted
+                    if (photo.width(), photo.height()) != fitted.size:
+                        source = fitted.resize((photo.width(), photo.height()),
+                                               Image.Resampling.BILINEAR)
+                    photo.paste(source)
+                    photo.image = source
+                    updated = True
+                except Exception:  # смена внутреннего API CTk — откат ниже
+                    break
+        if updated:
+            image._light_image = fitted
+            image._dark_image = fitted
+            image.configure(size=size)  # без light_image кэш не сбрасывается
+        else:
+            image.configure(light_image=fitted, dark_image=fitted, size=size)
+        return image
+
     def card(self, parent, row, col, **kwargs):
         frame=ctk.CTkFrame(parent, fg_color=CARD, border_color=BORDER, border_width=1, corner_radius=10); frame.grid(row=row, column=col, sticky='nsew', **kwargs); return frame
 
@@ -428,6 +504,7 @@ class MonitoringSection:
         """Запланировать отложенный вызов с учётом его идентификатора."""
         if self._closing:
             return None
+        callback = perf.timed(f'dashboard.schedule:{getattr(callback, "__qualname__", "?")}', callback)
         holder = {}
 
         def run():
@@ -449,6 +526,7 @@ class MonitoringSection:
         """Отложенный вызов сразу после обработки событий."""
         if self._closing:
             return None
+        callback = perf.timed(f'dashboard.idle:{getattr(callback, "__qualname__", "?")}', callback)
         holder = {}
 
         def run():
@@ -917,7 +995,7 @@ class MonitoringSection:
             else:
                 message = 'Проездов за выбранный период нет\nПоявятся после распознавания номера'
             self._feed_message(message)
-        elif len(rows) > self.visible_count:
+        elif len(rows) > self.visible_count and self.visible_count < MAX_FEED_ROWS:
             more = getattr(self, '_feed_more_button', None)
             if more is None:
                 more = ctk.CTkButton(self.feed, text='Показать ещё', height=30,
@@ -931,7 +1009,7 @@ class MonitoringSection:
                 more.grid_forget()
 
     def show_more_passages(self):
-        self.visible_count += FEED_PAGE
+        self.visible_count = min(self.visible_count + FEED_PAGE, MAX_FEED_ROWS)
         self.render_passages(self._feed_content or ())
         self.data_changed.set()
 
@@ -978,12 +1056,41 @@ class MonitoringSection:
         activatable(close)
         close.pack(anchor='ne', padx=16, pady=12)
         label = ctk.CTkLabel(window, text=''); label.pack(fill='both', expand=True, padx=12, pady=(0, 12))
+        state = {'size': None, 'job': None}
+
         def resize(_=None):
+            # Configure приходит пачками при перетаскивании окна: одна
+            # перерисовка на конечный размер, а не тяжёлый LANCZOS на каждый.
             w, h = label.winfo_width(), label.winfo_height()
-            if w < 2 or h < 2: return
-            fitted = ImageOps.contain(image, (w, h), Image.Resampling.LANCZOS)
-            label.photo = ctk.CTkImage(light_image=fitted, dark_image=fitted, size=fitted.size)
-            label.configure(image=label.photo)
+            if w < 2 or h < 2:
+                return
+            size = (w, h)
+            if state['size'] == size:
+                return
+            state['size'] = size
+            if state['job'] is not None:
+                try:
+                    window.after_cancel(state['job'])
+                except tk.TclError:
+                    pass
+                state['job'] = None
+
+            def apply():
+                state['job'] = None
+                try:
+                    if size != (label.winfo_width(), label.winfo_height()):
+                        return
+                    fitted = ImageOps.contain(image, size, Image.Resampling.LANCZOS)
+                    label.photo = ctk.CTkImage(light_image=fitted, dark_image=fitted, size=fitted.size)
+                    label.configure(image=label.photo)
+                except tk.TclError:
+                    pass
+
+            try:
+                state['job'] = window.after_idle(apply)
+            except tk.TclError:
+                pass
+
         label.bind('<Configure>', resize)
 
     def data_worker(self):
@@ -1011,13 +1118,16 @@ class MonitoringSection:
                     current_ids = [row[0] for row in data['recent'][:self.visible_count]]
                     current_id_set = set(current_ids)
                     checked_at = {key: value for key, value in checked_at.items() if key in current_id_set}
-                    for event_id in current_ids:
+                    missing = [event_id for event_id in current_ids
+                               if event_id not in self.photo_bytes
+                               and now - checked_at.get(event_id, -100) >= 5]
+                    local = archived_photos(app_paths.db_file(), missing)
+                    for event_id in missing:
                         if (self.stop.is_set() or generation != self.period_selection[0]
                                 or search_generation != self.search_selection[0]): break
-                        if event_id in self.photo_bytes or now - checked_at.get(event_id, -100) < 5: continue
                         checked_at[event_id] = now
                         try:
-                            photo = archived_photo(app_paths.db_file(), event_id)
+                            photo = local.get(event_id)
                             if photo is None:
                                 response = session.get(f'http://127.0.0.1:18749/passages/{event_id}/photo', timeout=1)
                                 if response.ok and response.headers.get('Content-Type', '').startswith('image/'):
@@ -1127,6 +1237,7 @@ class MonitoringSection:
         self.chart_interval = None
         self.image = None
         self.fullscreen_image = None
+        self._video_images.clear()
 
     def set_video_status(self, state):
         text, color = {
@@ -1136,7 +1247,8 @@ class MonitoringSection:
             'disabled': ('● Выключен', MUTED),
             'paused': ('● Пауза', MUTED),
         }[state]
-        self.video_status.configure(text=text, text_color=color)
+        if self.video_status.cget('text') != text:
+            self.video_status.configure(text=text, text_color=color)
 
     def show_video_message(self, message):
         # Clear Tk's image before dropping the CTkImage reference.
@@ -1146,6 +1258,7 @@ class MonitoringSection:
         except tk.TclError:
             pass
         self.image = None
+        self._video_images.clear()
         if self.fullscreen_label is not None:
             try:
                 self.fullscreen_label._label.configure(image='')
@@ -1178,11 +1291,22 @@ class MonitoringSection:
 
     def close_video_fullscreen(self, _event=None):
         window = self.fullscreen_window
+        label = self.fullscreen_label
+        image = self.fullscreen_image
+        # CTkLabel.destroy() не снимает _update_image с CTkImage — мёртвый
+        # callback дёргается при следующем configure() и роняет poll().
+        if label is not None and image is not None:
+            try:
+                image.remove_configure_callback(label._update_image)
+            except (ValueError, AttributeError, tk.TclError):
+                pass
         self.fullscreen_window = None
         self.fullscreen_label = None
         if window is not None:
             self._close_window(window)
         self.fullscreen_image = None
+        if self._fullscreen_size:
+            self._video_images.pop(self._fullscreen_size, None)
         self._fullscreen_size = None
         self._on_video_configure()
 
@@ -1321,18 +1445,22 @@ class MonitoringSection:
                 self.set_video_status('online')
                 if self.video_label.winfo_ismapped():
                     fitted = self._fit_video(value, *self._video_label_size)
-                    image = ctk.CTkImage(light_image=fitted, dark_image=fitted, size=fitted.size)
+                    image = self._video_ctk_image(fitted)
                     self.video_label.configure(image=image, text='')
                     self.image = image
                 if self._fullscreen_size is not None and self.fullscreen_label is not None:
                     fitted = self._fit_video(value, *self._fullscreen_size)
-                    image = ctk.CTkImage(light_image=fitted, dark_image=fitted, size=fitted.size)
+                    image = self._video_ctk_image(fitted)
                     self.fullscreen_label.configure(image=image, text='')
                     self.fullscreen_image = image
             else:
                 self.set_video_status('offline')
                 self.show_video_message(value)
-        except queue.Empty: pass
+        except queue.Empty:
+            pass
+        except tk.TclError:
+            # Мёртвый Tk-виджет не должен убивать весь цикл опроса.
+            pass
         try:
             generation, search_generation, period, kind, data=self.results.get_nowait()
             today = self.today()
@@ -1376,7 +1504,7 @@ class MonitoringSection:
                     self.photo_bytes[event_id] = photo
                     self.set_photo(event_id, photo)
         except queue.Empty: pass
-        self.schedule(50, self.poll)
+        self.schedule(POLL_INTERVAL_MS, self.poll)
 
     def close(self):
         """Закрыть раздел (автономный режим): отменить вызовы и остановить потоки."""

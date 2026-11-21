@@ -43,6 +43,7 @@ from app.core import window_state
 from app.core.paths import ASSETS_DIR, log_dir
 from app.ui import status as ui_status
 from app.ui import theme
+from app.ui import perf
 from app.ui.header import SystemHeader
 from app.ui.tklife import cancel_pending_scripts
 
@@ -108,6 +109,7 @@ class AppShell:
         root.protocol('WM_DELETE_WINDOW', self.hide)
         root.bind('<Unmap>', self._on_unmap)
         root.bind('<Configure>', self._remember_geometry)
+        perf.heartbeat(root)
         root.minsize(*window_state.MIN_SIZE)
 
         self.header = SystemHeader(root, root, self)
@@ -239,7 +241,8 @@ class AppShell:
             header.set_state('service', service_state)
             header.set_state('camera', camera_state)
             header.set_state('telegram', telegram_state)
-            header.refresh_panel()
+            if header.details.is_open:
+                header.refresh_panel()
 
     def _settings(self):
         """Настройки из `.env` с коротким кэшем (чтение файла не на каждый кадр)."""
@@ -291,7 +294,9 @@ class AppShell:
         service_rows.append(('Последняя проверка',
                               self._last_check.strftime('%H:%M:%S') if self._last_check else 'Нет данных'))
         service_rows.append(('Последняя ошибка', self._last_error or 'Нет ошибок'))
-        process_alive = self._service_process_alive() if not running else True
+        panel = getattr(getattr(self, 'header', None), 'details', None)
+        panel_open = bool(panel and panel.is_open)
+        process_alive = self._service_process_alive() if not running and panel_open else True
 
         # --- камера ---
         camera_rows = []
@@ -725,6 +730,7 @@ class AppShell:
         """
         if self.closing:
             return None
+        callback = perf.timed(f'shell.schedule:{getattr(callback, "__qualname__", "?")}', callback)
         holder = {}
 
         def run():
@@ -746,6 +752,7 @@ class AppShell:
         """То же, что `schedule`, но вызов сразу после обработки событий."""
         if self.closing:
             return None
+        callback = perf.timed(f'shell.idle:{getattr(callback, "__qualname__", "?")}', callback)
         holder = {}
 
         def run():
@@ -789,8 +796,10 @@ class AppShell:
         return (self.root.winfo_vrootx(), self.root.winfo_vrooty(),
                 self.root.winfo_vrootwidth(), self.root.winfo_vrootheight())
 
-    def _remember_geometry(self, _event=None):
+    def _remember_geometry(self, event=None):
         """Запомнить геометрию один раз после пакета Configure."""
+        if event is not None and event.widget is not self.root:
+            return
         self.cancel_after(self._geometry_job)
         self._geometry_job = self.schedule_idle(self._save_normal_geometry)
 

@@ -101,7 +101,7 @@ app = FastAPI(title="ANPR FAYZ", version="1.0", lifespan=lifespan)
 
 @app.get("/health")
 def health():
-    return {"service": "anpr-fayz", "pid": os.getpid(), "status": "ok" if _worker and _worker.is_alive() else "worker_stopped", "camera": M.DAHUA_HOST, "time": M.now_local().isoformat(), "started_at": started_at, "protocol": auth.PROTOCOL_VERSION, "shutdown_auth": "token", **M.RUNTIME}
+    return {"service": "anpr-fayz", "pid": os.getpid(), "status": "ok" if _worker and _worker.is_alive() else "worker_stopped", "camera": M.DAHUA_HOST, "time": M.now_local().isoformat(), "started_at": started_at, "protocol": auth.PROTOCOL_VERSION, "shutdown_auth": "token", **M.snapshot_runtime()}
 
 
 @app.get("/events")
@@ -139,12 +139,13 @@ def passage_photo(event_id: int):
 def status():
     day = M.today_str()
     passages = M.STORE.day_passages(day)
+    snapshot = M.snapshot_state(state)
     return {"today": day, "entries": len(passages), **M.STORE.stats(),
             "outbox": M.STORE.outbox_stats(),
             "unique_plates": len({row.get("plate") for row in passages}),
             "subscribers": len(M.load_subscribers()),
-            "last_event_time": state.get("last_event_time", ""),
-            "last_rec_no": state.get("last_rec_no", 0),
+            "last_event_time": snapshot.get("last_event_time", ""),
+            "last_rec_no": snapshot.get("last_rec_no", 0),
             "uptime_sec": int(time.time() - started_at)}
 
 
@@ -157,7 +158,7 @@ def entries_today():
 
 @app.post("/report-now")
 def report_now(background_tasks: BackgroundTasks):
-    text = M.build_report(state)
+    text = M.build_report(M.snapshot_state(state))
 
     def _send():
         M.telegram_send(text, kind='report')

@@ -280,5 +280,32 @@ class BackgroundWorkerTests(StoreCase):
         self.assertEqual(self.store.stats()['pending_messages'], 0)
 
 
+class StateSnapshotTests(unittest.TestCase):
+    """HTTP-эндпоинты не должны читать живые словари потоков."""
+
+    def test_snapshot_runtime_copies_nested_dicts(self):
+        snapshot = bot.snapshot_runtime()
+        snapshot['telegram_delivery']['ok'] = True
+        self.assertFalse(bot.RUNTIME['telegram_delivery']['ok'])
+
+    def test_snapshot_state_is_a_copy(self):
+        state = {'last_rec_no': 7}
+        snapshot = bot.snapshot_state(state)
+        snapshot['last_rec_no'] = 9
+        self.assertEqual(state['last_rec_no'], 7)
+
+
+class NonBlockingOutboxTests(StoreCase):
+    """Камера не должна ждать сетевой таймаут чужой доставки."""
+
+    def test_nonblocking_flush_skips_while_another_flush_holds_the_lock(self):
+        with patch.object(bot, '_flush_missed_messages', return_value=True) as flush:
+            with bot._outbox_lock:
+                self.assertFalse(bot.flush_missed_messages_nonblocking())
+                flush.assert_not_called()
+            self.assertTrue(bot.flush_missed_messages_nonblocking())
+            flush.assert_called_once_with()
+
+
 if __name__ == '__main__':
     unittest.main()

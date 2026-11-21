@@ -22,6 +22,7 @@ import tkinter as tk
 
 from app.core.paths import ui_preferences_file
 from app.ui import theme
+from app.ui import perf
 
 
 def place_configure_scaled(widget, **kwargs):
@@ -107,6 +108,7 @@ class Motion:
         self._jobs.discard(identifier)
         if not self.alive:
             return
+        callback = perf.timed(f'motion:{getattr(callback, "__qualname__", "?")}', callback)
         try:
             callback()
         except tk.TclError:

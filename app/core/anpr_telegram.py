@@ -155,6 +155,16 @@ SHORT_ERROR_LEN = 120
 #: подряд молчания считать уже обрывом связи.
 CONNECTION_STALE_SEC = 90
 
+RUNTIME_LOCK = threading.RLock()
+
+
+def snapshot_runtime() -> dict:
+    """Снимок для HTTP/UI: читать RUNTIME напрямую небезопасно."""
+    with RUNTIME_LOCK:
+        return {key: dict(value) if isinstance(value, dict) else value
+                for key, value in RUNTIME.items()}
+
+
 RUNTIME = {'camera_message': 'подключаюсь…', 'telegram_message': 'ожидаю первую отправку.',
            'last_camera_data': '',
            # Счётчики последней рассылки: их читает приёмочная проверка.
@@ -276,6 +286,12 @@ _state_save_lock = threading.RLock()
 STATE_LOCK = _state_save_lock
 
 
+def snapshot_state(state: dict) -> dict:
+    """Неглубокий снимок состояния под локом: читать живой dict из HTTP опасно."""
+    with STATE_LOCK:
+        return dict(state)
+
+
 def trim_state(state: dict) -> None:
     """Ограничить JSON-зеркало последними днями: постоянный архив лежит в SQLite."""
     days = state.get('days')
@@ -366,27 +382,28 @@ def _note_telegram_contact(ok: bool, error: str = '', keep_state: bool = False) 
     дольше CONNECTION_STALE_SEC: одна неудачная попытка связи не роняет
     индикатор, молчание Telegram — роняет.
     """
-    state = RUNTIME['telegram_connection']
-    now = now_local()
-    if keep_state:
-        state['error'] = _short_error(error)
-        state['failed_at'] = now.isoformat()
-        last_ok = str(state.get('at') or '')
-        age = None
-        if last_ok:
-            try:
-                age = (now - datetime.fromisoformat(last_ok)).total_seconds()
-            except (TypeError, ValueError):
-                age = None
-        if not state.get('ok') or age is None or age > CONNECTION_STALE_SEC:
-            state['ok'] = False
-        return
-    RUNTIME['telegram_connection'] = {
-        'ok': bool(ok),
-        'at': now.isoformat() if ok else state.get('at', ''),
-        'failed_at': '' if ok else now.isoformat(),
-        'error': '' if ok else _short_error(error),
-    }
+    with RUNTIME_LOCK:
+        state = RUNTIME['telegram_connection']
+        now = now_local()
+        if keep_state:
+            state['error'] = _short_error(error)
+            state['failed_at'] = now.isoformat()
+            last_ok = str(state.get('at') or '')
+            age = None
+            if last_ok:
+                try:
+                    age = (now - datetime.fromisoformat(last_ok)).total_seconds()
+                except (TypeError, ValueError):
+                    age = None
+            if not state.get('ok') or age is None or age > CONNECTION_STALE_SEC:
+                state['ok'] = False
+            return
+        RUNTIME['telegram_connection'] = {
+            'ok': bool(ok),
+            'at': now.isoformat() if ok else state.get('at', ''),
+            'failed_at': '' if ok else now.isoformat(),
+            'error': '' if ok else _short_error(error),
+        }
 
 
 def _telegram_call(kind: str, url: str, *, affects_connection: bool = True, **kwargs):
@@ -440,13 +457,14 @@ def _publish_delivery(delivered: list, failed: list, elapsed: float | None = Non
         # прежнее значение счётчиков сохраняется.
         return
     ok = bool(delivered)
-    RUNTIME['telegram_delivery'] = {
-        'ok': ok,
-        'delivered': len(delivered),
-        'failed': len(failed),
-        'at': now_local().isoformat(),
-    }
-    RUNTIME['telegram_message'] = _delivery_message(ok, elapsed)
+    with RUNTIME_LOCK:
+        RUNTIME['telegram_delivery'] = {
+            'ok': ok,
+            'delivered': len(delivered),
+            'failed': len(failed),
+            'at': now_local().isoformat(),
+        }
+        RUNTIME['telegram_message'] = _delivery_message(ok, elapsed)
 
 
 def _set_delivery(delivered: list, failed: list) -> None:
@@ -560,6 +578,20 @@ def flush_missed_messages() -> bool:
     """Доставить накопленные сообщения. Замок не даёт двум потокам отправить одно и то же."""
     with _outbox_lock:
         return _flush_missed_messages()
+
+
+def flush_missed_messages_nonblocking() -> bool:
+    """Не ждать уже идущую доставку: вызов из потока приёма камеры.
+
+    Отправка держит замок во время сетевых таймаутов, поэтому камера не должна
+    блокироваться на ней — доставку в это время ведёт outbox_worker.
+    """
+    if not _outbox_lock.acquire(blocking=False):
+        return False
+    try:
+        return _flush_missed_messages()
+    finally:
+        _outbox_lock.release()
 
 
 def _mark_failed(row_id, error) -> str:
@@ -820,7 +852,8 @@ def send_entry_notification(rec: dict, images, dry_run: bool = False) -> None:
         bad = len(_LAST_DELIVERY.get('failed') or [])
     else:
         good, bad = (1, 0) if ok else (0, 1)
-    RUNTIME['telegram_delivery'] = {'ok': ok, 'delivered': good, 'failed': bad, 'at': delivered_at}
+    with RUNTIME_LOCK:
+        RUNTIME['telegram_delivery'] = {'ok': ok, 'delivered': good, 'failed': bad, 'at': delivered_at}
     if ok and bad:
         EVENTS.add('telegram_partial',
                    f'Доставлено чатам: {good}, в очереди (Telegram недоступен): {bad}', delivered_at)
@@ -829,7 +862,8 @@ def send_entry_notification(rec: dict, images, dry_run: bool = False) -> None:
     else:
         EVENTS.add('telegram_error', 'Ошибка отправки Telegram', delivered_at)
     elapsed = time.monotonic() - send_started
-    RUNTIME['telegram_message'] = _delivery_message(ok, elapsed)
+    with RUNTIME_LOCK:
+        RUNTIME['telegram_message'] = _delivery_message(ok, elapsed)
     print(f'[delivery] started={rec.get("iso", "")} duration_seconds={elapsed:.3f} success={ok}', file=sys.stderr)
     print(f"[telegram] въезд отправлен: {ok}", file=sys.stderr)
     # Недоставленные чаты уже получили текст в очередь внутри telegram_send_* — здесь дублировать нельзя.
@@ -1822,7 +1856,7 @@ def consume_camera_stream(response, state, dry_run=False, image_wait=1.0, no_ima
                 # Очередь недоставленных проверяем не чаще раза в 5 с, а не в каждом чанке.
                 # Основную доставку ведёт отдельный поток outbox_worker — она не зависит от камеры.
                 next_outbox_check = time.monotonic() + 5
-                flush_missed_messages()
+                flush_missed_messages_nonblocking()
             # Отчёт за день отправляет отдельный поток — здесь только приём событий.
     finally:
         chunks.close()
