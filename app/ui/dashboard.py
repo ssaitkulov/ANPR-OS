@@ -613,13 +613,14 @@ class MonitoringSection:
                 pass
 
     def _fit_date_window(self):
+        """Высота окна = высота содержимого, без пустого запаса."""
         window = self.date_window
         if window is None:
             return
         try:
-            needed = self.calendar_body.winfo_reqheight() + 24
+            needed = self.calendar_body.winfo_reqheight() + 28
             scale = window._reverse_widget_scaling(1)
-            height = max(430, int(needed / scale))
+            height = max(280, int(needed / scale))
             window.geometry(f'310x{height}')
         except (tk.TclError, AttributeError, TypeError):
             pass
@@ -645,7 +646,7 @@ class MonitoringSection:
         ctk.CTkLabel(top, text=f'{months[self.calendar_month - 1]} {self.calendar_year}',
                      font=('Segoe UI', 13, 'bold'), text_color=TEXT).pack(expand=True)
         grid = ctk.CTkFrame(self.calendar_body, fg_color='transparent')
-        grid.pack(fill='both', expand=True)
+        grid.pack(fill='x')
         for column, weekday in enumerate(('Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс')):
             grid.grid_columnconfigure(column, weight=1, uniform='day')
             ctk.CTkLabel(grid, text=weekday, height=25, text_color=MUTED,
@@ -681,7 +682,7 @@ class MonitoringSection:
             ctk.CTkLabel(self.calendar_body, text=label, height=20, text_color=TEXT,
                          font=('Segoe UI', 11), anchor='w').pack(fill='x')
         mode_row = ctk.CTkFrame(self.calendar_body, fg_color='transparent')
-        mode_row.pack(fill='x', pady=(4, 0))
+        mode_row.pack(fill='x', pady=(8, 0))
         mode = ctk.CTkSegmentedButton(mode_row, values=['Один день', 'Диапазон'], height=26,
                                       selected_color=theme.ACCENT_DEEP, selected_hover_color=BLUE,
                                       command=self._set_calendar_mode)
@@ -690,7 +691,7 @@ class MonitoringSection:
         activatable(mode, action=self._toggle_calendar_mode)
         mode.pack(side='left')
         presets = ctk.CTkFrame(self.calendar_body, fg_color='transparent')
-        presets.pack(fill='x', pady=(2, 0))
+        presets.pack(fill='x', pady=(4, 0))
         for text, days in (('Сегодня', 0), ('Вчера', 1), ('7 дней', 7), ('30 дней', 30)):
             button = ctk.CTkButton(presets, text=text, width=70, height=26, fg_color='#263b57',
                                    command=lambda days=days: self._select_preset(days))
