@@ -23,6 +23,9 @@ copy .env.example .env                          # Windows: copy, Linux: cp
 Либо вручную: `python app.py` — сервис поднимается на `127.0.0.1:18749`,
 а окно приложения запускается из `run.bat`.
 
+Для установки на **рабочий ПК без интернета** — [`docs/DEPLOY.md`](docs/DEPLOY.md):
+офлайн-установка из `deploy/wheelhouse/`, проверка `scripts/verify_install.py`.
+
 Сборка пакета (не обязательна — сервис работает прямо из папки):
 
 ```bash
