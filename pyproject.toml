@@ -38,7 +38,7 @@ dependencies = [
 ]
 
 [project.urls]
-Documentation = "https://github.com/evrika/anpr-os-fayz#readme"
+Documentation = "https://github.com/ssaitkulov/ANPR-OS#readme"
 
 [project.scripts]
 anpr-service = "app.services.control:start"

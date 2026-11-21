@@ -334,9 +334,21 @@ python -c "import sqlite3;c=sqlite3.connect('data/anpr.sqlite3');c.execute(\"upd
 ## 6. Обновление зависимостей
 
 1. Проверенный набор пакетов зафиксирован в `requirements-lock.txt` (Python 3.14.7, Windows 11).
-2. Обновление одного пакета: изменить версию в `requirements.txt` **и** в `requirements-lock.txt`,
-   затем `python -m pip install -r requirements.txt && python -m pytest -q`.
-3. Только после зелёных тестов обновлять рабочую машину.
-4. Не вызывайте `pip install -U` без правки файлов: без верхних границ сборка «поедет» при
+   Ставят именно его: `run.bat` и CI используют lock, а не `requirements.txt`.
+2. Обновление одного пакета: изменить версию в `requirements.txt`, `requirements-lock.txt`
+   и `pyproject.toml`, затем проверить:
+   ```bash
+   python -m pip install -r requirements-lock.txt
+   python -m pip install -e ".[dev]"        # pytest из extras pyproject.toml
+   python scripts/check_lock.py
+   python -m pytest -q
+   ```
+3. Пересобрать lock под другую версию Python (3.11–3.13) можно в чистом venv:
+   `pip install -r requirements.txt`, затем `pip freeze > requirements-lock.txt`, после чего
+   сверить файлы через `scripts/check_lock.py`. Не добавляйте в lock пакеты, которые не
+   выводятся из прямых зависимостей (например `uvicorn[standard]` не используется —
+   в проекте обычный `uvicorn`).
+4. Только после зелёных тестов обновлять рабочую машину.
+5. Не вызывайте `pip install -U` без правки файлов: без верхних границ сборка «поедет» при
    выходе новой версии пакета (именно поэтому границы заданы в `requirements.txt` и `pyproject.toml`).
-5. Ожидаемый список версий и состояние проекта — в `README.md` и `pyproject.toml`.
+6. Ожидаемый список версий и состояние проекта — в `README.md` и `pyproject.toml`.

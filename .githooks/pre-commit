@@ -14,6 +14,11 @@ set -e
 SELECT=$(python scripts/test_select.py --staged)
 echo "[pre-commit] по индексу: $SELECT"
 
+# Расхождение версий в трёх файлах зависимостей ловим сразу, а не на CI.
+if git diff --cached --name-only | grep -Eq '(^|/)(requirements[^/]*\.txt|pyproject\.toml)$'; then
+    python scripts/check_lock.py
+fi
+
 if [ "$SELECT" = "DOCS" ]; then
     python scripts/check_docs.py
     TARGETS="tests/test_stream_latency.py tests/test_setup_anpr.py"

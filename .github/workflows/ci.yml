@@ -31,13 +31,14 @@ jobs:
             requirements.txt
             requirements-lock.txt
 
-      # Ставим зафиксированные версии из requirements.txt: CI проверяет
-      # именно ту сборку, которая идёт в бой.
+      # Ставим тот же зафиксированный набор, что и run.bat в бою: транзитивные
+      # версии не должны решаться pip'ом заново на каждой версии Python.
       - name: Установить зависимости
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -r requirements.txt
-          python -m pip install pytest
+          python -m pip install -r requirements-lock.txt
+          # pytest берём из extras pyproject.toml — версия зафиксирована там.
+          python -m pip install -e ".[dev]"
 
       # Этап 3: битые зависимости (конфликт версий) — тоже падение сборки.
       - name: Проверить зависимости (pip check)
@@ -47,6 +48,9 @@ jobs:
       # должны совпадать — иначе машины поставят разные наборы.
       - name: Проверить согласованность файлов зависимостей
         run: python scripts/check_lock.py
+
+      - name: Проверить документацию
+        run: python scripts/check_docs.py
 
       - name: Проверить, что импорт не создаёт рабочую базу и состояние
         run: |
