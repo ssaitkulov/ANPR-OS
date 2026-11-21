@@ -585,8 +585,9 @@ class MonitoringSection:
         window.transient(self.root.winfo_toplevel())
         x = max(0, self.date_button.winfo_rootx() + self.date_button.winfo_width() - 310)
         y = self.date_button.winfo_rooty() + 36
-        window.geometry(f'310x430+{x}+{y}')
-        self._date_geometry = (x, y)
+        # Только позиция: Tk сам вычислит размер по содержимому календаря.
+        # Фиксированная высота давала пустую полосу под пресетами.
+        window.geometry(f'+{x}+{y}')
         def close_picker(_event=None):
             self.date_window = None
             self._close_window(window)
@@ -599,37 +600,24 @@ class MonitoringSection:
             bind_widget(self.calendar_body, sequence,
                         lambda _event, offset=offset: self._move_selection(offset))
         self.draw_calendar()
-        # Высота календаря зависит от числа недель и режима: подстраиваем окно
-        # по фактическому содержимому, иначе «Применить» обрезается (6 недель).
-        self.window_after(window, 0, self._fit_date_window, idle=True)
         self.window_after(window, 0, self._focus_selected_day, idle=True)
         self.window_after(window, 0, lambda: (window.lift(), window.focus_force()), idle=True)
 
     def _focus_selected_day(self):
+        window = self.date_window
+        if window is not None:
+            try:
+                # Полный update() нужен, чтобы Tk пересчитал req-размеры
+                # после draw_calendar() и подогнал окно под контент.
+                window.update()
+            except tk.TclError:
+                pass
         button = getattr(self, '_focus_day_button', None)
         if button is not None:
             try:
                 button.focus_set()
             except tk.TclError:
                 pass
-
-    def _fit_date_window(self):
-        """Высота окна = сумма детей календаря, без пустого запаса снизу."""
-        window = self.date_window
-        if window is None:
-            return
-        try:
-            # reqheight контейнера с pack(fill='x') не включает реальные
-            # размеры детей — складываем их сами.
-            needed = sum(child.winfo_reqheight()
-                         for child in self.calendar_body.winfo_children())
-            scale = window._reverse_widget_scaling(1)
-            # Дети测得 в физических px; заголовок окна — ~26 логических.
-            height = max(240, int(needed / scale) + 26)
-            x, y = getattr(self, '_date_geometry', (0, 0))
-            window.geometry(f'310x{height}+{x}+{y}')
-        except (tk.TclError, AttributeError, TypeError):
-            pass
 
     def draw_calendar(self):
         for child in self.calendar_body.winfo_children():
@@ -747,7 +735,16 @@ class MonitoringSection:
         self.calendar_range_mode = choice == 'Диапазон'
         self.calendar_selecting_end = False
         self.draw_calendar()
-        self.window_after(self.date_window, 0, self._fit_date_window, idle=True)
+        # При смене режима меняется высота: просим Tk пересчитать геометрию
+        # по новому содержимому (нативный способ, без ручного geometry()).
+        window = self.date_window
+        if window is not None:
+            try:
+                window.update()
+                x, y = window.winfo_x(), window.winfo_y()
+                window.geometry(f'+{x}+{y}')
+            except tk.TclError:
+                pass
 
     def _toggle_calendar_mode(self):
         self._set_calendar_mode('Один день' if self.calendar_range_mode else 'Диапазон')
