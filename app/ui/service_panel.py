@@ -211,8 +211,8 @@ class ServicePanel:
         self.restart_button = self._button(actions, 'Перезапустить', 'player-skip-back',
                                             theme.CARD_ALT, theme.TEXT, theme.ROW_HOVER,
                                             self.owner.restart_service)
-        self.stop_button = self._button(actions, 'Остановить', 'player-stop', theme.DANGER,
-                                        '#FFFFFF', '#D03934', self.owner.stop_service)
+        self.stop_button = self._button(actions, 'Остановить', 'player-stop', theme.DANGER_DEEP,
+                                        '#FFFFFF', theme.DANGER, self.owner.stop_service)
         self.log_button = self._button(actions, 'Журнал', 'file-text', theme.CARD,
                                        theme.MUTED, theme.CARD_ALT, self.owner.open_log)
 

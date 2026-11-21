@@ -348,6 +348,9 @@ class _FakeVar:
     def get(self):
         return self.value
 
+    def set(self, value):
+        self.value = value
+
 
 class _FakeFont:
     def measure(self, text):
@@ -426,12 +429,12 @@ class MonitoringWidgetsTests(unittest.TestCase):
         self.assertEqual(self.section.graph.lines, [])
         self.assertEqual(self.section.graph.texts, [])
 
-    def test_chart_of_an_empty_day_is_flat(self):
+    def test_chart_of_an_empty_day_shows_a_message(self):
         self.section.draw_chart()
-        self.assertTrue(self.section.graph.polygons)
-        # Все точки графика — на одной высоте: за день проездов не было.
-        heights = {args[1] for args, _ in self.section.graph.ovals}
-        self.assertEqual(len(heights), 1, 'пустой день должен давать ровную линию')
+        labels = [kwargs.get('text') for _, kwargs in self.section.graph.texts]
+        self.assertIn('Нет проездов за выбранный период', labels)
+        self.assertFalse(self.section.graph.polygons)
+        self.assertFalse(self.section.graph.ovals)
 
     def test_chart_does_not_repeat_zero_on_both_axes(self):
         self.section.draw_chart()
@@ -445,6 +448,13 @@ class MonitoringWidgetsTests(unittest.TestCase):
         self.section.draw_chart()
         labels = [kwargs.get('text') for _, kwargs in self.section.graph.texts]
         self.assertIn('сейчас', labels)
+
+    def test_keyboard_cycles_the_chart_interval(self):
+        self.section.chart_interval = _FakeVar('1 ч')
+        self.section.draw_chart = Mock()
+        MonitoringSection._cycle_interval(self.section)
+        self.assertEqual(self.section.chart_interval.get(), '3 ч')
+        self.section.draw_chart.assert_called_once()
 
     def test_feed_scrollbar_appears_only_when_needed(self):
         class FakeScrollbar:

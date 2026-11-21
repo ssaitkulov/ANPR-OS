@@ -38,6 +38,8 @@ CTA = '#FEE46F'
 SUCCESS = '#06C35D'
 WARNING = '#FFBA02'
 DANGER = '#F23F3A'
+#: Глубокий красный: фон кнопки остановки с белым текстом (контраст AA).
+DANGER_DEEP = '#C82F2B'
 
 #: Шрифт по умолчанию.
 FONT_FAMILY = 'Segoe UI'

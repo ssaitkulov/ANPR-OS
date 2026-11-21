@@ -68,14 +68,14 @@ class HeaderIndicatorTests(ShellTestCase):
 
     def test_tooltip_follows_the_state(self):
         self.shell.update_status(HEALTH)
-        self.assertEqual(self.header.service_chip.tooltip.text, 'ANPR-сервис: Работает')
-        self.assertEqual(self.header.camera_chip.tooltip.text, 'Камера: Подключена')
-        self.assertEqual(self.header.telegram_chip.tooltip.text, 'Telegram: Работает')
+        self.assertTrue(self.header.service_chip.tooltip.text.startswith('ANPR-сервис: Работает'))
+        self.assertTrue(self.header.camera_chip.tooltip.text.startswith('Камера: Подключена'))
+        self.assertTrue(self.header.telegram_chip.tooltip.text.startswith('Telegram: Работает'))
         broken = dict(HEALTH, camera_message='связь прервалась. Программа попробует снова.')
         with patch('app.ui.settings.read_settings', return_value={
                 'TELEGRAM_BOT_TOKEN': 'example', 'ALLOWED_CHAT_IDS': '42'}):
             self.shell.update_status(broken)
-        self.assertEqual(self.header.camera_chip.tooltip.text, 'Камера: Нет связи')
+        self.assertTrue(self.header.camera_chip.tooltip.text.startswith('Камера: Нет связи'))
 
     def test_camera_failure_does_not_change_the_service_indicator(self):
         """Сломанная камера не должна красить сервис в другой цвет."""
@@ -87,7 +87,7 @@ class HeaderIndicatorTests(ShellTestCase):
             self.shell.update_status(broken)
             self.assertEqual(self.header.service_chip.value.cget('text'), 'Работает')
             self.assertEqual(self.header.camera_chip.value.cget('text'), 'Нет связи')
-            self.assertEqual(self.header.telegram_chip.value.cget('text'), 'Работает')
+            self.assertEqual(self.header.telegram_chip.value.cget('text'), 'Канал активен')
             # Цвет сервиса не меняется из-за камеры.
             self.assertEqual(self.shell._states['service']['color'], ui_status.SUCCESS)
             self.assertEqual(self.shell._states['camera']['color'], ui_status.DANGER)

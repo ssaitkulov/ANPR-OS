@@ -25,7 +25,7 @@ from app.core.paths import PROJECT_ROOT
 from app.core import safe_mode
 from app.ui.tklife import cancel_pending_scripts
 from app.ui import theme
-from app.ui.widgets import activatable
+from app.ui.widgets import activatable, bind_widget, focusable
 
 BASE = PROJECT_ROOT
 BG = theme.BG; CARD = '#1a2432'; BORDER = '#303e51'; TEXT = '#f2f5fa'; MUTED = '#a5b1c2'; BLUE = '#377df1'
@@ -267,16 +267,22 @@ class MonitoringSection:
                                            font=('Segoe UI', 10), progress_color=BLUE,
                                            command=self.toggle_video)
         self.video_enabled.select()
+        focusable(self.video_enabled)
+        activatable(self.video_enabled, action=self.video_enabled.toggle)
         self.video_enabled.pack(side='right', padx=(8, 0))
         self.stream_switch = ctk.CTkSegmentedButton(video_header, values=['Основной', 'Дополнительный'],
                                                      command=self.change_stream, height=26,
-                                                     selected_color=BLUE, selected_hover_color='#2869df',
+                                                     selected_color=theme.ACCENT_DEEP,
+                                                     selected_hover_color=BLUE,
                                                      font=('Segoe UI', 10))
         self.stream_switch.set('Основной')
+        focusable(self.stream_switch)
+        activatable(self.stream_switch, action=self._cycle_stream)
         self.stream_switch.pack(side='right')
         self.video_label = ctk.CTkLabel(video, text='Подключение к камере…', text_color=MUTED, fg_color=CARD)
         self.video_label.pack(fill='both', expand=True, padx=10, pady=10)
         self.video_label.bind('<Double-Button-1>', self.open_video_fullscreen)
+        bind_widget(self.video_label, '<Return>', lambda _event: self.open_video_fullscreen())
         self.video_label.bind('<Configure>', self._on_video_configure)
         right = ctk.CTkFrame(layout, fg_color='transparent')
         right.grid(row=0, column=1, rowspan=2, sticky='nsew', padx=(7, 0))
@@ -337,9 +343,14 @@ class MonitoringSection:
                      corner_radius=9, fg_color='#263b57').pack(side='left', padx=(0, 10))
         ctk.CTkLabel(graph_header, text='Статистика транспортных средств', text_color=TEXT,
                      font=('Segoe UI', 14, 'bold'), anchor='w').pack(side='left', fill='x', expand=True)
-        ctk.CTkOptionMenu(graph_header, variable=self.chart_interval, values=['1 ч', '3 ч', '6 ч'],
-                          command=lambda _: self.draw_chart(), width=75, height=28,
-                          fg_color='#26364c', button_color='#334b6b', button_hover_color='#416087').pack(side='right')
+        interval_menu = ctk.CTkOptionMenu(graph_header, variable=self.chart_interval,
+                                         values=['1 ч', '3 ч', '6 ч'],
+                                         command=lambda _: self.draw_chart(), width=75, height=28,
+                                         fg_color='#26364c', button_color='#334b6b',
+                                         button_hover_color='#416087')
+        focusable(interval_menu)
+        activatable(interval_menu, action=self._cycle_interval)
+        interval_menu.pack(side='right')
         ctk.CTkLabel(graph_header, text='Интервал', text_color=MUTED, font=('Segoe UI', 11)).pack(side='right', padx=(0, 8))
         self.graph = tk.Canvas(graph, bg=CARD, highlightthickness=0)
         self.graph.pack(fill='both', expand=True, padx=12, pady=(4, 12))
@@ -569,10 +580,14 @@ class MonitoringSection:
                   'Июль', 'Август', 'Сентябрь', 'Октябрь', 'Ноябрь', 'Декабрь')
         top = ctk.CTkFrame(self.calendar_body, fg_color='transparent')
         top.pack(fill='x', pady=(0, 6))
-        ctk.CTkButton(top, text='‹', width=34, height=30, fg_color=CARD,
-                      command=lambda: self.move_calendar(-1)).pack(side='left')
-        ctk.CTkButton(top, text='›', width=34, height=30, fg_color=CARD,
-                      command=lambda: self.move_calendar(1)).pack(side='right')
+        prev_month = ctk.CTkButton(top, text='‹', width=34, height=30, fg_color=CARD,
+                                   command=lambda: self.move_calendar(-1))
+        activatable(prev_month)
+        prev_month.pack(side='left')
+        next_month = ctk.CTkButton(top, text='›', width=34, height=30, fg_color=CARD,
+                                   command=lambda: self.move_calendar(1))
+        activatable(next_month)
+        next_month.pack(side='right')
         ctk.CTkLabel(top, text=f'{months[self.calendar_month - 1]} {self.calendar_year}',
                      font=('Segoe UI', 13, 'bold'), text_color=TEXT).pack(expand=True)
         grid = ctk.CTkFrame(self.calendar_body, fg_color='transparent')
@@ -682,6 +697,7 @@ class MonitoringSection:
         button = ctk.CTkButton(frame, text='Нет\nфото', width=86, height=72,
                                fg_color='#34445a', hover_color='#41536c',
                                text_color=MUTED, font=('Segoe UI', 11), state='disabled')
+        activatable(button)
         button.pack(side='left', padx=8, pady=8)
         details = ctk.CTkFrame(frame, fg_color='transparent')
         details.pack(side='left', fill='x', expand=True, padx=(0, 8), pady=6)
@@ -885,6 +901,18 @@ class MonitoringSection:
                         self.results.put_nowait((generation, search_generation, (start, end), 'error', None))
                     except queue.Full: pass
                 self.data_changed.wait(2)
+
+    def _cycle_stream(self):
+        """Enter/пробел переключают поток так же, как клик по сегменту."""
+        current = self.stream_switch.get()
+        self.change_stream('Дополнительный' if current == 'Основной' else 'Основной')
+
+    def _cycle_interval(self):
+        """Enter/пробел переключают интервал графика."""
+        values = ('1 ч', '3 ч', '6 ч')
+        current = self.chart_interval.get()
+        self.chart_interval.set(values[(values.index(current) + 1) % len(values)])
+        self.draw_chart()
 
     def change_stream(self, choice):
         subtype = {'Основной': 0, 'Дополнительный': 1}[choice]
@@ -1130,6 +1158,12 @@ class MonitoringSection:
             canvas.create_line(now_x, top, now_x, bottom, fill='#4a6a8f', dash=(3, 4))
             canvas.create_text(now_x + 4, top + 2, text='сейчас', fill=MUTED,
                                font=self.chart_axis_font, anchor='nw')
+        if not peak:
+            # Нулевая линия с маркерами читается как сломанный график.
+            canvas.create_text((left + right) / 2, (top + bottom) / 2,
+                               text='Нет проездов за выбранный период',
+                               fill=MUTED, font=('Segoe UI', 12))
+            return
         points = [(left + chart_w * hour / 24, bottom - chart_h * value / ceiling)
                   for hour, value in bins]
         if len(points) > 1:
@@ -1177,11 +1211,16 @@ class MonitoringSection:
             elif kind == 'error':
                 self.total.configure(text='—'); self.unique.configure(text='—')
                 self.entry_metric.configure(text='—'); self.exit_metric.configure(text='—')
+                self.hours = [0] * 24
+                self.display_period = period
+                self.draw_chart()
                 self.render_passages(None, error=True)
                 self._feed_content = None
             else:
                 self.display_period = period
-                self.total.configure(text=str(data['total'])); self.unique.configure(text=str(data['unique']))
+                self.total.configure(text=str(data['total']),
+                                     text_color=theme.ACCENT if data['total'] else TEXT)
+                self.unique.configure(text=str(data['unique']))
                 self.entry_metric.configure(text=str(data['directions']['Въезд']))
                 self.exit_metric.configure(text=str(data['directions']['Выезд']))
                 if data['hours'] != self.hours:

@@ -63,7 +63,7 @@ TABS_RADIUS = 8
 #: Размер иконки вкладки, px.
 TAB_ICON_SIZE = 17
 #: Горизонтальный отступ содержимого вкладки, px.
-TAB_PAD_X = 10
+TAB_PAD_X = 14
 #: Зазор между иконкой и подписью вкладки, px.
 TAB_GAP = 6
 #: Длительность перехода подложки, мс.
@@ -128,7 +128,8 @@ class SectionTab:
             widget.bind('<Button-1>', self._click, add='+')
             widget.bind('<Enter>', self._enter, add='+')
             widget.bind('<Leave>', self._leave, add='+')
-        focusable(self.static.frame)
+        # Фокус виден по смене фона: белая рамка вокруг вкладки не нужна.
+        focusable(self.static.frame, border=False)
         bind_widget(self.static.frame, '<Return>', self._activate)
         bind_widget(self.static.frame, '<space>', self._activate)
         bind_widget(self.static.frame, '<FocusIn>',
@@ -193,6 +194,7 @@ class SegmentedTabs:
         self._animating = False
         self._token = object()
         self._hover = {}
+        self._focus = {}
 
         self.frame = ctk.CTkFrame(parent, fg_color=theme.CARD, corner_radius=10,
                                   border_width=0, height=TABS_HEIGHT)
@@ -250,18 +252,18 @@ class SegmentedTabs:
             tab.static.set_color(self._resting_color(key))
 
     def focus_in(self, key):
-        """Фокус с клавиатуры: у активной вкладки — на подложке.
-
-        Подложка закрывает вкладку целиком, поэтому рамку фокуса рисуем
-        на ней — иначе фокус был бы не виден.
-        """
-        if key == self.active:
-            self._set_border(self.pill, 1, theme.TEXT)
+        """Фокус виден по фону вкладки, без белой рамки."""
+        self._focus[key] = True
+        tab = self.tabs.get(key)
+        if tab is not None and key != self.active:
+            tab.static.frame.configure(fg_color=theme.CARD_ALT)
 
     def focus_out(self, key):
-        """Фокус ушёл: убрать рамку с подложки."""
-        if key == self.active:
-            self._set_border(self.pill, 0)
+        """Фокус ушёл: вернуть обычный фон вкладки."""
+        self._focus[key] = False
+        tab = self.tabs.get(key)
+        if tab is not None and key != self.active:
+            tab.static.set_color(self._resting_color(key))
 
     # ------------------------------------------------------------------
     # Геометрия подложки
@@ -350,7 +352,8 @@ class SegmentedTabs:
             if other is not tab:
                 other.slider.frame.pack_forget()
         tab.slider.set_color(theme.TEXT)
-        tab.slider.frame.pack(side='left', padx=(TAB_PAD_X, 0))
+        # Отступы уже зашиты в TabLabel: лишний padx обрезал подпись.
+        tab.slider.frame.pack(side='left', padx=0)
 
     @staticmethod
     def _set_border(widget, width, color=None):
@@ -453,7 +456,11 @@ class StatusChip:
         text = state.get('short') or state.get('label', '—')
         self.value.configure(text=text or '—')
         self.icon.set_color(color)
-        self.tooltip.set_text(f'{self.caption}: {state.get("label", "—")}')
+        text = f'{self.caption}: {state.get("label", "—")}'
+        detail = str(state.get('detail') or '').strip()
+        if detail:
+            text += f'\n{detail}'
+        self.tooltip.set_text(text)
 
     def set_active(self, active: bool):
         """Отметить индикатор активным (раскрыта его панель)."""

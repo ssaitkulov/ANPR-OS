@@ -5,7 +5,7 @@
 * синхронизация активного состояния с открытым разделом;
 * плавное перемещение подложки и отмена анимации при быстром переключении;
 * закрытие контекстной панели диагностики при смене раздела;
-* видимая рамка фокуса и отсутствие накопления отложенных вызовов Tk.
+* фокус по фону без белой рамки и отсутствие накопления отложенных вызовов Tk.
 
 Живой сервис, камера и база не затрагиваются: общая оснастка UI
 (`tests/ui_harness.py`) подменяет их заглушками.
@@ -13,6 +13,7 @@
 from tests import anpr_testenv  # noqa: F401  — изоляция тестов от боевой БД
 import time
 import unittest
+from unittest.mock import patch
 
 from app.ui import icons
 from app.ui import theme
@@ -116,20 +117,25 @@ class SegmentedTabsTests(SegmentedTabsTestCase):
             self.root.update()
             self.assertIs(self.root.focus_get(), frame)
 
-    def test_focus_is_visible(self):
-        """Видимая рамка фокуса: у неактивной вкладки — на вкладке."""
+    def test_active_label_has_no_extra_padding(self):
+        """Копия подписи в подложке не получает лишний padx и не обрезается."""
+        tab = self.tabs.tabs['monitor']
+        with patch.object(tab.slider.frame, 'pack') as pack:
+            self.tabs._show_in_pill(tab)
+        pack.assert_called_once_with(side='left', padx=0)
+
+    def test_focus_is_visible_without_a_border(self):
+        """Фокус виден по фону вкладки, без белой рамки вокруг подложки."""
         frame = self.tabs.tabs['settings'].static.frame
+        before = str(frame.cget('fg_color'))
         frame.focus_set()
         frame.event_generate('<FocusIn>')
         self.root.update()
-        self.assertEqual(str(frame.cget('border_width')), '1')
-        # Активную вкладку закрывает подложка — рамка фокуса на ней.
+        self.assertIs(self.root.focus_get(), frame)
+        self.assertEqual(str(frame.cget('border_width')), '0')
+        self.assertNotEqual(str(frame.cget('fg_color')), before)
         self.shell.show_section('monitor')
-        active = self.tabs.tabs['monitor'].static.frame
-        active.focus_set()
-        active.event_generate('<FocusIn>')
-        self.root.update()
-        self.assertEqual(str(self.tabs.pill.cget('border_width')), '1')
+        self.assertEqual(str(self.tabs.pill.cget('border_width')), '0')
 
     def test_cover_covers_the_active_tab(self):
         """Подложка совпадает с активной вкладкой и залита акцентом."""

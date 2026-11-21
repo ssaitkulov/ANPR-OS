@@ -30,14 +30,17 @@ def bind_widget(widget, sequence: str, handler):
         return False
 
 
-def activatable(widget):
-    """Enter и пробел нажимают кнопку так же, как мышь."""
+def activatable(widget, action=None):
+    """Enter и пробел активируют контрол так же, как мышь."""
     try:
         widget.configure(takefocus=1)
     except (tk.TclError, ValueError):
         pass
 
     def activate(_event=None):
+        if action is not None:
+            action()
+            return
         try:
             widget.invoke()
         except (tk.TclError, AttributeError):
@@ -82,7 +85,7 @@ def animated_hover(widget, motion, normal: str, hover: str, duration: int = 140)
     return widget
 
 
-def focusable(widget, accent: str | None = None):
+def focusable(widget, accent: str | None = None, border: bool = True):
     """Сделать элемент доступным с клавиатуры и показать фокус.
 
     CustomTkinter не рисует рамку фокуса: без неё пользователь с клавиатуры
@@ -113,11 +116,12 @@ def focusable(widget, accent: str | None = None):
 
     # События фокуса получают и сам виджет, и его внутренний холст:
     # CustomTkinter рисует рамку на виджете, а фокус приходит на окно Tk.
-    for part in (widget, target):
-        if part is None:
-            continue
-        bind_widget(part, '<FocusIn>', focus_in)
-        bind_widget(part, '<FocusOut>', focus_out)
+    if border:
+        for part in (widget, target):
+            if part is None:
+                continue
+            bind_widget(part, '<FocusIn>', focus_in)
+            bind_widget(part, '<FocusOut>', focus_out)
     return widget
 
 

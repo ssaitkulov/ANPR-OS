@@ -255,7 +255,7 @@ class ServiceControlTests(ShellTestCase):
             self.shell.update_status(HEALTH)
             self.assertEqual(self.shell.header.service_chip.value.cget('text'), 'Работает')
             self.assertEqual(self.shell.header.camera_chip.value.cget('text'), 'Подключена')
-            self.assertEqual(self.shell.header.telegram_chip.value.cget('text'), 'Работает')
+            self.assertEqual(self.shell.header.telegram_chip.value.cget('text'), 'Канал активен')
             self.shell.update_status(None)
             self.assertEqual(self.shell.header.service_chip.value.cget('text'), 'Остановлен')
             self.assertEqual(self.shell.header.camera_chip.value.cget('text'), 'Неизвестно')

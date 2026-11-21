@@ -135,7 +135,7 @@ CAMERA_SHORT = {
 }
 
 TELEGRAM_SHORT = {
-    TELEGRAM_OK: 'Работает',
+    TELEGRAM_OK: 'Канал активен',
     TELEGRAM_UNAVAILABLE: 'Недоступен',
     TELEGRAM_DELIVERY_ERROR: 'Ошибка доставки',
     TELEGRAM_NOT_CONFIGURED: 'Не настроен',
