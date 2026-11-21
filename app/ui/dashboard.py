@@ -642,7 +642,7 @@ class MonitoringSection:
                 activatable(day_button)
                 day_button.grid(row=row, column=column, padx=2, pady=2)
         if self.calendar_selecting_end:
-            label = 'Начало выбрано · укажите конец (повтор — один день)'
+            label = 'Начало выбрано. Укажите конец.'
         else:
             label = f'{self.calendar_start:%d.%m.%Y} – {self.calendar_end:%d.%m.%Y}'
         ctk.CTkLabel(self.calendar_body, text=label, height=20, text_color=TEXT,
@@ -661,7 +661,7 @@ class MonitoringSection:
             button.pack(side='left', padx=(0, 4))
         # Пока ждём конец периода, «Применить» коммитил бы один день молча.
         span_days = (self.calendar_end - self.calendar_start).days
-        apply_text = ('Применить 1 день' if self.calendar_selecting_end
+        apply_text = ('Применить' if self.calendar_selecting_end
                       else f'Применить {span_days + 1} дн.')
         disabled = self.calendar_selecting_end or span_days >= MAX_PERIOD_DAYS
         apply_button = ctk.CTkButton(actions, text=apply_text, width=150, height=30, fg_color=BLUE,
