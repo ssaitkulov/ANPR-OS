@@ -23,6 +23,19 @@ import tkinter as tk
 from app.core.paths import ui_preferences_file
 from app.ui import theme
 
+
+def place_configure_scaled(widget, **kwargs):
+    """CTk.place_configure не масштабирует координаты, в отличие от place."""
+    prepared = {}
+    for key, value in kwargs.items():
+        if key in ('x', 'y', 'width', 'height') and isinstance(value, (int, float)):
+            try:
+                value = int(widget._apply_widget_scaling(value))
+            except (AttributeError, TypeError, tk.TclError):
+                pass
+        prepared[key] = value
+    return widget.place_configure(**prepared)
+
 #: Переменная окружения, отключающая движение.
 REDUCED_MOTION_ENV = 'EVRIKA_REDUCED_MOTION'
 
@@ -190,13 +203,13 @@ class Motion:
         if height:
             extra['height'] = int(height)
         try:
-            frame.place_configure(x=x, y=y, **extra)
+            place_configure_scaled(frame, x=x, y=y, **extra)
         except tk.TclError:
             return
 
         def move(fraction: float):
             try:
-                frame.place_configure(y=int(y + 8 * fraction))
+                place_configure_scaled(frame, y=int(y + 8 * fraction))
             except tk.TclError:
                 pass
 
@@ -227,7 +240,7 @@ class Motion:
 
         def move(fraction: float):
             try:
-                frame.place_configure(y=int(y + offset * (1 - fraction)))
+                place_configure_scaled(frame, y=int(y + offset * (1 - fraction)))
             except tk.TclError:
                 pass
 

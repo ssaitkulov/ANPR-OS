@@ -23,7 +23,7 @@ import customtkinter as ctk
 from app.ui import icons
 from app.ui import motion
 from app.ui import theme
-from app.ui.widgets import TintedIcon, animated_hover, focusable
+from app.ui.widgets import TintedIcon, activatable, animated_hover, focusable
 
 #: Ширина панели, px (одинаковая для всех режимов).
 PANEL_WIDTH = 420
@@ -174,6 +174,7 @@ class ServicePanel:
                                           image=icons.icon('x', theme.MUTED, 14, master=head),
                                           command=self.close)
         focusable(self.close_button)
+        activatable(self.close_button)
         animated_hover(self.close_button, self.motion, theme.CARD, theme.CARD_ALT)
         self.close_button.pack(side='right', padx=(10, 0))
         self.status_label = ctk.CTkLabel(head, text='—', text_color=theme.MUTED,
@@ -241,6 +242,7 @@ class ServicePanel:
                                image=icons.icon(icon_name, text_color, 14, master=parent),
                                command=command)
         focusable(button)
+        activatable(button)
         animated_hover(button, self.motion, color, hover)
         button.pack(side='left', padx=(0, 8))
         return button
@@ -285,7 +287,7 @@ class ServicePanel:
         x, y = self._position()
         if switching:
             # Панель уже на экране: меняется только содержимое.
-            self.frame.place_configure(x=x, y=y)
+            motion.place_configure_scaled(self.frame, x=x, y=y)
             self._animate_content()
         else:
             self.motion.slide(self.frame, x, y, duration=200,
@@ -400,7 +402,7 @@ class ServicePanel:
         if getattr(self, '_placed_at', None) == (x, y):
             return
         try:
-            self.frame.place_configure(x=x, y=y)
+            motion.place_configure_scaled(self.frame, x=x, y=y)
             self._placed_at = (x, y)
         except tk.TclError:
             pass
@@ -481,7 +483,7 @@ class ServicePanel:
 
         def step(fraction: float):
             try:
-                mode.frame.place_configure(y=int(offset * (1 - fraction)))
+                motion.place_configure_scaled(mode.frame, y=int(offset * (1 - fraction)))
             except tk.TclError:
                 pass
 

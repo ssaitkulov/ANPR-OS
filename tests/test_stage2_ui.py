@@ -25,7 +25,11 @@ import queue
 import unittest
 from unittest.mock import patch
 
+import customtkinter as ctk
+
+from app.ui import motion
 from app.ui import status as ui_status
+from app.ui.widgets import activatable
 
 from tests.ui_harness import HEALTH, FAKE_SERVICE, FakeCapture, reset_calls
 from tests.ui_harness import ShellTestCase as UiShellTestCase
@@ -404,6 +408,37 @@ class VideoPauseTests(ShellTestCase):
         self.shell.hide()
         self.shell.show()
         self.assertFalse(monitor.stream_selection[2])
+
+
+class WidgetAccessTests(ShellTestCase):
+    """Клавиатура и координаты работают и при масштабировании."""
+
+    def test_enter_activates_a_button(self):
+        calls = []
+        button = ctk.CTkButton(self.root, text='OK', command=lambda: calls.append(1))
+        activatable(button)
+        button.pack()
+        self.root.deiconify()
+        self.root.update()
+        button.focus_set()
+        button._canvas.event_generate('<Return>')
+        self.root.update()
+        self.assertEqual(calls, [1])
+
+    def test_place_configure_scales_geometry(self):
+        class FakeWidget:
+            def __init__(self):
+                self.placed = {}
+
+            def _apply_widget_scaling(self, value):
+                return value * 1.25
+
+            def place_configure(self, **kwargs):
+                self.placed.update(kwargs)
+
+        widget = FakeWidget()
+        motion.place_configure_scaled(widget, x=100, y=20, relwidth=1)
+        self.assertEqual(widget.placed, {'x': 125, 'y': 25, 'relwidth': 1})
 
 
 if __name__ == '__main__':

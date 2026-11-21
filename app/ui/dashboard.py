@@ -24,6 +24,7 @@ from app.core import paths as app_paths
 from app.core.paths import PROJECT_ROOT
 from app.core import safe_mode
 from app.ui.tklife import cancel_pending_scripts
+from app.ui.widgets import activatable
 
 BASE = PROJECT_ROOT
 BG = '#101722'; CARD = '#1a2432'; BORDER = '#303e51'; TEXT = '#f2f5fa'; MUTED = '#a5b1c2'; BLUE = '#377df1'
@@ -228,8 +229,10 @@ class MonitoringSection:
         root = self.root
         header = ctk.CTkFrame(root, fg_color='transparent'); header.pack(fill='x', padx=22, pady=(15, 8))
         if self.show_back:
-            ctk.CTkButton(header, text='‹  Назад', width=85, height=32, fg_color=CARD,
-                          hover_color='#34455a', command=self.close).pack(side='left', padx=(0, 14))
+            back = ctk.CTkButton(header, text='‹  Назад', width=85, height=32, fg_color=CARD,
+                                 hover_color='#34455a', command=self.close)
+            activatable(back)
+            back.pack(side='left', padx=(0, 14))
         ctk.CTkLabel(header, text='Мониторинг', font=('Segoe UI', 22, 'bold'), text_color=TEXT).pack(side='left')
         # Rasterized from filled/calendar-month.svg; Pillow handles the PNG at runtime.
         self.calendar_icon = ctk.CTkImage(light_image=Image.open(BASE / 'assets' / 'calendar-month-filled.png'), size=(16, 16))
@@ -237,6 +240,7 @@ class MonitoringSection:
                                          compound='left', width=140, height=32,
                                          fg_color=CARD, hover_color='#34455a', text_color=TEXT,
                                          font=('Segoe UI', 11, 'bold'), command=self.open_date_picker)
+        activatable(self.date_button)
         self.date_button.pack(side='right')
         layout = ctk.CTkFrame(root, fg_color='transparent'); layout.pack(fill='both', expand=True, padx=22, pady=(0, 20))
         layout.grid_columnconfigure(0, weight=3, uniform='column'); layout.grid_columnconfigure(1, weight=2, uniform='column')
@@ -304,9 +308,12 @@ class MonitoringSection:
         self.search_entry = ctk.CTkEntry(search_row, placeholder_text='Поиск по номеру',
                                          fg_color='#111b29', border_width=0, height=32,
                                          text_color=TEXT, placeholder_text_color=MUTED, font=('Segoe UI', 11))
-        ctk.CTkButton(search_row, text='✕', width=30, height=28, fg_color='transparent',
-                      hover_color='#263b57', text_color=MUTED, font=('Segoe UI', 13),
-                      command=self.clear_search).pack(side='right', padx=(0, 5))
+        self.search_clear = ctk.CTkButton(search_row, text='✕', width=30, height=28,
+                                         fg_color='transparent', hover_color='#263b57',
+                                         text_color=MUTED, font=('Segoe UI', 13),
+                                         command=self.clear_search)
+        activatable(self.search_clear)
+        self.search_clear.pack(side='right', padx=(0, 5))
         self.search_entry.pack(side='left', fill='x', expand=True)
         self.search_entry.bind('<KeyRelease>', self.schedule_search)
         self.search_entry.bind('<<Paste>>', lambda _event: self.schedule_idle(self.schedule_search))
@@ -590,10 +597,15 @@ class MonitoringSection:
                      font=('Segoe UI', 10)).pack(fill='x')
         actions = ctk.CTkFrame(self.calendar_body, fg_color='transparent')
         actions.pack(fill='x', pady=(4, 0))
-        ctk.CTkButton(actions, text='Сегодня', width=110, height=30, fg_color='#263b57',
-                      command=lambda: self.select_period(self.today(), self.today())).pack(side='left')
-        ctk.CTkButton(actions, text='Применить', width=150, height=30, fg_color=BLUE,
-                      command=lambda: self.select_period(self.calendar_start, self.calendar_end)).pack(side='right')
+        today_button = ctk.CTkButton(actions, text='Сегодня', width=110, height=30,
+                                     fg_color='#263b57',
+                                     command=lambda: self.select_period(self.today(), self.today()))
+        activatable(today_button)
+        today_button.pack(side='left')
+        apply_button = ctk.CTkButton(actions, text='Применить', width=150, height=30, fg_color=BLUE,
+                                     command=lambda: self.select_period(self.calendar_start, self.calendar_end))
+        activatable(apply_button)
+        apply_button.pack(side='right')
 
     def pick_calendar_day(self, value):
         if self.calendar_selecting_end:
@@ -738,6 +750,7 @@ class MonitoringSection:
             if more is None:
                 more = ctk.CTkButton(self.feed, text='Показать ещё', height=30,
                                      fg_color='#263b57', command=self.show_more_passages)
+                activatable(more)
                 self._feed_more_button = more
             more.grid(row=len(visible), column=0, sticky='ew', padx=4, pady=8)
         else:
@@ -788,8 +801,10 @@ class MonitoringSection:
         window.lift()
         self.window_after(window, 0, lambda: (window.lift(), window.focus_force(), window.grab_set()), idle=True)
         window.bind('<Escape>', lambda _: self._close_window(window))
-        ctk.CTkButton(window, text='Закрыть  ✕', width=110,
-                      command=lambda: self._close_window(window)).pack(anchor='ne', padx=16, pady=12)
+        close = ctk.CTkButton(window, text='Закрыть  ✕', width=110,
+                              command=lambda: self._close_window(window))
+        activatable(close)
+        close.pack(anchor='ne', padx=16, pady=12)
         label = ctk.CTkLabel(window, text=''); label.pack(fill='both', expand=True, padx=12, pady=(0, 12))
         def resize(_=None):
             w, h = label.winfo_width(), label.winfo_height()
@@ -965,8 +980,10 @@ class MonitoringSection:
         window.attributes('-fullscreen', True)
         window.protocol('WM_DELETE_WINDOW', self.close_video_fullscreen)
         window.bind('<Escape>', self.close_video_fullscreen)
-        ctk.CTkButton(window, text='Закрыть  ✕', width=110,
-                      command=self.close_video_fullscreen).pack(anchor='ne', padx=16, pady=(12, 0))
+        close = ctk.CTkButton(window, text='Закрыть  ✕', width=110,
+                              command=self.close_video_fullscreen)
+        activatable(close)
+        close.pack(anchor='ne', padx=16, pady=(12, 0))
         self.fullscreen_label = ctk.CTkLabel(window, text='Подключение к камере…',
                                              text_color=MUTED, fg_color='#090e16')
         self.fullscreen_label.pack(fill='both', expand=True, padx=12, pady=12)

@@ -16,6 +16,7 @@ from app.core import safe_mode
 from app.core import paths as app_paths
 from app.core.paths import PROJECT_ROOT, env_file
 from app.ui.tklife import cancel_pending_scripts
+from app.ui.widgets import activatable
 import requests
 from requests.auth import HTTPDigestAuth
 
@@ -232,8 +233,10 @@ class SettingsSection:
         header = ctk.CTkFrame(self.root, fg_color='transparent')
         header.pack(fill='x', padx=22, pady=(14, 4))
         if self.show_back:
-            ctk.CTkButton(header, text='‹  Назад', width=85, height=32, fg_color=self.CARD,
-                          hover_color='#34455a', command=self.close).pack(side='left', padx=(0, 14))
+            back = ctk.CTkButton(header, text='‹  Назад', width=85, height=32, fg_color=self.CARD,
+                                 hover_color='#34455a', command=self.close)
+            activatable(back)
+            back.pack(side='left', padx=(0, 14))
         ctk.CTkLabel(header, text='Настройки', text_color=self.TEXT,
                      font=('Segoe UI', 20, 'bold'), anchor='w').pack(side='left')
 
@@ -245,6 +248,7 @@ class SettingsSection:
         self.save_button = ctk.CTkButton(actions, text='Сохранить', command=self.save, width=150,
                                          height=36, fg_color=self.BLUE, hover_color='#1d55b9',
                                          font=('Segoe UI', 12, 'bold'))
+        activatable(self.save_button)
         self.save_button.pack(side='right')
         ctk.CTkLabel(actions, text='Настройки камеры применяются после перезапуска сервиса',
                      text_color=self.MUTED, font=('Segoe UI', 11), anchor='w').pack(side='left', fill='x', expand=True)
@@ -264,6 +268,7 @@ class SettingsSection:
             button = ctk.CTkButton(nav, text=title, width=self.NAV_WIDTH - 20, height=36, anchor='w',
                                     fg_color='transparent', hover_color='#263b57', text_color=self.TEXT,
                                     font=('Segoe UI', 12), command=lambda title=title: self.select_tab(title))
+            activatable(button)
             button.pack(anchor='w', pady=2, padx=4)
             self.nav_buttons[title] = button
 
@@ -314,8 +319,10 @@ class SettingsSection:
                      font=('Segoe UI', 12)).grid(row=2, column=0, sticky='w', padx=(4, 16), pady=(14, 6))
         folder_row = ctk.CTkFrame(tab, fg_color='transparent')
         folder_row.grid(row=2, column=1, sticky='ew', padx=(0, 4), pady=(14, 6))
-        ctk.CTkButton(folder_row, text='Обзор…', width=90, height=self.FIELD_HEIGHT,
-                      command=self.choose_photo_folder).pack(side='right', padx=(8, 0))
+        browse = ctk.CTkButton(folder_row, text='Обзор…', width=90, height=self.FIELD_HEIGHT,
+                               command=self.choose_photo_folder)
+        activatable(browse)
+        browse.pack(side='right', padx=(8, 0))
         ctk.CTkEntry(folder_row, textvariable=self.variables['IMAGE_DIR'], height=self.FIELD_HEIGHT,
                      fg_color='#111b29', border_color='#3a4a60').pack(side='left', fill='x', expand=True)
         self._note(tab, 3, 'Фото сохраняются файлами. Новая папка применяется после перезапуска.')
@@ -396,6 +403,7 @@ class SettingsSection:
         button = ctk.CTkButton(parent, text=label, command=lambda: self.check(function),
                                height=self.FIELD_HEIGHT, width=170, fg_color='#283a53', hover_color='#365172',
                                border_width=1, border_color='#405471')
+        activatable(button)
         button.grid(row=row, column=1, sticky='e', padx=(0, 4), pady=(12, 8))
         self.check_buttons.append(button)
 

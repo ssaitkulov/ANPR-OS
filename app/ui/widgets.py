@@ -30,6 +30,27 @@ def bind_widget(widget, sequence: str, handler):
         return False
 
 
+def activatable(widget):
+    """Enter и пробел нажимают кнопку так же, как мышь."""
+    try:
+        widget.configure(takefocus=1)
+    except (tk.TclError, ValueError):
+        pass
+
+    def activate(_event=None):
+        try:
+            widget.invoke()
+        except (tk.TclError, AttributeError):
+            pass
+    for sequence in ('<Return>', '<space>'):
+        try:
+            widget.bind(sequence, activate, add='+')
+        except (tk.TclError, NotImplementedError, TypeError, AttributeError):
+            pass
+        bind_widget(widget, sequence, activate)
+    return widget
+
+
 def animated_hover(widget, motion, normal: str, hover: str, duration: int = 140):
     """Плавная подсветка кнопки при наведении.
 
@@ -160,9 +181,16 @@ class Tooltip:
                                  font=theme.FONT_MICRO, fg_color=theme.CARD_ALT,
                                  corner_radius=8, justify='left')
             label.update_idletasks()
+            # winfo_root* и winfo_height — физические пиксели, а place в CTk
+            # масштабирует x/y. Переводим дельту обратно в его систему.
             x = max(0, self.widget.winfo_rootx() - self.parent.winfo_rootx())
             y = max(0, self.widget.winfo_rooty() - self.parent.winfo_rooty()
                     + self.widget.winfo_height() + 6)
+            try:
+                x = int(self.parent._reverse_widget_scaling(x))
+                y = int(self.parent._reverse_widget_scaling(y))
+            except (AttributeError, TypeError, tk.TclError):
+                pass
             label.place(x=x, y=y)
             label.lift()
             self._label = label
