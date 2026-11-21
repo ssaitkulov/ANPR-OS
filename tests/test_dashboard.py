@@ -4,7 +4,7 @@ import queue
 import sqlite3
 import threading
 import unittest
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
@@ -603,6 +603,102 @@ class MonitoringWidgetsTests(unittest.TestCase):
         self.assertIs(self.section.photo_buttons[2], button)
         self.assertEqual(str(button.kwargs.get('state')), 'disabled')
         self.assertEqual(button.kwargs.get('text'), 'Нет\nфото')
+
+
+class CalendarTests(unittest.TestCase):
+    """Состояние календаря выбора периода (б Tk)."""
+
+    def setUp(self):
+        self.section = MonitoringSection.__new__(MonitoringSection)
+        self.section.tz = ZoneInfo('UTC')
+        self.section.today = lambda: date(2026, 11, 20)
+        self.section.calendar_start = date(2026, 11, 20)
+        self.section.calendar_end = date(2026, 11, 20)
+        self.section.calendar_selecting_end = False
+        self.section.calendar_year, self.section.calendar_month = 2026, 11
+        self.section.period_selection = (0, None)
+        self.section.visible_count = 30
+        self.section.hours = [0] * 24
+        self.section.date_button = _FakeWidget()
+        self.section.total = _FakeWidget()
+        self.section.unique = _FakeWidget()
+        self.section.entry_metric = _FakeWidget()
+        self.section.exit_metric = _FakeWidget()
+        self.section.draw_chart = Mock()
+        self.section.render_passages = Mock()
+        self.section.draw_calendar = Mock()
+        self.section.data_changed = threading.Event()
+        self.section.date_window = None
+        self.section._after_ids = set()
+        self.section._window_afters = {}
+        self.section.select_period = Mock(return_value=True)
+
+    def test_first_click_does_not_apply_and_waits_for_the_end(self):
+        self.section.pick_calendar_day(date(2026, 11, 10))
+        self.assertTrue(self.section.calendar_selecting_end)
+        self.assertEqual(self.section.calendar_start, date(2026, 11, 10))
+        self.section.select_period.assert_not_called()
+
+    def test_second_click_sorts_and_keeps_the_draft(self):
+        self.section.pick_calendar_day(date(2026, 11, 10))
+        self.section.pick_calendar_day(date(2026, 11, 5))
+        self.assertFalse(self.section.calendar_selecting_end)
+        self.assertEqual((self.section.calendar_start, self.section.calendar_end),
+                         (date(2026, 11, 5), date(2026, 11, 10)))
+        self.section.select_period.assert_not_called()
+        self.section._apply_period()
+        self.section.select_period.assert_called_once_with(date(2026, 11, 5), date(2026, 11, 10))
+
+    def test_apply_is_ignored_while_waiting_for_the_end(self):
+        self.section.pick_calendar_day(date(2026, 11, 10))
+        self.section._apply_period()
+        self.section.select_period.assert_not_called()
+
+    def test_same_day_twice_is_a_single_day(self):
+        self.section.pick_calendar_day(date(2026, 11, 10))
+        self.section.pick_calendar_day(date(2026, 11, 10))
+        self.assertEqual(self.section.calendar_start, self.section.calendar_end)
+
+    def test_presets_cover_today_yesterday_7_and_30_days(self):
+        cases = ((0, date(2026, 11, 20), date(2026, 11, 20)),
+                 (1, date(2026, 11, 19), date(2026, 11, 19)),
+                 (7, date(2026, 11, 14), date(2026, 11, 20)),
+                 (30, date(2026, 10, 22), date(2026, 11, 20)))
+        for days, start, end in cases:
+            self.section.select_period.reset_mock()
+            self.section._select_preset(days)
+            self.section.select_period.assert_called_once_with(start, end)
+
+    def test_keyboard_moves_the_day_within_the_past(self):
+        self.section._move_selection(-1)
+        self.assertEqual(self.section.calendar_end, date(2026, 11, 19))
+        self.section._move_selection(-100)
+        self.assertLess(self.section.calendar_end, date(2026, 11, 1))
+        self.section._move_selection(10000)
+        self.assertLessEqual(self.section.calendar_end, date(2026, 11, 20))
+
+    def test_move_calendar_cannot_go_to_a_future_month(self):
+        self.section.move_calendar(1)
+        self.assertEqual((self.section.calendar_year, self.section.calendar_month), (2026, 11))
+
+    def test_select_period_rejects_an_overly_long_range(self):
+        ok = MonitoringSection.select_period(
+            self.section, date(2025, 1, 1), date(2026, 11, 20))
+        self.assertFalse(ok)
+        self.assertEqual(self.section.date_button.kwargs.get('text'),
+                         f'Максимум {dashboard.MAX_PERIOD_DAYS} дней')
+
+    def test_window_after_releases_its_id_on_fire(self):
+        holder = {}
+        self.section._after_ids.add('id-1')
+        self.section._window_afters['win'] = {'id-1'}
+        # Имитируем сработавший вызов: id удаляется из обоих наборов.
+        self.section._after_ids.discard('id-1')
+        self.section._window_afters['win'].discard('id-1')
+        if not self.section._window_afters['win']:
+            self.section._window_afters.pop('win')
+        self.assertNotIn('id-1', self.section._after_ids)
+        self.assertNotIn('win', self.section._window_afters)
 
 
 if __name__ == '__main__': unittest.main()

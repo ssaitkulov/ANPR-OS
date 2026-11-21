@@ -9,7 +9,7 @@ import threading
 import time
 import calendar
 import tkinter as tk
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from contextlib import closing
 from pathlib import Path
 from urllib.parse import quote
@@ -60,6 +60,8 @@ def open_database(path):
 
 
 FEED_PAGE = 30
+#: Максимальная длина периода, дней. Защита от полного скана БД раз в 2 с.
+MAX_PERIOD_DAYS = 366
 
 #: Агрегаты закрытого периода не меняются, пока не появятся новые строки.
 #: Ключ: (путь БД, начало, конец) -> (MAX(id), момент, агрегаты).
@@ -120,25 +122,31 @@ def _cached_aggregates(conn, path, day, end_day):
     return total, unique, list(hours), dict(counts)
 
 
-def load_dashboard(path, day, end_day=None, plate_query='', recent_limit=200):
+def load_dashboard(path, day, end_day=None, plate_query='', recent_limit=200, as_of=None):
     """Показатели за весь период + ограниченная выборка для ленты.
 
     Агрегаты закрытого периода кэшируются и пересчитываются только при
     появлении новых строк; поиск по номеру влияет лишь на `recent`.
+    `as_of` — дата «сегодня» в таймзоне раздела (по умолчанию системная).
     """
     end_day = end_day or day
     if end_day < day:
         raise ValueError('Invalid date range')
+    as_of = as_of or date.today()
+    if isinstance(as_of, str):
+        as_of = date.fromisoformat(as_of)
     with closing(open_database(path)) as conn:
         conn.create_function('iso_hour', 1, _iso_hour)
         conn.create_function('normplate', 1, normalize_plate)
-        if end_day < date.today().isoformat():
+        if end_day < as_of.isoformat():
             total, unique, hours, counts = _cached_aggregates(conn, path, day, end_day)
         else:
             total, unique, hours, counts = _aggregate_stats(conn, day, end_day)
         query = normalize_plate(plate_query)
-        sql = ('SELECT id, captured_at, plate, direction, backfill FROM events NOT INDEXED '
-               'WHERE day BETWEEN ? AND ?')
+        # recent использует индекс (captured_at): при длинном периоде
+        # NOT INDEXED здесь давал бы полный скан и сортировку каждые 2 с.
+        sql = ('SELECT id, captured_at, plate, direction, backfill FROM events '
+               'INDEXED BY idx_events_captured_at WHERE day BETWEEN ? AND ?')
         params = [day, end_day]
         if query:
             sql += ' AND instr(normplate(plate), ?) > 0'
@@ -227,6 +235,9 @@ class MonitoringSection:
         self.settings = read_settings()
         try: self.tz = ZoneInfo(self.settings.get('TIMEZONE', 'Asia/Tashkent'))
         except (ZoneInfoNotFoundError, ValueError): self.tz = None
+        self.calendar_start = self.calendar_end = self.today()
+        self.calendar_selecting_end = False
+        self.calendar_year, self.calendar_month = self.today().year, self.today().month
         root = self.root
         header = ctk.CTkFrame(root, fg_color='transparent'); header.pack(fill='x', padx=22, pady=(15, 8))
         if self.show_back:
@@ -487,6 +498,9 @@ class MonitoringSection:
             identifier = holder.get('id')
             if identifier is not None:
                 identifiers.discard(identifier)
+                self._after_ids.discard(identifier)
+            if not identifiers:
+                self._window_afters.pop(window, None)
             if self._closing:
                 return
             try:
@@ -517,7 +531,10 @@ class MonitoringSection:
 
     def select_period(self, start, end):
         if start > end or end > self.today():
-            return
+            return False
+        if (end - start).days >= MAX_PERIOD_DAYS:
+            self.date_button.configure(text=f'Максимум {MAX_PERIOD_DAYS} дней', width=215)
+            return False
         generation, _ = self.period_selection
         self.period_selection = (generation + 1, None if start == end == self.today() else (start, end))
         self.display_period = (start, end)
@@ -530,7 +547,7 @@ class MonitoringSection:
             label = 'Сегодня  ▾' if start == self.today() else start.strftime('%d.%m.%Y  ▾')
         else:
             label = f'{start:%d.%m.%Y} – {end:%d.%m.%Y}  ▾'
-        self.date_button.configure(text=label, width=215 if start != end else 140)
+        self.date_button.configure(text=label, width=215)
         for metric in (self.total, self.unique, self.entry_metric, self.exit_metric):
             metric.configure(text='—')
         self.hours = [0] * 24
@@ -540,6 +557,7 @@ class MonitoringSection:
         if self.date_window is not None:
             self._close_window(self.date_window)
             self.date_window = None
+        return True
 
     def open_date_picker(self):
         if self.date_window is not None:
@@ -547,7 +565,8 @@ class MonitoringSection:
             return
         self.calendar_start, self.calendar_end = self.period_selection[1] or (self.today(), self.today())
         self.calendar_selecting_end = False
-        self.calendar_year, self.calendar_month = self.calendar_end.year, self.calendar_end.month
+        # Открываем на начале периода: именно его обычно правят первым.
+        self.calendar_year, self.calendar_month = self.calendar_start.year, self.calendar_start.month
         window = ctk.CTkToplevel(self.root)
         self.date_window = window
         window.title('Выбор периода')
@@ -570,6 +589,10 @@ class MonitoringSection:
         window.bind('<Escape>', close_picker)
         self.calendar_body = ctk.CTkFrame(window, fg_color='transparent')
         self.calendar_body.pack(fill='both', expand=True, padx=12, pady=10)
+        for sequence, offset in (('<Left>', -1), ('<Right>', 1),
+                                 ('<Up>', -7), ('<Down>', 7)):
+            bind_widget(self.calendar_body, sequence,
+                        lambda _event, offset=offset: self._move_selection(offset))
         self.draw_calendar()
         self.window_after(window, 0, lambda: (window.lift(), window.focus_force()), idle=True)
 
@@ -580,11 +603,14 @@ class MonitoringSection:
                   'Июль', 'Август', 'Сентябрь', 'Октябрь', 'Ноябрь', 'Декабрь')
         top = ctk.CTkFrame(self.calendar_body, fg_color='transparent')
         top.pack(fill='x', pady=(0, 6))
+        at_current_month = (self.calendar_year, self.calendar_month) >= (self.today().year, self.today().month)
         prev_month = ctk.CTkButton(top, text='‹', width=34, height=30, fg_color=CARD,
                                    command=lambda: self.move_calendar(-1))
         activatable(prev_month)
         prev_month.pack(side='left')
         next_month = ctk.CTkButton(top, text='›', width=34, height=30, fg_color=CARD,
+                                   text_color=MUTED if at_current_month else TEXT,
+                                   state='disabled' if at_current_month else 'normal',
                                    command=lambda: self.move_calendar(1))
         activatable(next_month)
         next_month.pack(side='right')
@@ -601,29 +627,75 @@ class MonitoringSection:
                 if day == 0:
                     continue
                 value = date(self.calendar_year, self.calendar_month, day)
-                color = BLUE if value in (self.calendar_start, self.calendar_end) else (
+                future = value > self.today()
+                selected = value in (self.calendar_start, self.calendar_end)
+                color = '#2a63c4' if selected else (
                     '#263f64' if self.calendar_start < value < self.calendar_end else CARD)
+                if future:
+                    color = '#141d2b'
                 day_button = ctk.CTkButton(grid, text=str(day), width=34, height=27, corner_radius=6,
-                                           fg_color=color, hover_color='#344e70', text_color=TEXT,
-                                           state='disabled' if value > self.today() else 'normal',
+                                           fg_color=color, hover_color='#344e70',
+                                           text_color=MUTED if future else TEXT,
+                                           state='disabled' if future else 'normal',
                                            command=lambda value=value: self.pick_calendar_day(value))
+                focusable(day_button)
                 activatable(day_button)
                 day_button.grid(row=row, column=column, padx=2, pady=2)
-        label = ('Выберите конец периода' if self.calendar_selecting_end else
-                 f'{self.calendar_start:%d.%m.%Y} – {self.calendar_end:%d.%m.%Y} · Выберите даты')
-        ctk.CTkLabel(self.calendar_body, text=label, height=23, text_color=MUTED,
+        if self.calendar_selecting_end:
+            label = 'Начало выбрано · укажите конец (повтор — один день)'
+        else:
+            label = f'{self.calendar_start:%d.%m.%Y} – {self.calendar_end:%d.%m.%Y}'
+        ctk.CTkLabel(self.calendar_body, text=label, height=20, text_color=TEXT,
                      font=('Segoe UI', 11)).pack(fill='x')
+        ctk.CTkLabel(self.calendar_body, text='Будущие даты недоступны',
+                     height=18, text_color=MUTED,
+                     font=('Segoe UI', 10)).pack(fill='x')
         actions = ctk.CTkFrame(self.calendar_body, fg_color='transparent')
         actions.pack(fill='x', pady=(4, 0))
-        today_button = ctk.CTkButton(actions, text='Сегодня', width=110, height=30,
-                                     fg_color='#263b57',
-                                     command=lambda: self.select_period(self.today(), self.today()))
-        activatable(today_button)
-        today_button.pack(side='left')
-        apply_button = ctk.CTkButton(actions, text='Применить', width=150, height=30, fg_color=BLUE,
-                                     command=lambda: self.select_period(self.calendar_start, self.calendar_end))
+        presets = ctk.CTkFrame(self.calendar_body, fg_color='transparent')
+        presets.pack(fill='x', pady=(2, 0))
+        for text, days in (('Сегодня', 0), ('Вчера', 1), ('7 дней', 7), ('30 дней', 30)):
+            button = ctk.CTkButton(presets, text=text, width=70, height=26, fg_color='#263b57',
+                                   command=lambda days=days: self._select_preset(days))
+            activatable(button)
+            button.pack(side='left', padx=(0, 4))
+        # Пока ждём конец периода, «Применить» коммитил бы один день молча.
+        span_days = (self.calendar_end - self.calendar_start).days
+        apply_text = ('Применить 1 день' if self.calendar_selecting_end
+                      else f'Применить {span_days + 1} дн.')
+        disabled = self.calendar_selecting_end or span_days >= MAX_PERIOD_DAYS
+        apply_button = ctk.CTkButton(actions, text=apply_text, width=150, height=30, fg_color=BLUE,
+                                     state='disabled' if disabled else 'normal',
+                                     command=self._apply_period)
         activatable(apply_button)
         apply_button.pack(side='right')
+
+    def _move_selection(self, days):
+        """Стрелки клавиатуры сдвигают выбранный день и листают месяцы."""
+        base = self.calendar_end if self.calendar_selecting_end else self.calendar_start
+        candidate = base + timedelta(days=days)
+        if candidate > self.today():
+            return
+        self.calendar_start = self.calendar_end = candidate
+        self.calendar_selecting_end = False
+        self.calendar_year, self.calendar_month = candidate.year, candidate.month
+        self.draw_calendar()
+
+    def _apply_period(self):
+        """Применить выбранный диапазон (только когда он полностью задан)."""
+        if self.calendar_selecting_end:
+            return
+        self.select_period(self.calendar_start, self.calendar_end)
+
+    def _select_preset(self, days_back):
+        """Быстрый период: сегодня, вчера или последние N дней."""
+        if days_back == 0:
+            self.select_period(self.today(), self.today())
+        elif days_back == 1:
+            yesterday = self.today() - timedelta(days=1)
+            self.select_period(yesterday, yesterday)
+        else:
+            self.select_period(self.today() - timedelta(days=days_back - 1), self.today())
 
     def pick_calendar_day(self, value):
         if self.calendar_selecting_end:
@@ -872,7 +944,8 @@ class MonitoringSection:
                     checked_generation = (generation, search_generation)
                 try:
                     data = load_dashboard(app_paths.db_file(), start.isoformat(), end.isoformat(), query,
-                                          recent_limit=self.visible_count + FEED_PAGE)
+                                          recent_limit=self.visible_count + FEED_PAGE,
+                                          as_of=today)
                     try: self.results.get_nowait()
                     except queue.Empty: pass
                     self.results.put_nowait((generation, search_generation, (start, end), 'data', data))
