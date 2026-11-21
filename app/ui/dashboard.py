@@ -24,10 +24,11 @@ from app.core import paths as app_paths
 from app.core.paths import PROJECT_ROOT
 from app.core import safe_mode
 from app.ui.tklife import cancel_pending_scripts
+from app.ui import theme
 from app.ui.widgets import activatable
 
 BASE = PROJECT_ROOT
-BG = '#101722'; CARD = '#1a2432'; BORDER = '#303e51'; TEXT = '#f2f5fa'; MUTED = '#a5b1c2'; BLUE = '#377df1'
+BG = theme.BG; CARD = '#1a2432'; BORDER = '#303e51'; TEXT = '#f2f5fa'; MUTED = '#a5b1c2'; BLUE = '#377df1'
 
 
 def direction(value):
@@ -273,7 +274,7 @@ class MonitoringSection:
                                                      font=('Segoe UI', 10))
         self.stream_switch.set('Основной')
         self.stream_switch.pack(side='right')
-        self.video_label = ctk.CTkLabel(video, text='Подключение к камере…', text_color=MUTED, fg_color='#090e16')
+        self.video_label = ctk.CTkLabel(video, text='Подключение к камере…', text_color=MUTED, fg_color=CARD)
         self.video_label.pack(fill='both', expand=True, padx=10, pady=10)
         self.video_label.bind('<Double-Button-1>', self.open_video_fullscreen)
         self.video_label.bind('<Configure>', self._on_video_configure)
@@ -314,6 +315,7 @@ class MonitoringSection:
                                          command=self.clear_search)
         activatable(self.search_clear)
         self.search_clear.pack(side='right', padx=(0, 5))
+        self.search_clear.pack_forget()
         self.search_entry.pack(side='left', fill='x', expand=True)
         self.search_entry.bind('<KeyRelease>', self.schedule_search)
         self.search_entry.bind('<<Paste>>', lambda _event: self.schedule_idle(self.schedule_search))
@@ -649,6 +651,7 @@ class MonitoringSection:
 
     def clear_search(self):
         self.search_entry.delete(0, tk.END)
+        self.search_clear.pack_forget()
         self.schedule_search()
 
     def apply_search(self):
@@ -657,6 +660,10 @@ class MonitoringSection:
         query = normalize_plate(self.search_entry.get())
         if query == previous:
             return
+        if query:
+            self.search_clear.pack(side='right', padx=(0, 5))
+        else:
+            self.search_clear.pack_forget()
         self.search_selection = (generation + 1, query)
         self.visible_count = 30
         self.reset_feed_scroll = True
@@ -703,6 +710,19 @@ class MonitoringSection:
         if label is not None:
             label.grid_forget()
 
+    def _set_feed_scrollbar(self, rows):
+        """Ползунок только когда лента действительно переполнена."""
+        bar = getattr(self.feed, '_scrollbar', None)
+        if bar is None:
+            return
+        try:
+            if len(rows) > 6:
+                bar.grid(row=1, column=1, sticky='nsew', pady=4)
+            else:
+                bar.grid_forget()
+        except tk.TclError:
+            pass
+
     def _set_card_photo(self, card, event_id):
         """Сменить проезд в карточке: старое фото/команду обязательно убрать."""
         if card['photo_for'] == event_id:
@@ -721,10 +741,12 @@ class MonitoringSection:
             for card in self._cards:
                 card['frame'].grid_forget()
             self._feed_message('Не удалось загрузить данные' if error else 'Загрузка…')
+            self._set_feed_scrollbar(())
             self.photo_buttons = {}
             return
         self._hide_feed_message()
         visible = rows[:self.visible_count]
+        self._set_feed_scrollbar(visible)
         buttons = {}
         for index, (event_id, captured, plate, direct, archive) in enumerate(visible):
             try: stamp = datetime.fromisoformat(captured).strftime('%d.%m.%Y  %H:%M:%S')
@@ -743,7 +765,10 @@ class MonitoringSection:
             card['frame'].grid_forget()
         self.photo_buttons = buttons
         if not rows:
-            message = 'По номеру ничего не найдено' if self.search_selection[1] else 'Проездов за выбранный период нет'
+            if self.search_selection[1]:
+                message = 'По номеру ничего не найдено\nИзмените запрос или период'
+            else:
+                message = 'Проездов за выбранный период нет\nПоявятся после распознавания номера'
             self._feed_message(message)
         elif len(rows) > self.visible_count:
             more = getattr(self, '_feed_more_button', None)
@@ -946,8 +971,8 @@ class MonitoringSection:
     def set_video_status(self, state):
         text, color = {
             'connecting': ('● Подключение', MUTED),
-            'online': ('● Онлайн', '#54d49a'),
-            'offline': ('● Офлайн', '#ec8181'),
+            'online': ('● Онлайн', theme.SUCCESS),
+            'offline': ('● Офлайн', theme.DANGER),
             'disabled': ('● Выключен', MUTED),
             'paused': ('● Пауза', MUTED),
         }[state]
@@ -1081,21 +1106,29 @@ class MonitoringSection:
         bins = aggregate_hours(self.hours, interval, current_hour)
         peak = max((count for _, count in bins), default=0)
         step = max(1, math.ceil(peak / 4))
-        ceiling = step * 4
+        ceiling = step * 4 if peak else 1
+        grid_values = [level * step for level in range(5)] if peak else [0]
         left = max(30, self.chart_axis_font.measure(str(ceiling)) + 12)
-        right, top, bottom = w - 16, 12, h - 26
+        right, top, bottom = w - 16, 12, h - 32
         chart_w, chart_h = right - left, bottom - top
-        for level in range(5):
-            value = level * step
+        for value in grid_values:
             y = bottom - chart_h * value / ceiling
             canvas.create_line(left, y, right, y, fill=BORDER)
             canvas.create_text(left - 7, y, text=str(value), fill=MUTED,
                                font=self.chart_axis_font, anchor='e')
-        # Today's line ends at the current interval; historical days span 24 hours.
+        # Historical days span 24 hours; today's line ends at the current hour.
         for hour in range(0, 25, 3):
             x = left + chart_w * hour / 24
-            canvas.create_text(x, bottom + 12, text=f'{hour:02}', fill=MUTED,
-                               font=self.chart_axis_font)
+            if hour:
+                canvas.create_text(x, bottom + 12, text=f'{hour:02}', fill=MUTED,
+                                   font=self.chart_axis_font)
+            if hour not in (0, 24):
+                canvas.create_line(x, top, x, bottom, fill=BORDER)
+        if start is None or start == now.date():
+            now_x = left + chart_w * current_hour / 24
+            canvas.create_line(now_x, top, now_x, bottom, fill='#4a6a8f', dash=(3, 4))
+            canvas.create_text(now_x + 4, top + 2, text='сейчас', fill=MUTED,
+                               font=self.chart_axis_font, anchor='nw')
         points = [(left + chart_w * hour / 24, bottom - chart_h * value / ceiling)
                   for hour, value in bins]
         if len(points) > 1:

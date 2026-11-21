@@ -394,7 +394,9 @@ class MonitoringWidgetsTests(unittest.TestCase):
 
     def test_feed_reports_an_empty_period(self):
         self.section.render_passages([])
-        self.assertIn('Проездов за выбранный период нет', self._texts())
+        texts = self._texts()
+        self.assertTrue(any(text and text.startswith('Проездов за выбранный период нет')
+                            for text in texts))
 
     def test_feed_reports_a_failed_load(self):
         self.section.render_passages(None, error=True)
@@ -430,6 +432,36 @@ class MonitoringWidgetsTests(unittest.TestCase):
         # Все точки графика — на одной высоте: за день проездов не было.
         heights = {args[1] for args, _ in self.section.graph.ovals}
         self.assertEqual(len(heights), 1, 'пустой день должен давать ровную линию')
+
+    def test_chart_does_not_repeat_zero_on_both_axes(self):
+        self.section.draw_chart()
+        labels = [kwargs.get('text') for _, kwargs in self.section.graph.texts]
+        self.assertNotIn('00', labels)
+        self.assertEqual(labels.count('0'), 1)
+
+    def test_today_chart_marks_the_current_hour(self):
+        today = date.today()
+        self.section.display_period = (today, today)
+        self.section.draw_chart()
+        labels = [kwargs.get('text') for _, kwargs in self.section.graph.texts]
+        self.assertIn('сейчас', labels)
+
+    def test_feed_scrollbar_appears_only_when_needed(self):
+        class FakeScrollbar:
+            state = None
+
+            def grid(self, **kwargs):
+                self.state = 'shown'
+
+            def grid_forget(self):
+                self.state = 'hidden'
+
+        bar = FakeScrollbar()
+        self.section.feed._scrollbar = bar
+        self.section._set_feed_scrollbar(list(range(3)))
+        self.assertEqual(bar.state, 'hidden')
+        self.section._set_feed_scrollbar(list(range(20)))
+        self.assertEqual(bar.state, 'shown')
 
     def _poll_with_hours(self, hours):
         """Один цикл poll() с готовым ответом данных, без Tk и планировщика."""
