@@ -28,6 +28,9 @@ if errorlevel 1 goto :fail
 python -c "import requests, fastapi, uvicorn, PIL, customtkinter, pystray, cv2, tkinter, tzdata; print('[install] импорты OK')"
 if errorlevel 1 goto :fail
 
+python -c "from app.core.paths import ensure_data_dirs; ensure_data_dirs(); print('[install] структура data создана')"
+if errorlevel 1 goto :fail
+
 if not exist ".env" (
   copy ".env.example" ".env" >nul
   echo [install] Создан .env — запустите settings.bat и заполните данные.
