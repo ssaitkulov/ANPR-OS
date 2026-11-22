@@ -147,6 +147,7 @@ class Store:
                 attempts INTEGER NOT NULL DEFAULT 0,
                 last_error TEXT,
                 next_attempt_at REAL,
+                photo_path TEXT,
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 sent_at TEXT
             );
@@ -186,10 +187,14 @@ class Store:
         self._migrate_event_keys()
 
     def _upgrade_outbox(self):
-        """Добавить в старую очередь колонку отложенной попытки (next_attempt_at)."""
+        """Добавить недостающие колонки в старую очередь (идемпотентно)."""
         columns = {row[1] for row in self.conn.execute('PRAGMA table_info(outbox)')}
         if 'next_attempt_at' not in columns:
             self.conn.execute('ALTER TABLE outbox ADD COLUMN next_attempt_at REAL')
+        if 'photo_path' not in columns:
+            # Путь к уже сохранённому на диске снимку: при досылке после
+            # недоступности Telegram сообщение уходит с фото, а не текстом.
+            self.conn.execute('ALTER TABLE outbox ADD COLUMN photo_path TEXT')
 
     def _add_missing_columns(self, columns):
         conn = self.conn
@@ -424,17 +429,23 @@ class Store:
 
     # -- outbox ------------------------------------------------------------
 
-    def enqueue_text(self, event_id, chat_id, body, kind='text'):
-        """Положить сообщение в очередь. Повтор разрешён сразу."""
+    def enqueue_text(self, event_id, chat_id, body, kind='text', photo_path=None):
+        """Положить сообщение в очередь. Повтор разрешён сразу.
+
+        photo_path — путь к уже сохранённому снимку, чтобы досылка после
+        недоступности Telegram ушла с фото, а не голым текстом.
+        """
         with self.lock:
-            self.conn.execute('INSERT INTO outbox(event_id,chat_id,body,kind,next_attempt_at) VALUES(?,?,?,?,?)',
-                              (event_id, str(chat_id), body, kind, time.time()))
+            self.conn.execute(
+                'INSERT INTO outbox(event_id,chat_id,body,kind,next_attempt_at,photo_path) '
+                'VALUES(?,?,?,?,?,?)',
+                (event_id, str(chat_id), body, kind, time.time(), photo_path))
             self.conn.commit()
 
     def pending(self, limit=100):
         """Записи, готовые к отправке: статус pending и пауза повтора истекла."""
         with self.lock:
-            return self.conn.execute('''SELECT id,event_id,chat_id,body,kind,attempts,next_attempt_at FROM outbox
+            return self.conn.execute('''SELECT id,event_id,chat_id,body,kind,attempts,next_attempt_at,photo_path FROM outbox
                                         WHERE status='pending'
                                           AND (next_attempt_at IS NULL OR next_attempt_at<=?)
                                         ORDER BY id LIMIT ?''', (time.time(), limit)).fetchall()

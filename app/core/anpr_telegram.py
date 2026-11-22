@@ -604,18 +604,20 @@ def telegram_send_document(filename: str, data: bytes, caption: str = '',
     return bool(delivered)
 
 
-def queue_missed_text(text: str, kind: str = 'text', chats: list | None = None) -> None:
+def queue_missed_text(text: str, kind: str = 'text', chats: list | None = None,
+                      photo_path: str | None = None) -> None:
     """Сохранить текст в очереди недоставленных.
 
     chats=None — всем текущим получателям; chats=[] — широковещательно
     (получателей пока нет): сообщение дойдёт, как только подписчики появятся.
+    photo_path — уже сохранённый на диске снимок: досылка уйдёт с фото.
     """
     targets = list(chats) if chats is not None else get_recipients()
     if not targets:
         targets = [BROADCAST_CHAT]
     for cid in targets:
         try:
-            STORE.enqueue_text(None, cid, text, kind)
+            STORE.enqueue_text(None, cid, text, kind, photo_path=photo_path)
         except sqlite3.Error as error:
             print(f'[outbox] сообщение не сохранено: {error}', file=sys.stderr)
 
@@ -627,12 +629,29 @@ def _outbox_body(rows: list) -> str:
     """Текст накопившихся сообщений для одного чата."""
     kinds = {row[4] for row in rows}
     if kinds and kinds <= {'entry_without_photo'}:
-        return ('📥 <b>Telegram был недоступен. Накопилось проездов: '
-                f'{len(rows)}</b>\n\n' + '\n'.join(f'• {row[3]}' for row in rows) +
-                '\n\nФотографии этих проездов недоступны: в момент сбоя они не сохранялись.')
+        text = ('📥 <b>Telegram был недоступен. Накопилось проездов: '
+                f'{len(rows)}</b>\n\n' + '\n'.join(f'• {row[3]}' for row in rows))
+        # Раньше здесь писалось, что фото «не сохранялись» — это было неправдой:
+        # снимки лежат в архиве, в очереди просто не было пути к ним.
+        if not any(len(row) > 7 and row[7] for row in rows):
+            text += '\n\nФотографии этих проездов не были сохранены в момент сбоя.'
+        return text
     parts = [f'📥 <b>Telegram был недоступен. Накопилось сообщений: {len(rows)}</b>']
     parts.extend(row[3] for row in rows)
     return '\n\n'.join(parts)
+
+
+def _outbox_photo(photo_path) -> bytes | None:
+    """Прочитать сохранённый снимок для досылки. Нет файла — вернём None."""
+    if not photo_path:
+        return None
+    try:
+        path = app_paths.resolve_photo_path(photo_path)
+        if path and path.exists():
+            return path.read_bytes()
+    except (OSError, ValueError, TypeError):
+        pass
+    return None
 
 
 def flush_missed_messages() -> bool:
@@ -702,6 +721,19 @@ def _flush_broadcast(rows: list) -> bool:
     return delivered
 
 
+def _flush_photo_rows(chat_id, rows: list) -> bool:
+    """Доставить накопленные проезды снимками: каждому чату фото + подпись."""
+    delivered = False
+    for row in rows:
+        image = _outbox_photo(row[7]) if len(row) > 7 else None
+        if telegram_send_photo_to(chat_id, image, row[3]):
+            STORE.mark_sent(row[0])
+            delivered = True
+        elif _mark_failed(row[0], 'Telegram недоступен') == 'dead':
+            _report_dead(row[0], row, chat_id)
+    return delivered
+
+
 def _flush_missed_messages() -> bool:
     """Доставка очереди по чатам: успех считается по каждому чату отдельно."""
     grouped = STORE.pending_grouped()
@@ -711,6 +743,10 @@ def _flush_missed_messages() -> bool:
     for chat_id, rows in grouped.items():
         if not str(chat_id):
             delivered = _flush_broadcast(rows) or delivered
+            continue
+        # Если снимок был сохранён на диске — досылаем проезд с фото.
+        if any(len(row) > 7 and row[7] for row in rows):
+            delivered = _flush_photo_rows(chat_id, rows) or delivered
             continue
         body = _outbox_body(rows)
         if telegram_send_to(chat_id, body):
@@ -763,7 +799,8 @@ def telegram_send_media_group_to(chat_id: str, items: list) -> bool:
         return False
 
 
-def telegram_send_media_group(items: list, kind: str = 'entry_without_photo') -> bool:
+def telegram_send_media_group(items: list, kind: str = 'entry_without_photo',
+                              photo_path: str | None = None) -> bool:
     """items: [(image_bytes, caption), ...] — одним sendMediaGroup в каждый чат (макс 10 фото).
 
     Чату, где альбом не доставился, текст уходит в очередь с его chat_id:
@@ -773,13 +810,13 @@ def telegram_send_media_group(items: list, kind: str = 'entry_without_photo') ->
         return False
     if not TELEGRAM_BOT_TOKEN:
         print("[telegram] не задан TELEGRAM_BOT_TOKEN — подпись ждёт в очереди", file=sys.stderr)
-        queue_missed_text(items[0][1] if items else '', kind=kind, chats=[])
+        queue_missed_text(items[0][1] if items else '', kind=kind, chats=[], photo_path=photo_path)
         return False
     items = items[:10]
     recs = get_recipients()
     caption = items[0][1] if items else ''
     if not recs:
-        queue_missed_text(caption, kind=kind, chats=[])
+        queue_missed_text(caption, kind=kind, chats=[], photo_path=photo_path)
         print("[telegram] нет получателей — подпись сохранена в очереди", file=sys.stderr)
         _set_delivery([], [])
         return False
@@ -791,7 +828,7 @@ def telegram_send_media_group(items: list, kind: str = 'entry_without_photo') ->
             failed.append(cid)
     _set_delivery(delivered, failed)
     for cid in failed:
-        queue_missed_text(caption, kind=kind, chats=[cid])
+        queue_missed_text(caption, kind=kind, chats=[cid], photo_path=photo_path)
     return bool(delivered)
 
 
@@ -859,15 +896,20 @@ def telegram_send_photo_to(chat_id: str, image_bytes: bytes | None, caption: str
         return False
 
 
-def telegram_send_photo(image_bytes: bytes | None, caption: str, kind: str = 'entry_without_photo') -> bool:
-    """Отправить снимок всем получателям; недоставленным чатам текст уходит в очередь."""
+def telegram_send_photo(image_bytes: bytes | None, caption: str, kind: str = 'entry_without_photo',
+                        photo_path: str | None = None) -> bool:
+    """Отправить снимок всем получателям; недоставленным чатам уходит запись в очередь.
+
+    Вместе с подписью сохраняется путь к снимку — после восстановления связи
+    проезд досылается с фото.
+    """
     if not TELEGRAM_BOT_TOKEN:
         print("[telegram] не задан TELEGRAM_BOT_TOKEN — подпись ждёт в очереди", file=sys.stderr)
-        queue_missed_text(caption, kind=kind, chats=[])
+        queue_missed_text(caption, kind=kind, chats=[], photo_path=photo_path)
         return False
     recs = get_recipients()
     if not recs:
-        queue_missed_text(caption, kind=kind, chats=[])
+        queue_missed_text(caption, kind=kind, chats=[], photo_path=photo_path)
         print("[telegram] нет получателей — подпись сохранена в очереди", file=sys.stderr)
         _set_delivery([], [])
         return False
@@ -879,7 +921,7 @@ def telegram_send_photo(image_bytes: bytes | None, caption: str, kind: str = 'en
             failed.append(cid)
     _set_delivery(delivered, failed)
     for cid in failed:
-        queue_missed_text(caption, kind=kind, chats=[cid])
+        queue_missed_text(caption, kind=kind, chats=[cid], photo_path=photo_path)
     return bool(delivered)
 
 
@@ -900,10 +942,14 @@ def send_entry_notification(rec: dict, images, dry_run: bool = False) -> None:
         return
     send_started = time.monotonic()
     seq_before = _delivery_seq()
+    # Снимок уже сохранён на диск до отправки — запоминаем путь, чтобы при
+    # недоступности Telegram дослать проезд с фото, а не голым текстом.
+    photo_path = STORE.get_photo_path(rec.get('iso', ''), rec.get('plate', ''))
     if len(image_list) >= 2:
-        ok = telegram_send_media_group([(image_list[0], caption)] + [(im, "") for im in image_list[1:]])
+        ok = telegram_send_media_group([(image_list[0], caption)] + [(im, "") for im in image_list[1:]],
+                                       photo_path=photo_path)
     elif len(image_list) == 1:
-        ok = telegram_send_photo(image_list[0], caption)
+        ok = telegram_send_photo(image_list[0], caption, photo_path=photo_path)
     else:
         ok = telegram_send(caption, kind='entry_without_photo')
     delivered_at = now_local().isoformat()

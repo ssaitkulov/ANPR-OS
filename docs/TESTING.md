@@ -11,8 +11,8 @@
 | Показатель | Значение |
 |---|---|
 | Тестовых файлов | 37 (`tests/test_*.py`) + `tests/anpr_testenv.py` (изоляция) + `tests/ui_harness.py` (общая оснастка UI) |
-| Тестов собрано | **488** (одинаково у pytest и `unittest discover`) |
-| Уникальных имён тестов | 488 — совпадений имён нет (см. §4) |
+| Тестов собрано | **491** (одинаково у pytest и `unittest discover`) |
+| Уникальных имён тестов | 491 — совпадений имён нет (см. §4) |
 | Полный прогон | ~1 мин 35 с: `python -m pytest -q` — 94 с, `python -m unittest discover` — 96 с |
 | UI-часть | 80 с на 7 файлов (`test_service_panel.py`, `test_context_panel.py`, `test_stage2_ui.py`, `test_shell.py`, `test_dashboard.py`, `test_panel_status.py`, `test_segmented_tabs.py`) |
 | Быстрый smoke | `python -m pytest -q tests/test_stream_latency.py tests/test_setup_anpr.py` — 0,3 с |
@@ -39,7 +39,7 @@
 | Класс | Что проверяет | Граница | Файлов | Тестов |
 |---|---|---|---|---|
 | **UNIT** | одну функцию или модуль в отрыве от системы | нет сети, нет живого сервиса, нет боевой базы; только временные каталоги | 14 | 61 |
-| **INTEGRATION** | несколько модулей вместе: ядро + SQLite + очередь, HTTP-сервис + токен, интерфейс без окна | сеть замкана, потоки и процессы — заглушки | 21 | 401 |
+| **INTEGRATION** | несколько модулей вместе: ядро + SQLite + очередь, HTTP-сервис + токен, интерфейс без окна | сеть замкана, потоки и процессы — заглушки | 21 | 404 |
 | **ACCEPTANCE** | соответствие боевому регламенту: сверка источников, инструменты приёмки | идёт по рабочим данным, код возврата важен | 2 | 26 |
 
 ### 2.1 UNIT (14 файлов, 61 тест)
@@ -48,7 +48,7 @@
 |---|---|---|
 | `test_paths.py` | 17 | `app/core/paths.py`: пути от корня проекта, переносимость, прежние места данных |
 | `test_camera_events.py` | 9 | разбор событий камеры: текст snapManager, группировка, отбор проездов (`is_countable`, направление, полоса) |
-| `test_storage_and_outbox.py` | 5 | `app/storage/database.py`: SQLite и очередь во временной базе |
+| `test_storage_and_outbox.py` | 8 | `app/storage/database.py`: SQLite и очередь во временной базе, путь к фото в очереди |
 | `test_app_preferences.py` | 4 | `app/core/preferences.py`: настройки панели, реестр Windows |
 | `test_event_images.py` | 4 | `app/storage/event_images.py`: вырезка номера |
 | `test_directions.py` | 3 | направление движения, фильтр `DIRECTION` |
@@ -61,7 +61,7 @@
 | `test_ai_and_photo_archive.py` | 1 | `app/storage/photo_archive.py` + путь фото в базе |
 | `test_passages.py` | 1 | проезды: ключ и нормализация номера |
 
-### 2.2 INTEGRATION (21 файлов, 401 тест)
+### 2.2 INTEGRATION (21 файлов, 404 теста)
 
 | Файл | Тестов | Предмет |
 |---|---|---|

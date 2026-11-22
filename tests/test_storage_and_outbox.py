@@ -46,7 +46,9 @@ class OutboxTests(unittest.TestCase):
     def test_failed_photo_delivery_queues_text_only(self):
         class FakeStore:
             def __init__(self): self.rows = []
-            def enqueue_text(self, event_id, chat_id, body, kind): self.rows.append((chat_id, body, kind))
+            def enqueue_text(self, event_id, chat_id, body, kind, photo_path=None):
+                self.rows.append((chat_id, body, kind, photo_path))
+            def get_photo_path(self, captured_at, plate): return None
         fake = FakeStore()
         with patch.object(bot, 'STORE', fake), patch.object(bot, 'get_recipients', return_value=['42']), \
              patch.object(bot, 'telegram_send_media_group_to', return_value=False), \
@@ -83,7 +85,54 @@ class OutboxTests(unittest.TestCase):
             def mark_failed(self, row_id, error): pass
         with patch.object(bot, 'STORE', FakeStore()), patch.object(bot, 'TELEGRAM_BOT_TOKEN', '123:token'), patch.object(bot, 'telegram_send_to', return_value=True) as send:
             bot.flush_missed_messages()
-        self.assertIn('Фотографии этих проездов недоступны', send.call_args.args[1])
+        self.assertIn('не были сохранены в момент сбоя', send.call_args.args[1])
+
+
+    def test_outbox_keeps_photo_path_for_redelivery(self):
+        with tempfile.TemporaryDirectory() as folder:
+            store = Store(Path(folder) / 'events.sqlite3')
+            store.enqueue_text(None, '42', 'ABC · 20:00', 'entry_without_photo',
+                               photo_path='2026-11-22/abc.jpg')
+            row = store.pending()[0]
+            self.assertEqual(row[7], '2026-11-22/abc.jpg')
+            store.close()
+
+    def test_flush_sends_saved_photo_instead_of_bare_text(self):
+        with tempfile.TemporaryDirectory() as folder:
+            photo = Path(folder) / 'car.jpg'
+            photo.write_bytes(b'JPEGDATA')
+
+            class FakeStore:
+                def pending_grouped(self):
+                    return {'42': [(1, None, '42', 'ABC · 20:00', 'entry_without_photo',
+                                    0, None, str(photo))]}
+                def mark_sent(self, row_id): self.sent = row_id
+                def mark_failed(self, row_id, error): pass
+
+            fake = FakeStore()
+            with patch.object(bot, 'STORE', fake), \
+                 patch.object(bot, 'TELEGRAM_BOT_TOKEN', '123:token'), \
+                 patch.object(bot, 'telegram_send_photo_to', return_value=True) as send:
+                self.assertTrue(bot.flush_missed_messages())
+            self.assertEqual(send.call_args.args[1], b'JPEGDATA')
+            self.assertEqual(send.call_args.args[2], 'ABC · 20:00')
+            self.assertEqual(fake.sent, 1)
+
+    def test_old_outbox_gets_photo_path_column(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / 'old.sqlite3'
+            import sqlite3
+            conn = sqlite3.connect(path)
+            conn.execute('''CREATE TABLE outbox (
+                id INTEGER PRIMARY KEY, event_id INTEGER, chat_id TEXT, body TEXT,
+                kind TEXT, status TEXT DEFAULT 'pending', attempts INTEGER DEFAULT 0,
+                last_error TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP, sent_at TEXT)''')
+            conn.commit()
+            conn.close()
+            store = Store(path)
+            columns = {row[1] for row in store.conn.execute('PRAGMA table_info(outbox)')}
+            self.assertIn('photo_path', columns)
+            store.close()
 
 
 if __name__ == '__main__':

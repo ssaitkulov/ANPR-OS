@@ -18,7 +18,7 @@ class FakeStore:
         self.failed = []
         self.events = []
 
-    def enqueue_text(self, event_id, chat_id, body, kind='text'):
+    def enqueue_text(self, event_id, chat_id, body, kind='text', photo_path=None):
         self.rows.append((len(self.rows) + 1, event_id, chat_id, body, kind, 0))
 
     def pending(self, limit=100):
