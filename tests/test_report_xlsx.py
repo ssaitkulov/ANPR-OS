@@ -15,11 +15,18 @@ import anpr_telegram as bot
 from app.core.report_xlsx import build_report_xlsx, report_summary
 
 EVENTS = [
-    {'time': '08:15:03', 'plate': '01A123BC', 'color': 'White', 'type': 'Car',
-     'speed': '60', 'direction': 'Approach', 'lane': '1', 'backfill': False},
-    {'time': '09:20:11', 'plate': '02B456DE', 'color': 'Black', 'type': 'Truck',
-     'speed': '40', 'direction': 'Leave', 'lane': '2', 'backfill': True},
+    {'time': '08:15:03', 'plate': '01A123BC', 'color': 'White', 'type': 'SaloonCar',
+     'speed': '60', 'direction': 'Obverse', 'lane': '1', 'backfill': False},
+    {'time': '09:20:11', 'plate': '02B456DE', 'color': 'Black', 'type': 'SUV',
+     'speed': '40', 'direction': 'Reverse', 'lane': '2', 'backfill': True},
 ]
+
+
+def _xlsx(events=None):
+    """Файл с теми же форматтерами, что использует боевой отправщик."""
+    return build_report_xlsx('2026-11-22',
+                             EVENTS if events is None else events,
+                             bot.display_plate, bot._report_direction)
 
 
 def _parts(data: bytes) -> dict:
@@ -30,7 +37,7 @@ def _parts(data: bytes) -> dict:
 
 class XlsxStructureTests(unittest.TestCase):
     def test_single_sheet_named_proezdy(self):
-        parts = _parts(build_report_xlsx('2026-11-22', EVENTS))
+        parts = _parts(_xlsx())
         self.assertIn('xl/worksheets/sheet1.xml', parts)
         self.assertNotIn('xl/worksheets/sheet2.xml', parts)
         self.assertIn('name="Проезды"', parts['xl/workbook.xml'])
@@ -39,15 +46,37 @@ class XlsxStructureTests(unittest.TestCase):
             '[Content_Types].xml', '_rels/.rels', 'xl/styles.xml')))
 
     def test_detail_sheet_has_header_and_each_event(self):
-        parts = _parts(build_report_xlsx('2026-11-22', EVENTS))
+        parts = _parts(_xlsx())
         sheet = parts['xl/worksheets/sheet1.xml']
         self.assertIn('Номер', sheet)
         self.assertIn('Источник', sheet)
         self.assertNotIn('Скорость', sheet)
         self.assertNotIn('Полоса', sheet)
-        self.assertIn('01A123BC', sheet)
-        self.assertIn('02B456DE', sheet)
+        self.assertIn('<c r="A1" t="inlineStr" s="1"><is><t xml:space="preserve">№</t></is></c>', sheet)
+        self.assertIn('01 A 123 BC', sheet)  # display_plate
+        self.assertIn('02 B 456 DE', sheet)
         self.assertIn(f'<row r="{len(EVENTS) + 1}">', sheet)
+
+    def test_rows_are_numbered(self):
+        sheet = _parts(_xlsx())['xl/worksheets/sheet1.xml']
+        self.assertIn('<c r="A2"><v>1</v></c>', sheet)
+        self.assertIn('<c r="A3"><v>2</v></c>', sheet)
+
+    def test_direction_source_color_and_type_are_localized(self):
+        sheet = _parts(_xlsx())['xl/worksheets/sheet1.xml']
+        self.assertIn('Entry', sheet)          # Obverse
+        self.assertIn('Exit', sheet)           # Reverse
+        self.assertIn('Камера', sheet)
+        self.assertIn('Архив', sheet)
+        self.assertIn('Белый', sheet)
+        self.assertIn('Чёрный', sheet)
+        self.assertIn('Легковой', sheet)
+        self.assertIn('Внедорожник', sheet)
+
+    def test_unknown_color_and_type_are_marked(self):
+        events = [dict(EVENTS[0], color='Unknown', type='')]
+        sheet = _parts(_xlsx(events))['xl/worksheets/sheet1.xml']
+        self.assertIn('Не определён', sheet)
 
     def test_special_characters_are_escaped(self):
         events = [dict(EVENTS[0], plate='A&B <C>')]

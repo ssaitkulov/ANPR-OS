@@ -11,8 +11,8 @@
 | Показатель | Значение |
 |---|---|
 | Тестовых файлов | 37 (`tests/test_*.py`) + `tests/anpr_testenv.py` (изоляция) + `tests/ui_harness.py` (общая оснастка UI) |
-| Тестов собрано | **485** (одинаково у pytest и `unittest discover`) |
-| Уникальных имён тестов | 485 — совпадений имён нет (см. §4) |
+| Тестов собрано | **488** (одинаково у pytest и `unittest discover`) |
+| Уникальных имён тестов | 488 — совпадений имён нет (см. §4) |
 | Полный прогон | ~1 мин 35 с: `python -m pytest -q` — 94 с, `python -m unittest discover` — 96 с |
 | UI-часть | 80 с на 7 файлов (`test_service_panel.py`, `test_context_panel.py`, `test_stage2_ui.py`, `test_shell.py`, `test_dashboard.py`, `test_panel_status.py`, `test_segmented_tabs.py`) |
 | Быстрый smoke | `python -m pytest -q tests/test_stream_latency.py tests/test_setup_anpr.py` — 0,3 с |
@@ -39,7 +39,7 @@
 | Класс | Что проверяет | Граница | Файлов | Тестов |
 |---|---|---|---|---|
 | **UNIT** | одну функцию или модуль в отрыве от системы | нет сети, нет живого сервиса, нет боевой базы; только временные каталоги | 14 | 61 |
-| **INTEGRATION** | несколько модулей вместе: ядро + SQLite + очередь, HTTP-сервис + токен, интерфейс без окна | сеть замкана, потоки и процессы — заглушки | 21 | 398 |
+| **INTEGRATION** | несколько модулей вместе: ядро + SQLite + очередь, HTTP-сервис + токен, интерфейс без окна | сеть замкана, потоки и процессы — заглушки | 21 | 401 |
 | **ACCEPTANCE** | соответствие боевому регламенту: сверка источников, инструменты приёмки | идёт по рабочим данным, код возврата важен | 2 | 26 |
 
 ### 2.1 UNIT (14 файлов, 61 тест)
@@ -61,7 +61,7 @@
 | `test_ai_and_photo_archive.py` | 1 | `app/storage/photo_archive.py` + путь фото в базе |
 | `test_passages.py` | 1 | проезды: ключ и нормализация номера |
 
-### 2.2 INTEGRATION (21 файлов, 398 тестов)
+### 2.2 INTEGRATION (21 файлов, 401 тест)
 
 | Файл | Тестов | Предмет |
 |---|---|---|
@@ -85,7 +85,7 @@
 | `test_panel_status.py` | 5 | `app/ui/status.py` через `Panel.update_status` |
 | `test_live_duplicates.py` | 3 | дедупликация живых событий |
 | `test_ui_perf.py` | 4 | диагностика event-loop и производительности UI (включается `EVRIKA_PERF_LOG=1`) |
-| `test_report_xlsx.py` | 10 | XLSX-отчёт: структура zip/XML, экранирование, отправка `sendDocument` и откат на текст |
+| `test_report_xlsx.py` | 13 | XLSX-отчёт: структура zip/XML, нумерация, локализация, отправка `sendDocument` и откат на текст |
 
 ### 2.3 ACCEPTANCE (2 файла, 26 тестов)
 

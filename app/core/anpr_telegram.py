@@ -1432,6 +1432,11 @@ def due_report_days(state: dict, now: datetime) -> list:
     return days
 
 
+def _report_direction(value) -> str:
+    """Направление для XLSX: Entry / Exit — через общий разбор прошивки."""
+    return {'Approach': 'Entry', 'Leave': 'Exit', '': '—'}[direction_kind(value)]
+
+
 def send_report_for_day(state: dict, day: str, dry_run: bool = False) -> bool:
     """Отправить отчёт за день XLSX-файлом и отметить день как отправленный."""
     events = [record_from_row(row) for row in STORE.day_passages(day)]
@@ -1441,7 +1446,7 @@ def send_report_for_day(state: dict, day: str, dry_run: bool = False) -> bool:
     print(text)
     if dry_run:
         return True
-    xlsx = build_report_xlsx(day, events, display_plate)
+    xlsx = build_report_xlsx(day, events, display_plate, _report_direction)
     total, unique, _avg = report_summary(events)
     caption = f'📊 Отчёт за {day}: {total} проездов, {unique} номеров'
     ok = telegram_send_document(f'anpr-{day}.xlsx', xlsx, caption, kind='report')

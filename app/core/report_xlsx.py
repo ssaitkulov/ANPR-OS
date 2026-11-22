@@ -106,6 +106,26 @@ def _sheet(rows: list[list], widths: list[int]) -> str:
             f'{auto_filter}</worksheet>')
 
 
+_COLORS_RU = {
+    'white': 'Белый', 'black': 'Чёрный', 'blue': 'Синий', 'yellow': 'Жёлтый',
+    'green': 'Зелёный', 'pink': 'Розовый', 'purple': 'Фиолетовый',
+    'red': 'Красный', 'gray': 'Серый', 'grey': 'Серый', 'silver': 'Серебристый',
+    'unknown': 'Не определён', '': '—',
+}
+
+_TYPES_RU = {
+    'salooncar': 'Легковой', 'suv': 'Внедорожник', 'truck': 'Грузовой',
+    'bus': 'Автобус', 'van': 'Фургон', 'motorcycle': 'Мотоцикл',
+    'unknown': 'Не определён', '': '—',
+}
+
+
+def _ru(value, mapping: dict) -> str:
+    """Перевести значение камеры в русский текст, неизвестное оставить как есть."""
+    key = str(value or '').strip().lower()
+    return mapping.get(key, str(value or '—'))
+
+
 def report_summary(events: list[dict]) -> tuple[int, int, str]:
     """Сводка для подписи к файлу: всего, уникальных, средняя скорость."""
     total = len(events)
@@ -116,24 +136,31 @@ def report_summary(events: list[dict]) -> tuple[int, int, str]:
     return total, unique, avg
 
 
-def build_report_xlsx(day: str, events: list[dict], plate_fmt=None) -> bytes:
-    """Собрать XLSX за день. plate_fmt — display_plate из ядра (без циклического импорта)."""
+def build_report_xlsx(day: str, events: list[dict], plate_fmt=None,
+                      direction_fmt=None) -> bytes:
+    """Собрать XLSX за день.
+
+    plate_fmt и direction_fmt передаёт ядро — так не дублируются форматирование
+    номера и список значений направления из прошивки камеры.
+    """
     fmt = plate_fmt or (lambda value: str(value or '—'))
+    direction = direction_fmt or (lambda value: str(value or '—'))
     rows = [[
-        'Дата', 'Время', 'Номер', 'Цвет', 'Тип', 'Направление', 'Источник',
+        '№', 'Дата', 'Время', 'Номер', 'Цвет', 'Тип', 'Направление', 'Источник',
     ]]
-    for event in events:
+    for number, event in enumerate(events, 1):
         rows.append([
+            number,
             day,
             event.get('time', ''),
             fmt(event.get('plate', '—')),
-            event.get('color', '') or '—',
-            event.get('type', '') or '—',
-            event.get('direction', '') or '—',
-            'архив' if event.get('backfill') else 'живой',
+            _ru(event.get('color', ''), _COLORS_RU),
+            _ru(event.get('type', ''), _TYPES_RU),
+            direction(event.get('direction', '')),
+            'Архив' if event.get('backfill') else 'Камера',
         ])
     if not events:
-        rows.append([day, '—', 'проездов не зафиксировано'])
+        rows.append(['—', day, '—', 'проездов не зафиксировано'])
 
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, 'w', zipfile.ZIP_DEFLATED) as archive:
