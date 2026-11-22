@@ -1,8 +1,8 @@
 """Генерация XLSX-отчёта без внешних зависимостей.
 
-Минимальный SpreadsheetML: две вкладки («Итоги», «Проезды»), строки через
-inlineStr, поэтому не нужен sharedStrings, и весь файл собирается в памяти.
-Excel, LibreOffice и Telegram-превью открывают такой файл без предупреждений.
+Минимальный SpreadsheetML: одна вкладка «Проезды», строки через inlineStr,
+поэтому не нужен sharedStrings, и весь файл собирается в памяти. Excel,
+LibreOffice и Telegram-превью открывают такой файл без предупреждений.
 
 Безопасно для офлайн-поставки: не добавляет пакетов в requirements-lock.
 """
@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import io
 import zipfile
-from datetime import datetime
 from xml.sax.saxutils import escape
 
 _NS = 'http://schemas.openxmlformats.org/spreadsheetml/2006/main'
@@ -24,7 +23,6 @@ _CONTENT_TYPES = f'''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <Default Extension="xml" ContentType="application/xml"/>
 <Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>
 <Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>
-<Override PartName="/xl/worksheets/sheet2.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>
 <Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>
 </Types>'''
 
@@ -36,16 +34,14 @@ _ROOT_RELS = f'''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 _WORKBOOK = f'''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <workbook xmlns="{_NS}" xmlns:r="{_NS_R}">
 <sheets>
-<sheet name="Итоги" sheetId="1" r:id="rId1"/>
-<sheet name="Проезды" sheetId="2" r:id="rId2"/>
+<sheet name="Проезды" sheetId="1" r:id="rId1"/>
 </sheets>
 </workbook>'''
 
 _WORKBOOK_RELS = f'''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <Relationships xmlns="{_NS_PKG}">
 <Relationship Id="rId1" Type="{_NS_R}/worksheet" Target="worksheets/sheet1.xml"/>
-<Relationship Id="rId2" Type="{_NS_R}/worksheet" Target="worksheets/sheet2.xml"/>
-<Relationship Id="rId3" Type="{_NS_R}/styles" Target="styles.xml"/>
+<Relationship Id="rId2" Type="{_NS_R}/styles" Target="styles.xml"/>
 </Relationships>'''
 
 _STYLES = f'''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
@@ -85,26 +81,25 @@ def _cell(ref: str, value, bold: bool = False) -> str:
     return f'<c r="{ref}" t="inlineStr"{style}><is><t xml:space="preserve">{text}</t></is></c>'
 
 
-def _sheet(rows: list[list], widths: list[int], *, header: bool = True,
-           freeze: bool = False) -> str:
+def _sheet(rows: list[list], widths: list[int]) -> str:
     count = max((len(row) for row in rows), default=1)
     dimension = f'A1:{_col(count)}{max(len(rows), 1)}'
     cols = ''.join(
         f'<col min="{i}" max="{i}" width="{width}" customWidth="1"/>'
         for i, width in enumerate(widths, 1)
     )
-    pane = ('<pane ySplit="1" topLeftCell="A2" activePane="bottomLeft" state="frozen"/>'
-            if freeze else '')
     body = []
     for r, row in enumerate(rows, 1):
-        cells = ''.join(_cell(f'{_col(c)}{r}', value, bold=(header and r == 1))
+        cells = ''.join(_cell(f'{_col(c)}{r}', value, bold=(r == 1))
                         for c, value in enumerate(row, 1))
         body.append(f'<row r="{r}">{cells}</row>')
-    auto_filter = f'<autoFilter ref="{dimension}"/>' if header and len(rows) > 1 else ''
+    auto_filter = f'<autoFilter ref="{dimension}"/>' if len(rows) > 1 else ''
     return (f'<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
             f'<worksheet xmlns="{_NS}">'
             f'<dimension ref="{dimension}"/>'
-            f'<sheetViews><sheetView workbookViewId="0">{pane}</sheetView></sheetViews>'
+            f'<sheetViews><sheetView workbookViewId="0">'
+            f'<pane ySplit="1" topLeftCell="A2" activePane="bottomLeft" state="frozen"/>'
+            f'</sheetView></sheetViews>'
             f'<sheetFormatPr defaultRowHeight="15"/>'
             f'<cols>{cols}</cols>'
             f'<sheetData>{"".join(body)}</sheetData>'
@@ -112,7 +107,7 @@ def _sheet(rows: list[list], widths: list[int], *, header: bool = True,
 
 
 def report_summary(events: list[dict]) -> tuple[int, int, str]:
-    """Те же цифры, что и в текстовом отчёте: всего, уникальных, средняя скорость."""
+    """Сводка для подписи к файлу: всего, уникальных, средняя скорость."""
     total = len(events)
     unique = len({e.get('plate', '—') for e in events})
     speeds = [float(e['speed']) for e in events
@@ -124,33 +119,21 @@ def report_summary(events: list[dict]) -> tuple[int, int, str]:
 def build_report_xlsx(day: str, events: list[dict], plate_fmt=None) -> bytes:
     """Собрать XLSX за день. plate_fmt — display_plate из ядра (без циклического импорта)."""
     fmt = plate_fmt or (lambda value: str(value or '—'))
-    total, unique, avg = report_summary(events)
-
-    summary_rows = [
-        [f'Проезды за {day}'],
-        ['Всего проездов', total],
-        ['Разных номеров', unique],
-        ['Средняя скорость', avg],
-        ['Сформирован', datetime.now().strftime('%Y-%m-%d %H:%M:%S')],
-    ]
-    detail_rows = [[
-        'Дата', 'Время', 'Номер', 'Цвет', 'Тип',
-        'Скорость, км/ч', 'Направление', 'Полоса', 'Источник',
+    rows = [[
+        'Дата', 'Время', 'Номер', 'Цвет', 'Тип', 'Направление', 'Источник',
     ]]
     for event in events:
-        detail_rows.append([
+        rows.append([
             day,
             event.get('time', ''),
             fmt(event.get('plate', '—')),
             event.get('color', '') or '—',
             event.get('type', '') or '—',
-            event.get('speed', '') or '—',
             event.get('direction', '') or '—',
-            event.get('lane', '') or '—',
             'архив' if event.get('backfill') else 'живой',
         ])
     if not events:
-        detail_rows.append([day, '—', 'проездов не зафиксировано'])
+        rows.append([day, '—', 'проездов не зафиксировано'])
 
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, 'w', zipfile.ZIP_DEFLATED) as archive:
@@ -160,7 +143,5 @@ def build_report_xlsx(day: str, events: list[dict], plate_fmt=None) -> bytes:
         archive.writestr('xl/_rels/workbook.xml.rels', _WORKBOOK_RELS)
         archive.writestr('xl/styles.xml', _STYLES)
         archive.writestr('xl/worksheets/sheet1.xml',
-                         _sheet(summary_rows, [26, 22], header=False))
-        archive.writestr('xl/worksheets/sheet2.xml',
-                         _sheet(detail_rows, [12, 10, 18, 14, 14, 16, 14, 10, 10], freeze=True))
+                         _sheet(rows, [14, 11, 20, 14, 14, 16, 12]))
     return buffer.getvalue()

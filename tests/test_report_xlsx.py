@@ -1,8 +1,8 @@
 """Отчёт в XLSX: структура файла и доставка в Telegram.
 
-Генератор без внешних зависимостей: проверяем, что это настоящий zip с двумя
-вкладками, что данные и экранирование корректны, и что при отказе отправки
-файла отчёт не теряется — уходит текстом через существующую очередь.
+Генератор без внешних зависимостей: проверяем, что это настоящий zip с одной
+вкладкой «Проезды», что данные и экранирование корректны, и что при отказе
+отправки файла отчёт не теряется — уходит текстом через существующую очередь.
 """
 from tests import anpr_testenv  # noqa: F401  — изоляция от боевых данных
 
@@ -29,19 +29,22 @@ def _parts(data: bytes) -> dict:
 
 
 class XlsxStructureTests(unittest.TestCase):
-    def test_two_sheets_with_expected_names(self):
+    def test_single_sheet_named_proezdy(self):
         parts = _parts(build_report_xlsx('2026-11-22', EVENTS))
         self.assertIn('xl/worksheets/sheet1.xml', parts)
-        self.assertIn('xl/worksheets/sheet2.xml', parts)
-        self.assertIn('name="Итоги"', parts['xl/workbook.xml'])
+        self.assertNotIn('xl/worksheets/sheet2.xml', parts)
         self.assertIn('name="Проезды"', parts['xl/workbook.xml'])
+        self.assertNotIn('Итоги', parts['xl/workbook.xml'])
         self.assertTrue(all(name in parts for name in (
             '[Content_Types].xml', '_rels/.rels', 'xl/styles.xml')))
 
     def test_detail_sheet_has_header_and_each_event(self):
         parts = _parts(build_report_xlsx('2026-11-22', EVENTS))
-        sheet = parts['xl/worksheets/sheet2.xml']
+        sheet = parts['xl/worksheets/sheet1.xml']
         self.assertIn('Номер', sheet)
+        self.assertIn('Источник', sheet)
+        self.assertNotIn('Скорость', sheet)
+        self.assertNotIn('Полоса', sheet)
         self.assertIn('01A123BC', sheet)
         self.assertIn('02B456DE', sheet)
         self.assertIn(f'<row r="{len(EVENTS) + 1}">', sheet)
@@ -49,7 +52,7 @@ class XlsxStructureTests(unittest.TestCase):
     def test_special_characters_are_escaped(self):
         events = [dict(EVENTS[0], plate='A&B <C>')]
         parts = _parts(build_report_xlsx('2026-11-22', events))
-        sheet = parts['xl/worksheets/sheet2.xml']
+        sheet = parts['xl/worksheets/sheet1.xml']
         self.assertIn('A&amp;B &lt;C&gt;', sheet)
         self.assertNotIn('<C>', sheet)
 
@@ -60,7 +63,7 @@ class XlsxStructureTests(unittest.TestCase):
 
     def test_empty_report_still_valid(self):
         parts = _parts(build_report_xlsx('2026-11-22', []))
-        self.assertIn('проездов не зафиксировано', parts['xl/worksheets/sheet2.xml'])
+        self.assertIn('проездов не зафиксировано', parts['xl/worksheets/sheet1.xml'])
         self.assertEqual(report_summary([])[0], 0)
 
 

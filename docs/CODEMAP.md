@@ -88,7 +88,7 @@ app/ui/shell.py (AppShell) ─► header.py ─► service_panel.py / status.py 
 | `preferences.py` | настройки панели и автозапуск Windows (реестр) | `get_autostart`/`set_autostart`, `startup_command`, `get_minimize_to_tray`/`set_minimize_to_tray` | `ui/shell.py`, `ui/settings.py` |
 | `window_state.py` | положение и размер окна между запусками | `parse_geometry`, `format_geometry`, `state_from_geometry`, `load_state`, `save_state`, `within_bounds` | `ui/shell.py` |
 | `system_events.py` | операционный журнал в памяти (кольцевой буфер) | `EventLog.add`, `EventLog.snapshot`, `EVENTS` | `core/anpr_telegram.py`, `services/http_api.py` (`GET /events`) |
-| `report_xlsx.py` | генерация XLSX-отчёта без внешних зависимостей (две вкладки, inlineStr) | `build_report_xlsx`, `report_summary` | `core/anpr_telegram.py` (`send_report_for_day`) |
+| `report_xlsx.py` | генерация XLSX-отчёта без внешних зависимостей (одна вкладка «Проезды», inlineStr) | `build_report_xlsx`, `report_summary` | `core/anpr_telegram.py` (`send_report_for_day`) |
 
 ### 4.2 `app/services/`
 
